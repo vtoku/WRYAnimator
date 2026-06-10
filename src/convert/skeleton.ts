@@ -74,6 +74,79 @@ if (BONE_PARENTS.length !== BONE_COUNT) {
   throw new Error("skeleton: parent table does not cover all bones");
 }
 
+/**
+ * Unity HumanBodyBones name → MotionBuilder / HumanIK template name. These are
+ * the names MotionBuilder's Characterization auto-detects (also the Mixamo
+ * convention sans prefix), so an FBX exported with them characterizes without
+ * manual slot mapping. Unity names are kept as the default for Unity/Warudo
+ * re-import, where renaming would break name-keyed retargeting.
+ */
+export const MOTIONBUILDER_NAMES: Record<string, string> = {
+  Hips: "Hips",
+  Spine: "Spine",
+  Chest: "Spine1",
+  UpperChest: "Spine2",
+  Neck: "Neck",
+  Head: "Head",
+  LeftEye: "LeftEye",
+  RightEye: "RightEye",
+  Jaw: "Jaw",
+  LeftShoulder: "LeftShoulder",
+  LeftUpperArm: "LeftArm",
+  LeftLowerArm: "LeftForeArm",
+  LeftHand: "LeftHand",
+  RightShoulder: "RightShoulder",
+  RightUpperArm: "RightArm",
+  RightLowerArm: "RightForeArm",
+  RightHand: "RightHand",
+  LeftUpperLeg: "LeftUpLeg",
+  LeftLowerLeg: "LeftLeg",
+  LeftFoot: "LeftFoot",
+  LeftToes: "LeftToeBase",
+  RightUpperLeg: "RightUpLeg",
+  RightLowerLeg: "RightLeg",
+  RightFoot: "RightFoot",
+  RightToes: "RightToeBase",
+  LeftThumbProximal: "LeftHandThumb1",
+  LeftThumbIntermediate: "LeftHandThumb2",
+  LeftThumbDistal: "LeftHandThumb3",
+  LeftIndexProximal: "LeftHandIndex1",
+  LeftIndexIntermediate: "LeftHandIndex2",
+  LeftIndexDistal: "LeftHandIndex3",
+  LeftMiddleProximal: "LeftHandMiddle1",
+  LeftMiddleIntermediate: "LeftHandMiddle2",
+  LeftMiddleDistal: "LeftHandMiddle3",
+  LeftRingProximal: "LeftHandRing1",
+  LeftRingIntermediate: "LeftHandRing2",
+  LeftRingDistal: "LeftHandRing3",
+  LeftLittleProximal: "LeftHandPinky1",
+  LeftLittleIntermediate: "LeftHandPinky2",
+  LeftLittleDistal: "LeftHandPinky3",
+  RightThumbProximal: "RightHandThumb1",
+  RightThumbIntermediate: "RightHandThumb2",
+  RightThumbDistal: "RightHandThumb3",
+  RightIndexProximal: "RightHandIndex1",
+  RightIndexIntermediate: "RightHandIndex2",
+  RightIndexDistal: "RightHandIndex3",
+  RightMiddleProximal: "RightHandMiddle1",
+  RightMiddleIntermediate: "RightHandMiddle2",
+  RightMiddleDistal: "RightHandMiddle3",
+  RightRingProximal: "RightHandRing1",
+  RightRingIntermediate: "RightHandRing2",
+  RightRingDistal: "RightHandRing3",
+  RightLittleProximal: "RightHandPinky1",
+  RightLittleIntermediate: "RightHandPinky2",
+  RightLittleDistal: "RightHandPinky3",
+};
+
+export type NameScheme = "unity" | "motionbuilder";
+
+/** Remap a Unity HumanBodyBones name list to the chosen export scheme. */
+export function remapNames(unityNames: string[], scheme: NameScheme): string[] {
+  if (scheme === "unity") return unityNames.slice();
+  return unityNames.map((n) => MOTIONBUILDER_NAMES[n] ?? n);
+}
+
 /** children[i] = indices of bones whose parent is i. */
 export function childrenOf(parents: number[]): number[][] {
   const out: number[][] = parents.map(() => []);

@@ -2,6 +2,7 @@ import "./style.css";
 import { parseWanim, BONE_COUNT, type WanimClip } from "./wanim/parse.ts";
 import { convertCharacter, resample, type ConvertedClip } from "./convert/clip.ts";
 import { writeAnimationFbx } from "./fbx/animationFbx.ts";
+import { remapNames, type NameScheme } from "./convert/skeleton.ts";
 import { sanitizeFilename, downloadText } from "./fbx/export.ts";
 import { PreviewScene } from "./preview/scene.ts";
 
@@ -65,6 +66,20 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
         <option value="120">120 fps</option>
       </select>
     </label>
+    <label class="field">
+      <span>Bone names</span>
+      <select id="names">
+        <option value="unity" selected>Unity (HumanBodyBones)</option>
+        <option value="motionbuilder">MotionBuilder / HumanIK</option>
+      </select>
+    </label>
+    <label class="field">
+      <span>Rest pose</span>
+      <select id="rest">
+        <option value="tpose" selected>T-pose</option>
+        <option value="first">First frame</option>
+      </select>
+    </label>
     <button id="download" class="button primary">Download FBX</button>
     <p class="note">The preview head is a stand-in driven by the recorded ARKit
       blendshapes (face data is not part of the FBX). The exported FBX is
@@ -77,6 +92,8 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
   const scrub = document.getElementById("scrub") as HTMLInputElement;
   const timecode = document.getElementById("timecode") as HTMLElement;
   const fpsSel = document.getElementById("fps") as HTMLSelectElement;
+  const namesSel = document.getElementById("names") as HTMLSelectElement;
+  const restSel = document.getElementById("rest") as HTMLSelectElement;
   const downloadBtn = document.getElementById("download") as HTMLButtonElement;
   const resetBtn = document.getElementById("reset") as HTMLButtonElement;
 
@@ -110,7 +127,12 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
       try {
         const fps = Number(fpsSel.value);
         const resampled = resample(loaded!.converted, fps);
-        const fbx = writeAnimationFbx(resampled, { takeName: sanitizeFilename(loaded!.name) });
+        const names = remapNames(resampled.names, namesSel.value as NameScheme);
+        const fbx = writeAnimationFbx(resampled, {
+          takeName: sanitizeFilename(loaded!.name),
+          names,
+          tposeRest: restSel.value === "tpose",
+        });
         downloadText(`${sanitizeFilename(loaded!.name)}.fbx`, fbx);
       } catch (err) {
         showError(err instanceof Error ? err.message : String(err));

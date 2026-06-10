@@ -85,10 +85,10 @@ export class PreviewScene {
     if (!head) return;
     face.group.parent?.remove(face.group);
     head.add(face.group);
-    // Seat the head: ~0.2 m tall, lifted above the neck-top joint, turned to
-    // face the same way as the body (skeleton faces -Z after the Unity flip).
-    face.group.scale.setScalar(0.2);
-    face.group.position.set(0, 0.1, 0);
+    // Seat the head: ~0.25 m tall, sitting just above the neck-top joint,
+    // turned to face the same way as the body (skeleton faces -Z post-flip).
+    face.group.scale.setScalar(0.25);
+    face.group.position.set(0, 0.05, 0);
     face.group.rotation.set(0, Math.PI, 0);
     face.bindNames(this.clip.face.names);
     this.faceWeights = new Float32Array(this.clip.face.names.length);

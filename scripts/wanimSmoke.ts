@@ -4,6 +4,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { parseWanim } from "../src/wanim/parse.ts";
 import { convertCharacter, resample } from "../src/convert/clip.ts";
 import { writeAnimationFbx } from "../src/fbx/animationFbx.ts";
+import { remapNames } from "../src/convert/skeleton.ts";
 
 const file = process.argv[2];
 const out = process.argv[3];
@@ -28,9 +29,14 @@ console.log(`resampled  ${resampled.frameCount} frames @ ${resampled.fps} fps`);
 const hips0 = resampled.localPos[0][0].map((v) => (v * 100).toFixed(1));
 console.log(`hips(cm)   [${hips0.join(", ")}] at frame 0`);
 
-const fbx = writeAnimationFbx(resampled, { takeName: "Take 001" });
+const mbNames = remapNames(resampled.names, "motionbuilder");
+const fbx = writeAnimationFbx(resampled, { takeName: "Take 001", names: mbNames, tposeRest: true });
 const lines = fbx.split("\n").length;
-console.log(`fbx        ${(fbx.length / 1e6).toFixed(2)} MB, ${lines} lines`);
+console.log(`fbx        ${(fbx.length / 1e6).toFixed(2)} MB, ${lines} lines (MoBu names, T-pose rest)`);
+for (const need of ["LeftArm", "LeftForeArm", "LeftUpLeg", "Spine1", "LeftHandThumb1"]) {
+  if (!fbx.includes(`Model::${need}`)) throw new Error(`MoBu name missing: ${need}`);
+}
+console.log(`names      MoBu scheme present (LeftArm, LeftForeArm, LeftUpLeg, Spine1, LeftHandThumb1)`);
 
 // Sanity: balanced { } braces, expected sections present.
 let depth = 0;

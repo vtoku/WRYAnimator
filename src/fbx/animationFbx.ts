@@ -40,11 +40,21 @@ function unwrapDegrees(values: number[]): void {
 export interface WriteAnimOpts {
   /** "Take" / animation-stack name. */
   takeName?: string;
+  /** Bone names to write (e.g. MotionBuilder scheme). Defaults to clip.names. */
+  names?: string[];
+  /**
+   * Make the skeleton's rest/default pose a T-pose (identity bone rotations).
+   * The animation curves still play the recorded motion; only the node-default
+   * rotation changes, so DCC tools see a clean T-pose for characterization.
+   */
+  tposeRest?: boolean;
 }
 
 export function writeAnimationFbx(clip: ResampledClip, opts: WriteAnimOpts = {}): string {
   const takeName = opts.takeName ?? "Take 001";
-  const { frameCount, fps, names, parents } = clip;
+  const { frameCount, fps, parents } = clip;
+  const names = opts.names ?? clip.names;
+  const tposeRest = opts.tposeRest ?? false;
   const boneCount = names.length;
 
   // Per-frame key times (shared by every curve).
@@ -180,9 +190,10 @@ export function writeAnimationFbx(clip: ResampledClip, opts: WriteAnimOpts = {})
     const tx = bind[0] * METERS_TO_CM;
     const ty = bind[1] * METERS_TO_CM;
     const tz = bind[2] * METERS_TO_CM;
-    const e0x = eulerX[i][0];
-    const e0y = eulerY[i][0];
-    const e0z = eulerZ[i][0];
+    // Rest pose: identity rotation (T-pose) or the recorded frame-0 rotation.
+    const e0x = tposeRest ? 0 : eulerX[i][0];
+    const e0y = tposeRest ? 0 : eulerY[i][0];
+    const e0z = tposeRest ? 0 : eulerZ[i][0];
 
     w(`\tModel: ${boneModelId[i]}, "Model::${name}", "LimbNode" {`);
     w("\t\tVersion: 232");
