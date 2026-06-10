@@ -1,0 +1,10 @@
+node_modules
+dist
+dist-ssr
+*.local
+*.wanim
+.DS_Store
+.vite
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
