@@ -3,6 +3,11 @@ dist
 dist-ssr
 *.local
 *.wanim
+# verification artifacts (scripts/driveApp.mjs, fbxLoadCheck.mjs, smoke)
+scripts/*.fbx
+scripts/*.png
+scripts/*.log
+scripts/downloaded.*
 .DS_Store
 .vite
 npm-debug.log*

@@ -38,9 +38,10 @@ Hosted on **GitHub Pages** at `https://vtoku.github.io/WANIMxFBX/` (repo `vtoku/
 
 ## Stack (mirror VRMxShogun)
 
-- **Vite + TypeScript**, static build to `dist/`. **Three.js** for the 3D motion preview (animate a stick-figure/bone visualization reconstructed from the file — see template `src/convert/boneViz.ts`).
-- Decode msgpack + LZ4 in the browser with the same dependency-free approach as `scripts/inspectWanim.mjs` (the format subset used is small); avoid pulling heavy libraries.
-- FBX output: **ASCII FBX 7.x, hand-rolled writer** (never binary — debuggable, widely accepted). Start from the template's `src/fbx/asciiFbx.ts` and add animation sections.
+- **Vite + TypeScript**, static build to `dist/`. **Three.js** drives the 3D motion preview (`src/preview/scene.ts` — an Object3D bone hierarchy rendered as a LineSegments + Points stick figure).
+- msgpack + LZ4 are decoded in-browser by hand-written, dependency-free modules (`src/wanim/msgpack.ts`, `lz4.ts`); the format subset is small, so avoid pulling heavy libraries.
+- FBX output is a **hand-rolled ASCII FBX 7.4 writer** (`src/fbx/animationFbx.ts`) — never binary (ASCII is debuggable and widely accepted).
+- `playwright` is a devDependency used only by `npm run drive` for headless browser verification; it is not shipped.
 
 ## Commands
 
@@ -49,24 +50,32 @@ npm install
 npm run dev        # Vite dev server
 npm run build      # tsc --noEmit && vite build
 npm run preview    # serve built dist/ — ALWAYS test the Pages base path here, not just dev
-npm run smoke -- <file.wanim>   # parse a real recording with src/wanim/parse.ts, print summary
+npm run smoke    -- <file.wanim> [out.fbx]   # parse → convert → resample → write FBX, brace/section sanity check
+npm run fbxcheck -- <file.fbx>               # load an emitted FBX back with three's FBXLoader, report bones+clip
+npm run drive    -- [file.wanim]             # Playwright: drive the running dev server, screenshot, test download
 ```
 
-No tests/linter configured yet. When adding them, document the single-test invocation here.
+No unit-test framework yet — the three `npm run` scripts above are the regression checks (they import the real `src/` modules). `node --experimental-strip-types` runs the TS directly: see the gotcha below.
 
-## Pipeline
+## Build / runtime gotchas
+
+- **TS imports MUST carry the `.ts` extension** (`import { x } from "./foo.ts"`). The smoke scripts run under Node's `--experimental-strip-types`, which does no path resolution; `tsconfig` has `allowImportingTsExtensions: true` and Vite handles it for the browser build.
+- **No TS-only runtime syntax in strip-only mode**: no `constructor(private x)` parameter properties, no enums, no decorators. `src/wanim/msgpack.ts` uses an explicit field + assignment for exactly this reason.
+
+## Pipeline (implemented)
 
 ```
 .wanim (drag/drop, whole page)
-  → LZ4BlockArray decode → msgpack decode → typed WanimClip
-      { version, times[], characters: [{ bonePositions, boneRotations, blendshapes, rootPos, rootRot }] }
-  → skeleton reconstruction: bind-pose local offsets (frame 0 of field 2) + HumanBodyBones names
-  → resample variable timestamps → fixed rate (e.g. 60 fps), Unity→FBX axis/handedness conversion, quat→Euler
-  → ASCII FBX writer: LimbNode skeleton + AnimationStack/Layer/CurveNodes/Curves
-  → download .fbx
+  → src/wanim/parse.ts:  LZ4BlockArray decode (lz4.ts) → msgpack decode (msgpack.ts) → WanimClip
+  → src/convert/clip.ts: convertCharacter() — Unity LH→RH (negate Z; quat→(-x,-y,z,w)), bake root into Hips,
+                          sign-continuous quats. Output = ConvertedClip (variable-rate, used directly by preview).
+                          resample() → ResampledClip (fixed fps, linear pos / slerp rot) for export.
+  → src/fbx/animationFbx.ts: ASCII FBX 7.4 — LimbNode skeleton + AnimationStack/Layer, per-bone Lcl Rotation
+                          curves + Hips Lcl Translation curve. meters→cm, Y-up.
+  → src/preview/scene.ts: Three.js Object3D bone hierarchy driven per-frame; LineSegments + Points stick figure.
 ```
 
-Keep the parser output-agnostic from the FBX writer, as in the template.
+`src/convert/skeleton.ts` holds the Unity HumanBodyBones parent table; `src/convert/quat.ts` holds quat math + the quat→Euler-ZYX extraction. The parser is output-agnostic from the writer.
 
 ## GitHub Pages deployment (same traps as VRMxShogun)
 
@@ -76,7 +85,9 @@ Keep the parser output-agnostic from the FBX writer, as in the template.
 
 ## Domain knowledge that is easy to get wrong
 
-- **FBX animation curves**: each animated property needs an `AnimationCurveNode` connected to both the layer and the model property (`Lcl Translation` / `Lcl Rotation`), and per-component `AnimationCurve`s connected with `OP` connections (`d|X`, `d|Y`, `d|Z`). Times are in FBX ticks (`KTime` = 1/46186158000 s).
-- **Hips vs. root**: field 5/6 (character root) and field 2/3 bone 0 (hips, root-relative) must compose. Bake root motion into the hips (or emit a root node) — pick one and document it.
-- **Variable frame timing**: timestamps come from render frames, not a fixed clock. Resampling (linear pos / slerp rot) is required for clean fixed-rate output; don't write the raw irregular keys without deliberate choice.
-- **Blendshape channels** (field 4) are out of scope until skeleton animation is verified; they only matter if a mesh with matching morph targets is exported, which this file format cannot supply by itself.
+- **FBX animation curves**: each animated property needs an `AnimationCurveNode` connected to both the layer (`OO`) and the model property (`OP` with `"Lcl Translation"`/`"Lcl Rotation"`), and per-component `AnimationCurve`s connected with `OP` + `d|X`/`d|Y`/`d|Z`. Times are FBX ticks (`FBX_TIME_SECOND = 46186158000`). A `Takes:` block is emitted for older importers.
+- **Rotation order is THE thing to verify in a real DCC.** We extract quaternion→Euler in three.js 'ZYX' order (`quatToEulerZYX`) and write it with the default `RotationOrder`, because three's FBXLoader maps FBX's default onto ZYX — and the round-trip check (`npm run fbxcheck`) confirms it reconstructs 55 bones + a clip with the hips traveling. **The preview (quaternion-driven) is always correct; the FBX Euler order is the risk.** If limbs twist/spin in Blender/Maya but the preview looked fine, the fallback is to try XYZ extraction + matching `RotationOrder`. Euler tracks are unwrapped (`unwrapDegrees`) and quats made sign-continuous to prevent 360° pops.
+- **Hips vs. root**: `convertCharacter` bakes the character root (fields 5/6) into the Hips, so Hips (the FBX root LimbNode, parented to scene) carries full world translation+rotation; all other bones stay local-to-parent. Limb bones export rotation curves only; their translation is constant at the frame-0 bind offset.
+- **Variable frame timing**: timestamps are render frames, not a fixed clock (~57–60 fps, irregular). `resample()` is mandatory before export; the preview instead plays the raw timestamps in real time so it needs no resampling.
+- **Bone positions are local-to-parent** (e.g. LeftLowerLeg ≈ `(0,−0.40,0.01)` = thigh length), EXCEPT Hips which is character-root-relative. Don't treat them as world positions.
+- **Blendshape channels** (field 4) are parsed and counted but not exported — they'd only matter with a mesh carrying matching morph targets, which `.wanim` cannot supply.

@@ -8,13 +8,18 @@ https://vtoku.github.io/WANIMxFBX/
 
 Reads a `.wanim` file recorded in [Warudo](https://warudo.app/) and exports an `.fbx` containing the recorded skeleton animation. Conversion runs locally in the browser — the file is not uploaded.
 
-**Status: early.** The `.wanim` decoder works (drop a file to inspect it); FBX export and 3D preview are in progress.
-
 ## How to use
 
 1. Drag a `.wanim` file onto the page (or click to select one).
-2. Review the recording details.
-3. Download FBX *(coming soon)*.
+2. Watch the animated skeleton in the 3D preview; scrub or pause with the transport bar.
+3. Pick an export frame rate and click **Download FBX**.
+4. Import the FBX into Blender, Maya, MotionBuilder, etc.
+
+The FBX contains a 55-bone Unity humanoid skeleton (original bone names preserved) with per-bone rotation curves and root (hips) translation, in a single take. It is Y-up, in centimetres.
+
+## Not included
+
+Mesh, textures, blendshapes/morphs, spring bones, and props are not exported — `.wanim` records joint motion, not geometry.
 
 ## Trademarks
 
