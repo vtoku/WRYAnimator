@@ -1,7 +1,7 @@
 import { chromium } from "playwright";
 import { readFileSync } from "node:fs";
 
-const URL = "http://localhost:5173/WANIMxFBX/";
+const URL = process.env.APP_URL ?? "http://localhost:5173/WANIMxFBX/";
 const WANIM = process.argv[2] ?? "C:\\Users\\VTOKU\\Downloads\\2026-03-18-03-37-56.wanim";
 
 const browser = await chromium.launch();
