@@ -111,11 +111,11 @@ export class PreviewScene {
     if (!head) return;
     face.group.parent?.remove(face.group);
     head.add(face.group);
-    // Seat the head: ~0.25 m tall, sitting just above the neck-top joint,
-    // turned to face the same way as the body (skeleton faces -Z post-flip).
+    // Seat the head: ~0.25 m tall, just above the neck-top joint. No rotation:
+    // the facecap head faces +Z, the same way the converted skeleton faces.
     face.group.scale.setScalar(0.25);
     face.group.position.set(0, 0.05, 0);
-    face.group.rotation.set(0, Math.PI, 0);
+    face.group.rotation.set(0, 0, 0);
     face.bindNames(this.clip.face.names);
     this.faceWeights = new Float32Array(this.clip.face.names.length);
   }
@@ -139,9 +139,8 @@ export class PreviewScene {
       return o;
     });
     const root = new THREE.Group();
-    // The Unity→right-handed Z-flip leaves the performer facing -Z (away from
-    // the default camera). Turn the whole rig to face the viewer for preview.
-    root.rotation.y = Math.PI;
+    // The converted clip already faces +Z (the HIK convention), which is also
+    // toward the preview camera — no display rotation needed.
     clip.parents.forEach((p, i) => {
       if (p >= 0) nodes[p].add(nodes[i]);
       else root.add(nodes[i]);

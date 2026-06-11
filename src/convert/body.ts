@@ -24,21 +24,61 @@ export interface BodyMeshData {
   skinWeight: Float32Array;
 }
 
-let cache: Promise<BodyMeshData[]> | null = null;
+let gltfCache: Promise<{ scene: THREE.Object3D }> | null = null;
+
+function loadBodyGltf(): Promise<{ scene: THREE.Object3D }> {
+  if (gltfCache) return gltfCache;
+  const loader = new GLTFLoader();
+  loader.setMeshoptDecoder(MeshoptDecoder);
+  gltfCache = loader.loadAsync(`${import.meta.env.BASE_URL}body.glb`);
+  return gltfCache;
+}
+
+// buildBodyData results depend on the skeleton's bind, so cache per-bind.
+let bodyCache: { key: string; data: Promise<BodyMeshData[]> } | null = null;
 
 export function buildBodyData(
   parents: number[],
   bindPos: Vec3[],
   unityNames: string[],
 ): Promise<BodyMeshData[]> {
-  if (cache) return cache;
-  cache = (async () => {
-    const loader = new GLTFLoader();
-    loader.setMeshoptDecoder(MeshoptDecoder);
-    const gltf = await loader.loadAsync(`${import.meta.env.BASE_URL}body.glb`);
-    return extractBodyMeshes(gltf.scene, parents, bindPos, unityNames);
-  })();
-  return cache;
+  const key = bindPos.map((p) => p.map((v) => v.toFixed(4)).join(",")).join(";");
+  if (bodyCache?.key === key) return bodyCache.data;
+  const data = loadBodyGltf().then((gltf) =>
+    extractBodyMeshes(gltf.scene, parents, bindPos, unityNames),
+  );
+  bodyCache = { key, data };
+  return data;
+}
+
+/** Xbot joint world positions per OUR bone index (meters; null if unmapped). */
+export function bodyJointsForBones(scene: THREE.Object3D, unityNames: string[]): (Vec3 | null)[] {
+  scene.updateWorldMatrix(true, true);
+  let skeleton: THREE.Skeleton | null = null;
+  scene.traverse((o) => {
+    const m = o as THREE.SkinnedMesh;
+    if (m.isSkinnedMesh) skeleton = m.skeleton;
+  });
+  if (!skeleton) return unityNames.map(() => null);
+  const sk = skeleton as THREE.Skeleton;
+  const byName = new Map<string, number>();
+  sk.bones.forEach((b, j) => byName.set(b.name.replace(/^mixamorig:?/, ""), j));
+  return unityNames.map((u) => {
+    const j = byName.get(MOTIONBUILDER_NAMES[u] ?? u);
+    if (j === undefined) return null;
+    const p = new THREE.Vector3().setFromMatrixPosition(
+      new THREE.Matrix4().copy(sk.boneInverses[j]).invert(),
+    );
+    return [p.x, p.y, p.z];
+  });
+}
+
+/** Browser-side cached loader for the Xbot joints. */
+let jointsCache: Promise<(Vec3 | null)[]> | null = null;
+export function getBodyJoints(unityNames: string[]): Promise<(Vec3 | null)[]> {
+  if (jointsCache) return jointsCache;
+  jointsCache = loadBodyGltf().then((gltf) => bodyJointsForBones(gltf.scene, unityNames));
+  return jointsCache;
 }
 
 /** Pure retarget/extract step (also usable from node checks on a parsed GLTF). */
@@ -81,23 +121,38 @@ export function extractBodyMeshes(
       });
       const boneIsHead = boneOurIndex.map((i) => i === headIdx || eyeIdx.includes(i));
 
-      // Per-bone re-bake = uniform height scale + translation (ourJoint −
-      // s·xbotJoint). The full translate∘inverseBind form mixes Xbot's armature
-      // scale (cm vs m) into the result; scale-then-delta keeps orientation
-      // intact, blends smoothly across weights, and sizes Xbot's volume to the
-      // recorded character. Both rigs are Y-up T-poses.
+      // Per-bone re-bake: v' = ourJoint + s_j · (v − xbotJoint), where s_j is
+      // the SEGMENT length ratio (our bone length / Xbot bone length). Pure
+      // translation alone squashes the torso / bloats the hips wherever the
+      // two rigs' joint spacing differs; per-segment scale maps each mesh
+      // chunk to the recorded character's proportions. Both rigs are Y-up
+      // T-poses, so no rotation is needed.
       const jointWorld = skeleton.bones.map((_, j) =>
         new THREE.Vector3().setFromMatrixPosition(new THREE.Matrix4().copy(skeleton.boneInverses[j]).invert()),
       );
-      const xbotHips = jointWorld[skeleton.bones.findIndex((b) => /Hips$/.test(b.name))] ?? jointWorld[0];
-      const s = xbotHips.y > 1e-3 ? ourWorld[0][1] / xbotHips.y : 1;
-      const deltas = skeleton.bones.map((_, j) => {
-        const t = ourWorld[boneOurIndex[j]];
-        return new THREE.Vector3(
-          t[0] - jointWorld[j].x * s,
-          t[1] - jointWorld[j].y * s,
-          t[2] - jointWorld[j].z * s,
-        );
+      const xbotChild = skeleton.bones.map((b) => {
+        const childBone = b.children.find((c) => (c as THREE.Bone).isBone);
+        return childBone ? skeleton.bones.indexOf(childBone as THREE.Bone) : -1;
+      });
+      const ourChild: number[] = unityNames.map(() => -1);
+      parents.forEach((p, i) => {
+        if (p >= 0 && ourChild[p] < 0) ourChild[p] = i;
+      });
+      const segLen = (a: Vec3, b: Vec3) => Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+      const boneScale = skeleton.bones.map((b, j) => {
+        const m = boneOurIndex[j];
+        // Segment = joint→first child; for leaves use the parent segment.
+        let xLen = 0;
+        if (xbotChild[j] >= 0) xLen = jointWorld[j].distanceTo(jointWorld[xbotChild[j]]);
+        else if (b.parent && (b.parent as THREE.Bone).isBone) {
+          const pj = skeleton.bones.indexOf(b.parent as THREE.Bone);
+          if (pj >= 0) xLen = jointWorld[pj].distanceTo(jointWorld[j]);
+        }
+        let oLen = 0;
+        if (ourChild[m] >= 0) oLen = segLen(ourWorld[m], ourWorld[ourChild[m]]);
+        else if (parents[m] >= 0) oLen = segLen(ourWorld[parents[m]], ourWorld[m]);
+        if (xLen < 1e-4 || oLen < 1e-4) return 1;
+        return Math.min(2.5, Math.max(0.3, oLen / xLen));
       });
 
       const geo = m.geometry;
@@ -118,21 +173,30 @@ export function extractBodyMeshes(
 
       const v = new THREE.Vector3();
       const n = new THREE.Vector3();
+      const acc = new THREE.Vector3();
       const normalMat = new THREE.Matrix3().getNormalMatrix(bindMatrix);
 
       for (let i = 0; i < count; i++) {
-        v.fromBufferAttribute(pos, i).applyMatrix4(bindMatrix).multiplyScalar(s);
+        v.fromBufferAttribute(pos, i).applyMatrix4(bindMatrix);
         n.fromBufferAttribute(nrm, i).applyMatrix3(normalMat).normalize();
+        acc.set(0, 0, 0);
         for (let k = 0; k < 4; k++) {
           const j = sIdx.getComponent(i, k);
           const w = sWgt.getComponent(i, k);
           if (w === 0) continue;
-          v.addScaledVector(deltas[j], w);
-          outIdx[i * 4 + k] = boneOurIndex[j];
+          // Offset from the Xbot joint, segment-scaled, placed at our joint.
+          // No rotation: the converted skeleton is turned to face +Z (HIK
+          // requirement), the same way Xbot faces.
+          const m = boneOurIndex[j];
+          const sc = boneScale[j];
+          acc.x += w * (ourWorld[m][0] + (v.x - jointWorld[j].x) * sc);
+          acc.y += w * (ourWorld[m][1] + (v.y - jointWorld[j].y) * sc);
+          acc.z += w * (ourWorld[m][2] + (v.z - jointWorld[j].z) * sc);
+          outIdx[i * 4 + k] = m;
           outWgt[i * 4 + k] = w;
           if (boneIsHead[j]) headWeight[i] += w;
         }
-        outPos[i * 3] = v.x; outPos[i * 3 + 1] = v.y; outPos[i * 3 + 2] = v.z;
+        outPos[i * 3] = acc.x; outPos[i * 3 + 1] = acc.y; outPos[i * 3 + 2] = acc.z;
         outNrm[i * 3] = n.x; outNrm[i * 3 + 1] = n.y; outNrm[i * 3 + 2] = n.z;
       }
 

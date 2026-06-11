@@ -52,10 +52,13 @@ function extractFace(
   return { names, tracks };
 }
 
-// Unity (left-handed, +Z forward) → right-handed Y-up: negate Z.
-// A position mirrors directly; a rotation quaternion's x,y components flip sign.
-const flipPos = (p: Vec3): Vec3 => [p[0], p[1], -p[2]];
-const flipQuat = (q: Quat): Quat => [-q[0], -q[1], q[2], q[3]];
+// Unity (left-handed, +Z forward) → right-handed Y-up by negating X (NOT Z).
+// Both are valid handedness flips, but the X-mirror keeps the character facing
+// +Z with its left side at +x — the convention MotionBuilder's HIK
+// characterization requires (a −Z-facing T-pose makes its auto-mapping mirror
+// the legs/feet). Positions mirror x; quaternions negate the y,z components.
+const flipPos = (p: Vec3): Vec3 => [-p[0], p[1], p[2]];
+const flipQuat = (q: Quat): Quat => [q[0], -q[1], -q[2], q[3]];
 
 function ensureContinuity(track: Quat[]): void {
   for (let i = 1; i < track.length; i++) {
@@ -125,6 +128,45 @@ export interface ResampledClip {
 
 function lerp(a: number, b: number, t: number): number {
   return a + (b - a) * t;
+}
+
+/**
+ * Re-proportion the clip onto a different skeleton (e.g. Ybot): replaces the
+ * bind offsets with the target's joint layout while keeping the recorded
+ * local ROTATIONS (rotations transfer across proportions); the hips world
+ * translation is scaled by the hips-height ratio so the root motion matches
+ * the new leg length. Bones the target lacks (e.g. Jaw) keep their original
+ * offsets scaled uniformly.
+ */
+export function retargetProportions(c: ConvertedClip, targetJoints: (Vec3 | null)[]): ConvertedClip {
+  const ourWorld = bindWorldPositions(c.parents, c.bindPos);
+  const ourHipsY = ourWorld[0][1] || 1;
+  const tgtHipsY = targetJoints[0]?.[1] || ourHipsY;
+  const s = tgtHipsY / ourHipsY;
+
+  const newBind: Vec3[] = c.bindPos.map((p, i) => {
+    const t = targetJoints[i];
+    const parent = c.parents[i];
+    const tp = parent >= 0 ? targetJoints[parent] : null;
+    if (t && (parent < 0 || tp)) {
+      return parent < 0
+        ? [t[0], t[1], t[2]]
+        : [t[0] - tp![0], t[1] - tp![1], t[2] - tp![2]];
+    }
+    return [p[0] * s, p[1] * s, p[2] * s];
+  });
+
+  const frames = c.times.length;
+  const localPos: Vec3[][] = c.localPos.map((track, b) => {
+    if (b === 0) {
+      // Hips world translation: scale the recorded travel by the height ratio.
+      return track.map((p): Vec3 => [p[0] * s, p[1] * s, p[2] * s]);
+    }
+    // Limb bones are rigid: constant new bind offset.
+    return new Array(frames).fill(newBind[b]);
+  });
+
+  return { ...c, localPos, bindPos: newBind };
 }
 
 /**

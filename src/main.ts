@@ -1,11 +1,11 @@
 import "./style.css";
 import { parseWanim, BONE_COUNT, type WanimClip } from "./wanim/parse.ts";
-import { convertCharacter, resample, type ConvertedClip } from "./convert/clip.ts";
+import { convertCharacter, resample, retargetProportions, type ConvertedClip } from "./convert/clip.ts";
 import { cleanClip, type CleanOpts } from "./convert/clean.ts";
 import { writeAnimationFbx, type SkinnedMeshExport } from "./fbx/animationFbx.ts";
 import { remapNames, type NameScheme } from "./convert/skeleton.ts";
 import { buildFaceMesh } from "./convert/meshExport.ts";
-import { buildBodyData, bodyToSkinnedMeshExports } from "./convert/body.ts";
+import { buildBodyData, bodyToSkinnedMeshExports, getBodyJoints } from "./convert/body.ts";
 import { sanitizeFilename, downloadBytes } from "./fbx/export.ts";
 import { PreviewScene } from "./preview/scene.ts";
 import { loadFaceMeshData } from "./preview/face.ts";
@@ -21,7 +21,13 @@ const panel = document.getElementById("panel") as HTMLElement;
 
 let preview: PreviewScene | null = null;
 let transport: Transport | null = null;
-let loaded: { name: string; clip: WanimClip; converted: ConvertedClip; cleaned: ConvertedClip } | null = null;
+let loaded: {
+  name: string;
+  clip: WanimClip;
+  converted: ConvertedClip;
+  /** After cleaning + optional Ybot re-proportioning — what preview/export use. */
+  display: ConvertedClip;
+} | null = null;
 
 function showError(message: string) {
   errorEl.textContent = message;
@@ -102,6 +108,13 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
       </select>
     </label>
     <label class="field">
+      <span>Proportions</span>
+      <select id="proportions">
+        <option value="recorded" selected>Recorded avatar</option>
+        <option value="ybot">Ybot skeleton</option>
+      </select>
+    </label>
+    <label class="field">
       <span>Face blendshapes</span>
       <input id="face" type="checkbox" ${converted.face ? "checked" : "disabled"} />
     </label>
@@ -126,6 +139,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
   const fpsSel = document.getElementById("fps") as HTMLSelectElement;
   const namesSel = document.getElementById("names") as HTMLSelectElement;
   const restSel = document.getElementById("rest") as HTMLSelectElement;
+  const propSel = document.getElementById("proportions") as HTMLSelectElement;
   const faceChk = document.getElementById("face") as HTMLInputElement;
   const bodyChk = document.getElementById("body") as HTMLInputElement;
   const downloadBtn = document.getElementById("download") as HTMLButtonElement;
@@ -138,12 +152,20 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     cutoffHz: Number(cutoff.value),
   });
 
-  function reclean() {
+  async function reclean() {
     if (!loaded || !preview) return;
     const opts = cleanOpts();
-    loaded.cleaned = opts.despike || opts.smooth ? cleanClip(loaded.converted, opts) : loaded.converted;
+    let display = opts.despike || opts.smooth ? cleanClip(loaded.converted, opts) : loaded.converted;
+    if (propSel.value === "ybot") {
+      try {
+        display = retargetProportions(display, await getBodyJoints(display.names));
+      } catch (err) {
+        showError(err instanceof Error ? err.message : String(err));
+      }
+    }
+    loaded.display = display;
     const trim = transport?.getTrim();
-    preview.setClip(loaded.cleaned); // duration is unchanged; this resets the pose
+    preview.setClip(display); // duration is unchanged; this resets the pose
     if (trim) preview.setTrim(trim.start, trim.end); // keep the user's trim
   }
 
@@ -151,8 +173,9 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
   cutoffVal.value = `${cutoff.value} Hz`;
   despikeDeg.addEventListener("input", () => { despikeVal.value = `${despikeDeg.value}°`; });
   cutoff.addEventListener("input", () => { cutoffVal.value = `${cutoff.value} Hz`; });
-  for (const c of [despikeChk, smoothChk]) c.addEventListener("change", reclean);
-  for (const r of [despikeDeg, cutoff]) r.addEventListener("change", reclean);
+  for (const c of [despikeChk, smoothChk]) c.addEventListener("change", () => void reclean());
+  for (const r of [despikeDeg, cutoff]) r.addEventListener("change", () => void reclean());
+  propSel.addEventListener("change", () => void reclean());
 
   downloadBtn.addEventListener("click", async () => {
     if (!loaded) return;
@@ -161,8 +184,8 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     await new Promise((r) => setTimeout(r, 16));
     try {
       const fps = Number(fpsSel.value);
-      const trim = transport?.getTrim() ?? { start: 0, end: loaded.cleaned.duration };
-      const resampled = resample(loaded.cleaned, fps, trim.start, trim.end);
+      const trim = transport?.getTrim() ?? { start: 0, end: loaded.display.duration };
+      const resampled = resample(loaded.display, fps, trim.start, trim.end);
       const names = remapNames(resampled.names, namesSel.value as NameScheme);
       const meshes: SkinnedMeshExport[] = [];
       if (faceChk.checked && resampled.face) {
@@ -209,7 +232,7 @@ async function handleFile(file: File) {
       return;
     }
     const converted = convertCharacter(clip, 0);
-    loaded = { name: file.name, clip, converted, cleaned: converted };
+    loaded = { name: file.name, clip, converted, display: converted };
 
     emptyState.hidden = true;
     loadedState.hidden = false;
