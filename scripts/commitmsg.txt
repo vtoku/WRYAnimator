@@ -1,24 +1,14 @@
-v0.6.0: viewport transport + trim, mocap cleaning, modern FBX for MotionBuilder
+Fix FBX footer code so MotionBuilder loads the animation (not just skeleton)
 
-MotionBuilder import fixes (was: legacy warning, dots, no take):
-- Emit modern binary FBX 7700 with a binary FileId + CreationTime, SceneInfo,
-  and the Document's ActiveAnimStackName (so MoBu sets the current take).
-- Remove the legacy "Takes" section (deprecated since FBX 7.4 — its presence
-  made MoBu treat the file as legacy). The AnimationStack is the take; it now
-  carries Version + LocalStart/Stop + ReferenceStart/Stop. AnimationLayer gets
-  a Properties70 (Weight/BlendMode/...). NodeAttributes get Color/Size/LimbLength.
-- Add a "Reference" Null root above the Hips so the Hips isn't the skeleton root.
+MoBu imported a T-pose skeleton but dropped the animation and warned "legacy
+file" — the FBX SDK legacy/compatibility mode. Root cause: the binary footer
+code must be a computed encryption of the creation timestamp (per
+hamish-milne/FbxWriter), not a generic constant; the SDK validates it and
+falls back to legacy when it mismatches, which loads Models but skips the
+AnimationStack graph.
 
-Editing:
-- Transport bar overlaid on the 3D viewport: play/pause, click-to-seek timeline
-  with draggable in/out trim handles; trim flows end-to-end into the export
-  (resample() honors trimStart/trimEnd, rebased to t=0).
-- Mocap cleaning (convert/clean.ts): despike pops/hand-flips + zero-phase
-  Butterworth smoothing, with UI sliders; applied to preview and export.
-- Fix viewport overflowing the window (panel now scrolls internally; overlay
-  stays visible).
-
-Verified: FBXLoader round-trip (55 bones, take, 56+ tracks), trimmed export
-(134s -> 67s), browser drive with cleaning + face, no console errors.
+- fbxBinary.ts: compute footer code = Encrypt(sourceId, mangledTime, key,
+  mangledTime) from a fixed timestamp; header FileId = sourceId; FBX 7500.
+- animationFbx.ts: FileId = SOURCE_ID, CreationTimeStamp = FBX_TIMESTAMP.
 
 Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>

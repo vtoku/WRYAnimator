@@ -2,16 +2,10 @@ import type { ResampledClip } from "../convert/clip.ts";
 import type { Vec3 } from "../wanim/parse.ts";
 import { quatToEulerZYX, RAD2DEG } from "../convert/quat.ts";
 import {
-  serializeFbxBinary, node, objName, type FbxNode, type FbxProp,
+  serializeFbxBinary, node, objName, SOURCE_ID, FBX_TIMESTAMP,
+  type FbxNode, type FbxProp,
   I, L, D, C, S, R, aI, aL, aF, aD,
 } from "./fbxBinary.ts";
-
-// assimp's generic FileId — the FBX SDK pairs this header id with the footer
-// code; using the same well-known constants makes the file read as a valid
-// modern binary FBX (not "legacy").
-const GENERIC_FILEID = new Uint8Array([
-  0x28, 0xb3, 0x2a, 0xeb, 0xb6, 0x24, 0xcc, 0xc2, 0xbf, 0xc8, 0xb0, 0x2a, 0xa9, 0x2b, 0xfc, 0xf1,
-]);
 
 // Builds a binary FBX 7500 skeletal animation: a LimbNode skeleton driven by an
 // AnimationStack/Layer with per-bone Lcl Rotation curves and a Hips Lcl
@@ -342,12 +336,12 @@ export function writeAnimationFbx(clip: ResampledClip, opts: WriteAnimOpts = {})
   // ---- top-level ---------------------------------------------------------
   const header = node("FBXHeaderExtension", [], [
     node("FBXHeaderVersion", [I(1003)]),
-    node("FBXVersion", [I(7700)]),
+    node("FBXVersion", [I(7500)]),
     node("EncryptionType", [I(0)]),
     node("CreationTimeStamp", [], [
       node("Version", [I(1000)]),
-      node("Year", [I(2026)]), node("Month", [I(1)]), node("Day", [I(1)]),
-      node("Hour", [I(0)]), node("Minute", [I(0)]), node("Second", [I(0)]), node("Millisecond", [I(0)]),
+      node("Year", [I(FBX_TIMESTAMP.year)]), node("Month", [I(FBX_TIMESTAMP.month)]), node("Day", [I(FBX_TIMESTAMP.day)]),
+      node("Hour", [I(FBX_TIMESTAMP.hour)]), node("Minute", [I(FBX_TIMESTAMP.minute)]), node("Second", [I(FBX_TIMESTAMP.second)]), node("Millisecond", [I(FBX_TIMESTAMP.millisecond)]),
     ]),
     node("Creator", [S("WANIMxFBX")]),
     node("SceneInfo", [S(objName("GlobalInfo", "SceneInfo")), S("UserData")], [
@@ -364,7 +358,7 @@ export function writeAnimationFbx(clip: ResampledClip, opts: WriteAnimOpts = {})
       ]),
     ]),
   ]);
-  const fileId = node("FileId", [R(GENERIC_FILEID)]);
+  const fileId = node("FileId", [R(SOURCE_ID)]);
   const creationTime = node("CreationTime", [S("1970-01-01 10:00:00:000")]);
   const creator = node("Creator", [S("WANIMxFBX")]);
 
@@ -420,5 +414,5 @@ export function writeAnimationFbx(clip: ResampledClip, opts: WriteAnimOpts = {})
     node("Connections", [], conns),
   ];
 
-  return serializeFbxBinary(top, 7700);
+  return serializeFbxBinary(top, 7500);
 }

@@ -152,14 +152,49 @@ function writeNode(w: ByteWriter, n: FbxNode) {
   w.patchU64(endOffsetPos, w.len);
 }
 
-const FOOT_ID = new Uint8Array([
-  0xfa, 0xbc, 0xab, 0x09, 0xd0, 0xc8, 0xd4, 0x66, 0xb1, 0x76, 0xfb, 0x83, 0x1c, 0xf7, 0x26, 0x7e,
+// FBX SDK footer constants (per hamish-milne/FbxWriter). The footer code is
+// NOT a fixed value — the SDK validates it as an encryption of the creation
+// timestamp; getting it wrong makes MotionBuilder treat the file as "legacy"
+// and skip the animation. The header FileId must equal SOURCE_ID.
+export const SOURCE_ID = new Uint8Array([
+  0x58, 0xab, 0xa9, 0xf0, 0x6c, 0xa2, 0xd8, 0x3f, 0x4d, 0x47, 0x49, 0xa3, 0xb4, 0xb2, 0xe7, 0x3d,
+]);
+const FOOT_KEY = new Uint8Array([
+  0xe2, 0x4f, 0x7b, 0x5f, 0xcd, 0xe4, 0xc8, 0x6d, 0xdb, 0xd8, 0xfb, 0xd7, 0x40, 0x58, 0xc6, 0x78,
 ]);
 const FOOT_MAGIC = new Uint8Array([
   0xf8, 0x5a, 0x8c, 0x6a, 0xde, 0xf5, 0xd9, 0x7e, 0xec, 0xe9, 0x0c, 0xe3, 0x75, 0x8f, 0x29, 0x0b,
 ]);
 
-export function serializeFbxBinary(top: FbxNode[], version = 7700): Uint8Array {
+/** Fixed creation timestamp; the header CreationTimeStamp must match this. */
+export const FBX_TIMESTAMP = { year: 2026, month: 1, day: 1, hour: 0, minute: 0, second: 0, millisecond: 0 };
+
+function encryptInPlace(a: Uint8Array, b: Uint8Array): void {
+  let c = 64;
+  for (let i = 0; i < 16; i++) {
+    a[i] = (a[i] ^ (c ^ b[i])) & 0xff;
+    c = a[i];
+  }
+}
+
+const pad2 = (n: number) => String(n).padStart(2, "0");
+const pad4 = (n: number) => String(n).padStart(4, "0");
+
+/** Footer code = Encrypt(sourceId, mangledTime, key, mangledTime). */
+function generateFooterCode(ts: typeof FBX_TIMESTAMP): Uint8Array {
+  const mangled =
+    pad2(ts.second) + pad2(ts.month) + pad2(ts.hour) + pad2(ts.day) +
+    pad2(Math.floor(ts.millisecond / 10)) + pad4(ts.year) + pad2(ts.minute);
+  const mb = new Uint8Array(16);
+  for (let i = 0; i < 16; i++) mb[i] = mangled.charCodeAt(i);
+  const code = SOURCE_ID.slice();
+  encryptInPlace(code, mb);
+  encryptInPlace(code, FOOT_KEY);
+  encryptInPlace(code, mb);
+  return code;
+}
+
+export function serializeFbxBinary(top: FbxNode[], version = 7500): Uint8Array {
   const w = new ByteWriter();
   // Header: "Kaydara FBX Binary  \x00\x1a\x00" (23 bytes) + version u32.
   w.ascii("Kaydara FBX Binary  ");
@@ -169,8 +204,8 @@ export function serializeFbxBinary(top: FbxNode[], version = 7700): Uint8Array {
   for (const n of top) writeNode(w, n);
   w.zeros(NULL_RECORD_LEN); // top-level list terminator
 
-  // Footer (assimp layout).
-  w.bytes(FOOT_ID);
+  // Footer: computed footer code, 16-byte alignment pad, version, zero block, magic.
+  w.bytes(generateFooterCode(FBX_TIMESTAMP));
   const pad = 16 - (w.len % 16); // 1..16
   w.zeros(pad);
   w.zeros(4);
