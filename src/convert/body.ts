@@ -292,6 +292,14 @@ export function extractBodyMeshes(
     }
   });
 
+  // Per-bone girth trim (perpendicular-to-axis), applied during transfer.
+  const girthFor = (mi: number): number => {
+    const u = unityNames[mi];
+    if (/^(Chest|UpperChest)$|Shoulder/.test(u)) return 0.9;
+    if (/UpperArm|LowerArm/.test(u)) return 0.9;
+    return 1;
+  };
+
   // Per-bone segment-length stretch ratio (mean over children on both sides).
   const segLen = (a: Vec3, b: Vec3) => Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
   const mean = (xs: number[]) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 0);
@@ -345,10 +353,17 @@ export function extractBodyMeshes(
         const oy = v.y - jointWorld[j].y;
         const oz = v.z - jointWorld[j].z;
         const axial = ox * ax.x + oy * ax.y + oz * ax.z;
-        const stretch = axial * (boneScale[j] - 1);
-        acc.x += w * (ourWorld[mi][0] + ox + ax.x * stretch);
-        acc.y += w * (ourWorld[mi][1] + oy + ax.y * stretch);
-        acc.z += w * (ourWorld[mi][2] + oz + ax.z * stretch);
+        // Axial part stretched by the segment ratio; perpendicular part
+        // (girth) trimmed per bone — the asset's heroic upper body reads
+        // oversized next to the face head.
+        const g = girthFor(mi);
+        const px = (ox - ax.x * axial) * g;
+        const py = (oy - ax.y * axial) * g;
+        const pz = (oz - ax.z * axial) * g;
+        const na = axial * boneScale[j];
+        acc.x += w * (ourWorld[mi][0] + px + ax.x * na);
+        acc.y += w * (ourWorld[mi][1] + py + ax.y * na);
+        acc.z += w * (ourWorld[mi][2] + pz + ax.z * na);
         outIdx[i * 4 + k] = mi;
         outWgt[i * 4 + k] = w;
         wsum += w;
@@ -358,17 +373,21 @@ export function extractBodyMeshes(
       outPos[i * 3] = acc.x; outPos[i * 3 + 1] = acc.y; outPos[i * 3 + 2] = acc.z;
     }
 
-    // Drop head triangles (Face mesh replaces them), then compact verts.
+    // Drop only the HEAD geometry: triangles whose verts are all weighted to
+    // head bones AND sit above the head joint (keeps the whole neck; the cut
+    // follows the mesh's horizontal loop at the head joint and hides inside
+    // the Face mesh). Then compact verts.
+    const cutY = ourWorld[headIdx] ? ourWorld[headIdx][1] - 0.015 : Infinity;
     const srcIndices = geo.index
       ? (geo.index.array as ArrayLike<number>)
       : Array.from({ length: count }, (_, i) => i);
     const keptTris: number[] = [];
+    const aboveCut = (vi: number) =>
+      headWeight[vi] > 0.5 && outPos[vi * 3 + 1] > cutY;
     for (let t = 0; t < srcIndices.length; t += 3) {
       const a = srcIndices[t], b2 = srcIndices[t + 1], c2 = srcIndices[t + 2];
-      const hw = (headWeight[a] + headWeight[b2] + headWeight[c2]) / 3;
-      // Aggressive cut: partially-head-weighted boundary tris leave spiky
-      // collar geometry if kept.
-      if (hw < 0.2) keptTris.push(a, b2, c2);
+      if (aboveCut(a) && aboveCut(b2) && aboveCut(c2)) continue;
+      keptTris.push(a, b2, c2);
     }
     const remap = new Int32Array(count).fill(-1);
     let next = 0;
