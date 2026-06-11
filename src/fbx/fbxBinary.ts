@@ -152,11 +152,20 @@ function writeNode(w: ByteWriter, n: FbxNode) {
   w.patchU64(endOffsetPos, w.len);
 }
 
-// FBX SDK footer constants (per hamish-milne/FbxWriter). The footer code is
-// NOT a fixed value — the SDK validates it as an encryption of the creation
-// timestamp; getting it wrong makes MotionBuilder treat the file as "legacy"
-// and skip the animation. The header FileId must equal SOURCE_ID.
-export const SOURCE_ID = new Uint8Array([
+// FBX SDK header/footer constants, matching Blender's io_scene_fbx "timedate
+// hack" exactly: the SDK validates the 16-byte footer code as an encryption of
+// the CreationTime string; mismatch => MotionBuilder "legacy file" mode, which
+// loads the skeleton but silently drops the animation graph. Blender pins
+// CreationTime to 1970-01-01 10:00:00:000 and writes the matching constant
+// footer code + FileId. We compute the code (verified == Blender's constant
+// for that timestamp) so the relationship stays explicit.
+export const FILE_ID = new Uint8Array([
+  0x28, 0xb3, 0x2a, 0xeb, 0xb6, 0x24, 0xcc, 0xc2, 0xbf, 0xc8, 0xb0, 0x2a, 0xa9, 0x2b, 0xfc, 0xf1,
+]);
+export const CREATION_TIME = "1970-01-01 10:00:00:000";
+export const FBX_TIMESTAMP = { year: 1970, month: 1, day: 1, hour: 10, minute: 0, second: 0, millisecond: 0 };
+
+const SOURCE_ID = new Uint8Array([
   0x58, 0xab, 0xa9, 0xf0, 0x6c, 0xa2, 0xd8, 0x3f, 0x4d, 0x47, 0x49, 0xa3, 0xb4, 0xb2, 0xe7, 0x3d,
 ]);
 const FOOT_KEY = new Uint8Array([
@@ -165,9 +174,6 @@ const FOOT_KEY = new Uint8Array([
 const FOOT_MAGIC = new Uint8Array([
   0xf8, 0x5a, 0x8c, 0x6a, 0xde, 0xf5, 0xd9, 0x7e, 0xec, 0xe9, 0x0c, 0xe3, 0x75, 0x8f, 0x29, 0x0b,
 ]);
-
-/** Fixed creation timestamp; the header CreationTimeStamp must match this. */
-export const FBX_TIMESTAMP = { year: 2026, month: 1, day: 1, hour: 0, minute: 0, second: 0, millisecond: 0 };
 
 function encryptInPlace(a: Uint8Array, b: Uint8Array): void {
   let c = 64;
@@ -204,11 +210,13 @@ export function serializeFbxBinary(top: FbxNode[], version = 7500): Uint8Array {
   for (const n of top) writeNode(w, n);
   w.zeros(NULL_RECORD_LEN); // top-level list terminator
 
-  // Footer: computed footer code, 16-byte alignment pad, version, zero block, magic.
+  // Footer, byte-for-byte in Blender's order: footer code, 4 zero bytes,
+  // pad to 16-byte alignment (16 if already aligned), version, 120 zeros, magic.
   w.bytes(generateFooterCode(FBX_TIMESTAMP));
-  const pad = 16 - (w.len % 16); // 1..16
-  w.zeros(pad);
   w.zeros(4);
+  const ofs = w.len;
+  const pad = ((ofs + 15) & ~15) === ofs ? 16 : ((ofs + 15) & ~15) - ofs;
+  w.zeros(pad);
   w.u32(version);
   w.zeros(120);
   w.bytes(FOOT_MAGIC);

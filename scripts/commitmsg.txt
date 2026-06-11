@@ -1,14 +1,23 @@
-Fix FBX footer code so MotionBuilder loads the animation (not just skeleton)
+Match Blender's proven FBX binary recipe exactly (header/footer/Takes)
 
-MoBu imported a T-pose skeleton but dropped the animation and warned "legacy
-file" — the FBX SDK legacy/compatibility mode. Root cause: the binary footer
-code must be a computed encryption of the creation timestamp (per
-hamish-milne/FbxWriter), not a generic constant; the SDK validates it and
-falls back to legacy when it mismatches, which loads Models but skips the
-AnimationStack graph.
+Blender's io_scene_fbx is the reference non-SDK FBX writer whose output
+MotionBuilder accepts without legacy warnings. Diffed against it and fixed:
 
-- fbxBinary.ts: compute footer code = Encrypt(sourceId, mangledTime, key,
-  mangledTime) from a fixed timestamp; header FileId = sourceId; FBX 7500.
-- animationFbx.ts: FileId = SOURCE_ID, CreationTimeStamp = FBX_TIMESTAMP.
+- FileId must be the 28 b3 2a eb... constant (was sourceId 58 ab...).
+- The footer code pairs with the CreationTime STRING; Blender pins
+  "1970-01-01 10:00:00:000" + the fa bc ab 09... code (its "timedate hack").
+  Our generateFooterCode() now uses that timestamp — and provably reproduces
+  Blender's constant, validating the algorithm end-to-end.
+- Footer byte order corrected to Blender's: code, 4 zeros, pad-to-16
+  (16 if aligned), version, 120 zeros, magic (the 4 zeros and pad were
+  swapped before).
+- Re-add the Takes node (Current + Take/FileName/LocalTime/ReferenceTime):
+  Blender writes it and MoBu uses it to list the take; removing it earlier
+  blamed the wrong thing.
+- Richer SceneInfo Properties70 (DocumentUrl, Original|*, LastSaved|*).
+
+Hex-verified emitted bytes: FileId, footer code, magic, version 7500,
+CreationTime string, Takes node. FBXLoader round-trip still 55 bones /
+56 tracks / correct duration.
 
 Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>

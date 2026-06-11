@@ -2,7 +2,7 @@ import type { ResampledClip } from "../convert/clip.ts";
 import type { Vec3 } from "../wanim/parse.ts";
 import { quatToEulerZYX, RAD2DEG } from "../convert/quat.ts";
 import {
-  serializeFbxBinary, node, objName, SOURCE_ID, FBX_TIMESTAMP,
+  serializeFbxBinary, node, objName, FILE_ID, CREATION_TIME, FBX_TIMESTAMP,
   type FbxNode, type FbxProp,
   I, L, D, C, S, R, aI, aL, aF, aD,
 } from "./fbxBinary.ts";
@@ -356,10 +356,25 @@ export function writeAnimationFbx(clip: ResampledClip, opts: WriteAnimOpts = {})
         node("Revision", [S("")]),
         node("Comment", [S("")]),
       ]),
+      node("Properties70", [], [
+        P("DocumentUrl", S("KString"), S("Url"), S(""), S("/animation.fbx")),
+        P("SrcDocumentUrl", S("KString"), S("Url"), S(""), S("/animation.fbx")),
+        P("Original", S("Compound"), S(""), S("")),
+        P("Original|ApplicationVendor", S("KString"), S(""), S(""), S("WANIMxFBX")),
+        P("Original|ApplicationName", S("KString"), S(""), S(""), S("WANIMxFBX")),
+        P("Original|ApplicationVersion", S("KString"), S(""), S(""), S("1.0")),
+        P("Original|DateTime_GMT", S("DateTime"), S(""), S(""), S("01/01/1970 10:00:00.000")),
+        P("Original|FileName", S("KString"), S(""), S(""), S("/animation.fbx")),
+        P("LastSaved", S("Compound"), S(""), S("")),
+        P("LastSaved|ApplicationVendor", S("KString"), S(""), S(""), S("WANIMxFBX")),
+        P("LastSaved|ApplicationName", S("KString"), S(""), S(""), S("WANIMxFBX")),
+        P("LastSaved|ApplicationVersion", S("KString"), S(""), S(""), S("1.0")),
+        P("LastSaved|DateTime_GMT", S("DateTime"), S(""), S(""), S("01/01/1970 10:00:00.000")),
+      ]),
     ]),
   ]);
-  const fileId = node("FileId", [R(SOURCE_ID)]);
-  const creationTime = node("CreationTime", [S("1970-01-01 10:00:00:000")]);
+  const fileId = node("FileId", [R(FILE_ID)]);
+  const creationTime = node("CreationTime", [S(CREATION_TIME)]);
   const creator = node("Creator", [S("WANIMxFBX")]);
 
   const globalSettings = node("GlobalSettings", [], [
@@ -399,8 +414,17 @@ export function writeAnimationFbx(clip: ResampledClip, opts: WriteAnimOpts = {})
     ]),
   ]);
 
-  // No legacy "Takes" section — deprecated since FBX 7.4; its presence makes
-  // MotionBuilder treat the file as legacy. The AnimationStack IS the take.
+  // Takes: Blender writes this alongside the AnimationStack and its output
+  // imports into MotionBuilder cleanly — MoBu uses it to list/select the take.
+  const takes = node("Takes", [], [
+    node("Current", [S("")]),
+    node("Take", [S(takeName)], [
+      node("FileName", [S(`${takeName.replace(/\s+/g, "_")}.tak`)]),
+      node("LocalTime", [L(0), L(stopTime)]),
+      node("ReferenceTime", [L(0), L(stopTime)]),
+    ]),
+  ]);
+
   const top: FbxNode[] = [
     header,
     fileId,
@@ -412,6 +436,7 @@ export function writeAnimationFbx(clip: ResampledClip, opts: WriteAnimOpts = {})
     definitions,
     node("Objects", [], objects),
     node("Connections", [], conns),
+    takes,
   ];
 
   return serializeFbxBinary(top, 7500);
