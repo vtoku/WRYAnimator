@@ -3,8 +3,15 @@ import type { Vec3 } from "../wanim/parse.ts";
 import { quatToEulerZYX, RAD2DEG } from "../convert/quat.ts";
 import {
   serializeFbxBinary, node, objName, type FbxNode, type FbxProp,
-  I, L, D, C, S, aI, aL, aF, aD,
+  I, L, D, C, S, R, aI, aL, aF, aD,
 } from "./fbxBinary.ts";
+
+// assimp's generic FileId — the FBX SDK pairs this header id with the footer
+// code; using the same well-known constants makes the file read as a valid
+// modern binary FBX (not "legacy").
+const GENERIC_FILEID = new Uint8Array([
+  0x28, 0xb3, 0x2a, 0xeb, 0xb6, 0x24, 0xcc, 0xc2, 0xbf, 0xc8, 0xb0, 0x2a, 0xa9, 0x2b, 0xfc, 0xf1,
+]);
 
 // Builds a binary FBX 7500 skeletal animation: a LimbNode skeleton driven by an
 // AnimationStack/Layer with per-bone Lcl Rotation curves and a Hips Lcl
@@ -83,6 +90,8 @@ export function writeAnimationFbx(clip: ResampledClip, opts: WriteAnimOpts = {})
   // IDs.
   let nextId = 1000000;
   const id = () => ++nextId;
+  const referenceId = id();
+  const referenceAttrId = id();
   const boneModelId = names.map(() => id());
   const boneAttrId = names.map(() => id());
   const stackId = id();
@@ -93,9 +102,30 @@ export function writeAnimationFbx(clip: ResampledClip, opts: WriteAnimOpts = {})
   // ---- Objects -----------------------------------------------------------
   const objects: FbxNode[] = [];
 
+  // Reference root (a Null transform at the origin) so the Hips is NOT the
+  // skeleton root — gives DCC retargeting a stable reference node above the rig.
+  objects.push(node("NodeAttribute", [L(referenceAttrId), S(objName("", "NodeAttribute")), S("Null")], [
+    node("TypeFlags", [S("Null")]),
+  ]));
+  objects.push(node("Model", [L(referenceId), S(objName("Reference", "Model")), S("Null")], [
+    node("Version", [I(232)]),
+    node("Properties70", [], [
+      P("InheritType", S("enum"), S(""), S(""), I(1)),
+      P("Lcl Translation", S("Lcl Translation"), S(""), S("A"), D(0), D(0), D(0)),
+      P("Lcl Rotation", S("Lcl Rotation"), S(""), S("A"), D(0), D(0), D(0)),
+      P("Lcl Scaling", S("Lcl Scaling"), S(""), S("A"), D(1), D(1), D(1)),
+    ]),
+    node("Shading", [C(true)]),
+    node("Culling", [S("CullingOff")]),
+  ]));
+
   names.forEach((name, i) => {
     objects.push(node("NodeAttribute", [L(boneAttrId[i]), S(objName("", "NodeAttribute")), S("LimbNode")], [
-      node("Properties70", [], [P("Size", S("double"), S("Number"), S(""), D(1))]),
+      node("Properties70", [], [
+        P("Color", S("ColorRGB"), S("Color"), S(""), D(0.8), D(0.8), D(0.8)),
+        P("Size", S("double"), S("Number"), S(""), D(10)),
+        P("LimbLength", S("double"), S("Number"), S("H"), D(5)),
+      ]),
       node("TypeFlags", [S("Skeleton")]),
     ]));
 
@@ -121,11 +151,21 @@ export function writeAnimationFbx(clip: ResampledClip, opts: WriteAnimOpts = {})
 
   objects.push(node("AnimationStack", [L(stackId), S(objName(takeName, "AnimStack")), S("")], [
     node("Properties70", [], [
+      P("Description", S("KString"), S(""), S(""), S("")),
+      P("LocalStart", S("KTime"), S("Time"), S(""), L(0)),
       P("LocalStop", S("KTime"), S("Time"), S(""), L(stopTime)),
+      P("ReferenceStart", S("KTime"), S("Time"), S(""), L(0)),
       P("ReferenceStop", S("KTime"), S("Time"), S(""), L(stopTime)),
     ]),
   ]));
-  objects.push(node("AnimationLayer", [L(layerId), S(objName("BaseLayer", "AnimLayer")), S("")]));
+  objects.push(node("AnimationLayer", [L(layerId), S(objName("BaseLayer", "AnimLayer")), S("")], [
+    node("Properties70", [], [
+      P("Weight", S("Number"), S(""), S("A"), D(100)),
+      P("BlendMode", S("enum"), S(""), S(""), I(0)),
+      P("RotationAccumulationMode", S("enum"), S(""), S(""), I(0)),
+      P("ScaleAccumulationMode", S("enum"), S(""), S(""), I(0)),
+    ]),
+  ]));
 
   const curveNode = (nodeId: number, label: string, defs: [number, number, number]): FbxNode =>
     node("AnimationCurveNode", [L(nodeId), S(objName(label, "AnimCurveNode")), S("")], [
@@ -262,8 +302,10 @@ export function writeAnimationFbx(clip: ResampledClip, opts: WriteAnimOpts = {})
   const OP = (src: number, dst: number, prop: string) =>
     conns.push(node("C", [S("OP"), L(src), L(dst), S(prop)]));
 
+  OO(referenceId, 0);
+  OO(referenceAttrId, referenceId);
   names.forEach((_, i) => {
-    OO(boneModelId[i], parents[i] >= 0 ? boneModelId[parents[i]] : 0);
+    OO(boneModelId[i], parents[i] >= 0 ? boneModelId[parents[i]] : referenceId);
     OO(boneAttrId[i], boneModelId[i]);
   });
   OO(layerId, stackId);
@@ -300,14 +342,31 @@ export function writeAnimationFbx(clip: ResampledClip, opts: WriteAnimOpts = {})
   // ---- top-level ---------------------------------------------------------
   const header = node("FBXHeaderExtension", [], [
     node("FBXHeaderVersion", [I(1003)]),
-    node("FBXVersion", [I(7500)]),
+    node("FBXVersion", [I(7700)]),
+    node("EncryptionType", [I(0)]),
     node("CreationTimeStamp", [], [
       node("Version", [I(1000)]),
       node("Year", [I(2026)]), node("Month", [I(1)]), node("Day", [I(1)]),
       node("Hour", [I(0)]), node("Minute", [I(0)]), node("Second", [I(0)]), node("Millisecond", [I(0)]),
     ]),
     node("Creator", [S("WANIMxFBX")]),
+    node("SceneInfo", [S(objName("GlobalInfo", "SceneInfo")), S("UserData")], [
+      node("Type", [S("UserData")]),
+      node("Version", [I(100)]),
+      node("MetaData", [], [
+        node("Version", [I(100)]),
+        node("Title", [S("")]),
+        node("Subject", [S("")]),
+        node("Author", [S("WANIMxFBX")]),
+        node("Keywords", [S("")]),
+        node("Revision", [S("")]),
+        node("Comment", [S("")]),
+      ]),
+    ]),
   ]);
+  const fileId = node("FileId", [R(GENERIC_FILEID)]);
+  const creationTime = node("CreationTime", [S("1970-01-01 10:00:00:000")]);
+  const creator = node("Creator", [S("WANIMxFBX")]);
 
   const globalSettings = node("GlobalSettings", [], [
     node("Version", [I(1000)]),
@@ -322,37 +381,44 @@ export function writeAnimationFbx(clip: ResampledClip, opts: WriteAnimOpts = {})
       P("OriginalUpAxisSign", S("int"), S("Integer"), S(""), I(1)),
       P("UnitScaleFactor", S("double"), S("Number"), S(""), D(1)),
       P("OriginalUnitScaleFactor", S("double"), S("Number"), S(""), D(1)),
+      P("AmbientColor", S("ColorRGB"), S("Color"), S(""), D(0), D(0), D(0)),
+      P("DefaultCamera", S("KString"), S(""), S(""), S("Producer Perspective")),
       P("TimeMode", S("enum"), S(""), S(""), I(11)),
-      P("CustomFrameRate", S("double"), S("Number"), S(""), D(fps)),
+      P("TimeProtocol", S("enum"), S(""), S(""), I(2)),
+      P("SnapOnFrameMode", S("enum"), S(""), S(""), I(0)),
       P("TimeSpanStart", S("KTime"), S("Time"), S(""), L(0)),
       P("TimeSpanStop", S("KTime"), S("Time"), S(""), L(stopTime)),
+      P("CustomFrameRate", S("double"), S("Number"), S(""), D(fps)),
+      P("CurrentTimeMarker", S("int"), S("Integer"), S(""), I(-1)),
     ]),
   ]);
 
+  const docId = id();
   const documents = node("Documents", [], [
     node("Count", [I(1)]),
-    node("Document", [L(id()), S(""), S("Scene")], [node("RootNode", [I(0)])]),
-  ]);
-
-  const takes = node("Takes", [], [
-    node("Current", [S(takeName)]),
-    node("Take", [S(takeName)], [
-      node("FileName", [S(`${takeName.replace(/\s+/g, "_")}.tak`)]),
-      node("LocalTime", [L(0), L(stopTime)]),
-      node("ReferenceTime", [L(0), L(stopTime)]),
+    node("Document", [L(docId), S("Scene"), S("Scene")], [
+      node("Properties70", [], [
+        P("SourceObject", S("object"), S(""), S("")),
+        P("ActiveAnimStackName", S("KString"), S(""), S(""), S(takeName)),
+      ]),
+      node("RootNode", [L(0)]),
     ]),
   ]);
 
+  // No legacy "Takes" section — deprecated since FBX 7.4; its presence makes
+  // MotionBuilder treat the file as legacy. The AnimationStack IS the take.
   const top: FbxNode[] = [
     header,
+    fileId,
+    creationTime,
+    creator,
     globalSettings,
     documents,
     node("References", []),
     definitions,
     node("Objects", [], objects),
     node("Connections", [], conns),
-    takes,
   ];
 
-  return serializeFbxBinary(top, 7500);
+  return serializeFbxBinary(top, 7700);
 }

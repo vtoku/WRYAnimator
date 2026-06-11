@@ -9,6 +9,8 @@ export interface PlaybackState {
   time: number;
   duration: number;
   playing: boolean;
+  trimStart: number;
+  trimEnd: number;
 }
 
 /**
@@ -37,6 +39,8 @@ export class PreviewScene {
 
   private time = 0;
   private playing = false;
+  private trimStart = 0;
+  private trimEnd = 0;
   private onState: ((s: PlaybackState) => void) | null = null;
 
   private ro: ResizeObserver;
@@ -159,11 +163,21 @@ export class PreviewScene {
     this.faceWeights = null;
     this.attachFace();
 
+    this.trimStart = 0;
+    this.trimEnd = clip.duration;
     this.time = 0;
     this.playing = true;
     this.applyPose(0);
     this.frameCamera();
     this.emitState();
+  }
+
+  /** Restrict playback looping to [start, end] (seconds). Scrubbing is unaffected. */
+  setTrim(start: number, end: number) {
+    if (!this.clip) return;
+    this.trimStart = Math.max(0, Math.min(this.clip.duration, start));
+    this.trimEnd = Math.max(this.trimStart, Math.min(this.clip.duration, end));
+    if (this.time < this.trimStart || this.time > this.trimEnd) this.seek(this.trimStart);
   }
 
   /** Map a playback time (seconds from clip start) to a frame index + fraction. */
@@ -261,7 +275,8 @@ export class PreviewScene {
     const dt = this.clock.getDelta();
     if (this.clip && this.playing) {
       this.time += dt;
-      if (this.time >= this.clip.duration) this.time = 0; // loop
+      // Loop within the trim region (end inclusive).
+      if (this.time >= this.trimEnd || this.time < this.trimStart) this.time = this.trimStart;
       this.applyPose(this.time);
       this.emitState();
     }
@@ -275,10 +290,19 @@ export class PreviewScene {
   }
 
   private emitState() {
-    this.onState?.({ time: this.time, duration: this.clip?.duration ?? 0, playing: this.playing });
+    this.onState?.({
+      time: this.time,
+      duration: this.clip?.duration ?? 0,
+      playing: this.playing,
+      trimStart: this.trimStart,
+      trimEnd: this.trimEnd,
+    });
   }
 
   play() {
+    if (this.clip && (this.time < this.trimStart || this.time >= this.trimEnd)) {
+      this.time = this.trimStart;
+    }
     this.playing = true;
     this.emitState();
   }

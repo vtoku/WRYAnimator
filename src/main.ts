@@ -1,12 +1,13 @@
 import "./style.css";
 import { parseWanim, BONE_COUNT, type WanimClip } from "./wanim/parse.ts";
-import { convertCharacter, resample, type ConvertedClip } from "./convert/clip.ts";
+import { convertCharacter, resample, type ConvertedClip, type ResampledClip } from "./convert/clip.ts";
+import { cleanClip, type CleanOpts } from "./convert/clean.ts";
 import { writeAnimationFbx, type FaceExport } from "./fbx/animationFbx.ts";
 import { remapNames, type NameScheme } from "./convert/skeleton.ts";
 import { sanitizeFilename, downloadBytes } from "./fbx/export.ts";
 import { PreviewScene } from "./preview/scene.ts";
 import { loadFaceMeshData, toFacecapName } from "./preview/face.ts";
-import type { ResampledClip } from "./convert/clip.ts";
+import { createTransport, type Transport } from "./ui/transport.ts";
 
 const emptyState = document.getElementById("empty-state") as HTMLElement;
 const loadedState = document.getElementById("loaded-state") as HTMLElement;
@@ -17,7 +18,8 @@ const viewport = document.getElementById("viewport") as HTMLElement;
 const panel = document.getElementById("panel") as HTMLElement;
 
 let preview: PreviewScene | null = null;
-let loaded: { name: string; clip: WanimClip; converted: ConvertedClip } | null = null;
+let transport: Transport | null = null;
+let loaded: { name: string; clip: WanimClip; converted: ConvertedClip; cleaned: ConvertedClip } | null = null;
 
 function showError(message: string) {
   errorEl.textContent = message;
@@ -32,20 +34,14 @@ function buildFaceExport(
   const channels: FaceExport["channels"] = [];
   resampled.face!.names.forEach((name, n) => {
     const deltas = mesh.morphs[toFacecapName(name)];
-    if (!deltas) return; // no matching morph on the head (e.g. trackingStatus)
+    if (!deltas) return;
     const weights = resampled.face!.tracks[n];
     let moved = 0;
     for (let i = 0; i < weights.length; i++) moved = Math.max(moved, Math.abs(weights[i]));
-    if (moved < 0.01) return; // skip channels that never animate
+    if (moved < 0.01) return;
     channels.push({ name, deltas, weights });
   });
-  return {
-    positions: mesh.positions,
-    indices: mesh.indices,
-    center: mesh.center,
-    height: mesh.height,
-    channels,
-  };
+  return { positions: mesh.positions, indices: mesh.indices, center: mesh.center, height: mesh.height, channels };
 }
 
 function fmtTime(seconds: number): string {
@@ -66,26 +62,40 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
 
   const rows: [string, string][] = [
     ["File", name],
-    ["Characters", String(clip.characters.length)],
     ["Frames", String(frames)],
     ["Duration", fmtTime(converted.duration)],
-    ["Average rate", `${fps.toFixed(1)} fps`],
+    ["Rate", `${fps.toFixed(1)} fps`],
     ["Bones", `${BONE_COUNT} (Unity humanoid)`],
     ["Blendshapes", blendshapeNames.size ? String(blendshapeNames.size) : "none"],
   ];
 
   panel.innerHTML = `
     <h2>${name}</h2>
-    <div class="transport">
-      <button id="play" class="button" aria-label="Play/pause">⏸ Pause</button>
-      <input id="scrub" class="scrub" type="range" min="0" max="1000" value="0" />
-      <span id="timecode" class="timecode">0:00.00</span>
-    </div>
     <dl class="stats">
       ${rows.map(([k, v]) => `<div><dt>${k}</dt><dd>${v}</dd></div>`).join("")}
     </dl>
+
+    <h3 class="section">Cleaning</h3>
     <label class="field">
-      <span>Export frame rate</span>
+      <span>Remove pops / flips</span>
+      <input id="despike" type="checkbox" />
+    </label>
+    <label class="field sub">
+      <span>Pop threshold <output id="despikeVal">35°</output></span>
+      <input id="despikeDeg" type="range" min="10" max="90" step="5" value="35" />
+    </label>
+    <label class="field">
+      <span>Smooth (Butterworth)</span>
+      <input id="smooth" type="checkbox" />
+    </label>
+    <label class="field sub">
+      <span>Cutoff <output id="cutoffVal">7 Hz</output></span>
+      <input id="cutoff" type="range" min="1" max="15" step="0.5" value="7" />
+    </label>
+
+    <h3 class="section">Export</h3>
+    <label class="field">
+      <span>Frame rate</span>
       <select id="fps">
         <option value="30">30 fps</option>
         <option value="60" selected>60 fps</option>
@@ -108,20 +118,22 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     </label>
     <label class="field">
       <span>Face blendshapes</span>
-      <input id="face" type="checkbox" ${clip.characters[0] && converted.face ? "checked" : "disabled"} />
+      <input id="face" type="checkbox" ${converted.face ? "checked" : "disabled"} />
     </label>
     <button id="download" class="button primary">Download FBX</button>
-    <p class="note">The preview head is a stand-in driven by the recorded ARKit
-      blendshapes. With <strong>Face blendshapes</strong> on, that head and its
-      morph animation are embedded in the FBX; otherwise the FBX is skeleton-only.
-      Exports as binary FBX 7.5 (MotionBuilder-compatible). Verify rotation order
-      in your DCC; if limbs twist, see the FBX notes.</p>
+    <p class="note">Trim with the in/out handles on the timeline. Exports binary
+      FBX 7.5 (MotionBuilder-compatible); the face head + its morph animation are
+      embedded when <strong>Face blendshapes</strong> is on. Verify rotation order
+      in your DCC.</p>
     <button id="reset" class="button ghost">Load another file</button>
   `;
 
-  const playBtn = document.getElementById("play") as HTMLButtonElement;
-  const scrub = document.getElementById("scrub") as HTMLInputElement;
-  const timecode = document.getElementById("timecode") as HTMLElement;
+  const despikeChk = document.getElementById("despike") as HTMLInputElement;
+  const despikeDeg = document.getElementById("despikeDeg") as HTMLInputElement;
+  const despikeVal = document.getElementById("despikeVal") as HTMLOutputElement;
+  const smoothChk = document.getElementById("smooth") as HTMLInputElement;
+  const cutoff = document.getElementById("cutoff") as HTMLInputElement;
+  const cutoffVal = document.getElementById("cutoffVal") as HTMLOutputElement;
   const fpsSel = document.getElementById("fps") as HTMLSelectElement;
   const namesSel = document.getElementById("names") as HTMLSelectElement;
   const restSel = document.getElementById("rest") as HTMLSelectElement;
@@ -129,36 +141,38 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
   const downloadBtn = document.getElementById("download") as HTMLButtonElement;
   const resetBtn = document.getElementById("reset") as HTMLButtonElement;
 
-  let scrubbing = false;
-
-  preview?.setOnState((s) => {
-    playBtn.textContent = s.playing ? "⏸ Pause" : "▶ Play";
-    timecode.textContent = `${fmtTime(s.time)} / ${fmtTime(s.duration)}`;
-    if (!scrubbing && s.duration > 0) {
-      scrub.value = String(Math.round((s.time / s.duration) * 1000));
-    }
+  const cleanOpts = (): CleanOpts => ({
+    despike: despikeChk.checked,
+    despikeDeg: Number(despikeDeg.value),
+    smooth: smoothChk.checked,
+    cutoffHz: Number(cutoff.value),
   });
 
-  playBtn.addEventListener("click", () => preview?.togglePlay());
-  scrub.addEventListener("input", () => {
-    scrubbing = true;
-    preview?.pause();
-    const frac = Number(scrub.value) / 1000;
-    preview?.seek(frac * converted.duration);
-  });
-  scrub.addEventListener("change", () => {
-    scrubbing = false;
-  });
+  function reclean() {
+    if (!loaded || !preview) return;
+    const opts = cleanOpts();
+    loaded.cleaned = opts.despike || opts.smooth ? cleanClip(loaded.converted, opts) : loaded.converted;
+    const trim = transport?.getTrim();
+    preview.setClip(loaded.cleaned); // duration is unchanged; this resets the pose
+    if (trim) preview.setTrim(trim.start, trim.end); // keep the user's trim
+  }
+
+  despikeVal.value = `${despikeDeg.value}°`;
+  cutoffVal.value = `${cutoff.value} Hz`;
+  despikeDeg.addEventListener("input", () => { despikeVal.value = `${despikeDeg.value}°`; });
+  cutoff.addEventListener("input", () => { cutoffVal.value = `${cutoff.value} Hz`; });
+  for (const c of [despikeChk, smoothChk]) c.addEventListener("change", reclean);
+  for (const r of [despikeDeg, cutoff]) r.addEventListener("change", reclean);
 
   downloadBtn.addEventListener("click", async () => {
     if (!loaded) return;
     downloadBtn.disabled = true;
     downloadBtn.textContent = "Generating…";
-    // Yield once so the button repaints before the heavy work.
     await new Promise((r) => setTimeout(r, 16));
     try {
       const fps = Number(fpsSel.value);
-      const resampled = resample(loaded.converted, fps);
+      const trim = transport?.getTrim() ?? { start: 0, end: loaded.cleaned.duration };
+      const resampled = resample(loaded.cleaned, fps, trim.start, trim.end);
       const names = remapNames(resampled.names, namesSel.value as NameScheme);
       let face: FaceExport | undefined;
       let headIndex: number | undefined;
@@ -204,13 +218,18 @@ async function handleFile(file: File) {
       return;
     }
     const converted = convertCharacter(clip, 0);
-    loaded = { name: file.name, clip, converted };
+    loaded = { name: file.name, clip, converted, cleaned: converted };
 
     emptyState.hidden = true;
     loadedState.hidden = false;
 
     if (!preview) preview = new PreviewScene(viewport);
     preview.setClip(converted);
+
+    transport?.dispose();
+    transport = createTransport(preview, converted.duration);
+    viewport.appendChild(transport.element);
+
     buildPanel(file.name, clip, converted);
   } catch (err) {
     showError(err instanceof Error ? err.message : String(err));

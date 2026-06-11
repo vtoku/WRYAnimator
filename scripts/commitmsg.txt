@@ -1,20 +1,24 @@
-Embed recorded blendshape animation in the exported FBX
+v0.6.0: viewport transport + trim, mocap cleaning, modern FBX for MotionBuilder
 
-The FBX can now carry the captured ARKit face animation, not just the body:
+MotionBuilder import fixes (was: legacy warning, dots, no take):
+- Emit modern binary FBX 7700 with a binary FileId + CreationTime, SceneInfo,
+  and the Document's ActiveAnimStackName (so MoBu sets the current take).
+- Remove the legacy "Takes" section (deprecated since FBX 7.4 — its presence
+  made MoBu treat the file as legacy). The AnimationStack is the take; it now
+  carries Version + LocalStart/Stop + ReferenceStart/Stop. AnimationLayer gets
+  a Properties70 (Weight/BlendMode/...). NodeAttributes get Color/Size/LimbLength.
+- Add a "Reference" Null root above the Hips so the Hips isn't the skeleton root.
 
-- preview/face.ts: loadFaceMeshData() extracts the facecap head geometry +
-  52 morph-target deltas (world-baked) for export.
-- clip.ts: resample() now also resamples the face weight tracks.
-- fbx/animationFbx.ts: opts.face embeds the head as a Mesh Geometry +
-  BlendShape/BlendShapeChannel deformers + Shape geometries (per-vertex
-  deltas), parented to the Head bone, with DeformPercent curves driven by the
-  recorded weights. Mesh baked into Head-local space (scale ~22cm, 180deg Y,
-  lift 9cm). Definitions counts now derived from the emitted objects.
-- main.ts: "Face blendshapes" toggle (default on) builds the channels by
-  mapping ARKit names to the facecap morphs.
+Editing:
+- Transport bar overlaid on the 3D viewport: play/pause, click-to-seek timeline
+  with draggable in/out trim handles; trim flows end-to-end into the export
+  (resample() honors trimStart/trimEnd, rebased to t=0).
+- Mocap cleaning (convert/clean.ts): despike pops/hand-flips + zero-phase
+  Butterworth smoothing, with UI sliders; applied to preview and export.
+- Fix viewport overflowing the window (panel now scrolls internally; overlay
+  stays visible).
 
-Verified headlessly (npm run faceFbxCheck): the emitted binary FBX round-trips
-through FBXLoader as 1 morph mesh with 48 morph targets and 104 clip tracks
-(56 bone + 48 morph). Browser download verified, no console errors.
+Verified: FBXLoader round-trip (55 bones, take, 56+ tracks), trimmed export
+(134s -> 67s), browser drive with cleaning + face, no console errors.
 
 Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>

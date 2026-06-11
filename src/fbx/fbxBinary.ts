@@ -38,6 +38,7 @@ export const F = (v: number): FbxProp => ({ t: "F", v });
 export const Y = (v: number): FbxProp => ({ t: "Y", v });
 export const C = (v: boolean): FbxProp => ({ t: "C", v });
 export const S = (v: string): FbxProp => ({ t: "S", v });
+export const R = (v: Uint8Array): FbxProp => ({ t: "R", v });
 export const aI = (v: Int32Array): FbxProp => ({ t: "i", v });
 export const aL = (v: number[] | Float64Array): FbxProp => ({ t: "l", v });
 export const aF = (v: Float32Array): FbxProp => ({ t: "f", v });
@@ -158,7 +159,7 @@ const FOOT_MAGIC = new Uint8Array([
   0xf8, 0x5a, 0x8c, 0x6a, 0xde, 0xf5, 0xd9, 0x7e, 0xec, 0xe9, 0x0c, 0xe3, 0x75, 0x8f, 0x29, 0x0b,
 ]);
 
-export function serializeFbxBinary(top: FbxNode[], version = 7500): Uint8Array {
+export function serializeFbxBinary(top: FbxNode[], version = 7700): Uint8Array {
   const w = new ByteWriter();
   // Header: "Kaydara FBX Binary  \x00\x1a\x00" (23 bytes) + version u32.
   w.ascii("Kaydara FBX Binary  ");

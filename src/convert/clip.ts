@@ -127,10 +127,16 @@ function lerp(a: number, b: number, t: number): number {
   return a + (b - a) * t;
 }
 
-/** Resample variable-rate motion onto a fixed frame rate (linear pos, slerp rot). */
-export function resample(c: ConvertedClip, fps = 60): ResampledClip {
+/**
+ * Resample variable-rate motion onto a fixed frame rate (linear pos, slerp rot).
+ * `trimStart`/`trimEnd` (seconds from clip start) restrict the exported range;
+ * output time is rebased so the first kept frame is t=0.
+ */
+export function resample(c: ConvertedClip, fps = 60, trimStart = 0, trimEnd?: number): ResampledClip {
   const t0 = c.times[0];
-  const duration = c.duration;
+  const start = Math.max(0, Math.min(c.duration, trimStart));
+  const end = Math.max(start, Math.min(c.duration, trimEnd ?? c.duration));
+  const duration = end - start;
   const frameCount = Math.max(1, Math.round(duration * fps) + 1);
   const boneCount = c.names.length;
 
@@ -140,7 +146,7 @@ export function resample(c: ConvertedClip, fps = 60): ResampledClip {
 
   let cursor = 0;
   for (let i = 0; i < frameCount; i++) {
-    const t = t0 + i / fps;
+    const t = t0 + start + i / fps;
     // advance cursor so c.times[cursor] <= t < c.times[cursor+1]
     while (cursor < c.times.length - 2 && c.times[cursor + 1] < t) cursor++;
     const ta = c.times[cursor];

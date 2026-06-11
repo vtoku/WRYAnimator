@@ -72,7 +72,9 @@ No unit-test framework yet — the three `npm run` scripts above are the regress
                           resample() → ResampledClip (fixed fps, linear pos / slerp rot) for export.
   → src/fbx/animationFbx.ts: ASCII FBX 7.4 — LimbNode skeleton + AnimationStack/Layer, per-bone Lcl Rotation
                           curves + Hips Lcl Translation curve. meters→cm, Y-up.
-  → src/preview/scene.ts: Three.js Object3D bone hierarchy driven per-frame; LineSegments + Points stick figure.
+  → src/convert/clean.ts: optional mocap cleaning — despike (pops/hand-flips via neighbour slerp) + zero-phase Butterworth low-pass (filtfilt) on rotations + hips translation. Applied to the converted clip so it shows in preview AND export.
+  → src/preview/scene.ts: Three.js Object3D bone hierarchy driven per-frame; LineSegments + Points stick figure. Supports trim looping (setTrim).
+  → src/ui/transport.ts: transport bar overlaid on the viewport — play/pause, click-to-seek timeline with draggable in/out trim handles. resample() takes trimStart/trimEnd to export only the trimmed range (rebased to t=0).
   → src/preview/face.ts:  ARKit face overlay — loads public/facecap-head.glb, seats it at the Head joint,
                           drives morph targets from the recorded blendshapes. PREVIEW ONLY (not in the FBX).
 ```

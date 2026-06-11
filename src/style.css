@@ -27,7 +27,8 @@ body {
 }
 
 #app {
-  min-height: 100vh;
+  height: 100vh;
+  overflow: hidden;
   display: flex;
   flex-direction: column;
 }
@@ -72,6 +73,7 @@ body {
 
 main {
   flex: 1;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -176,27 +178,109 @@ main:has(.loaded-state:not([hidden])) {
   }
 }
 
-.transport {
+/* Transport overlay on the 3D viewport */
+.transport-overlay {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
   display: flex;
   align-items: center;
   gap: 0.6rem;
-  margin-bottom: 1rem;
+  padding: 0.6rem 0.9rem;
+  background: linear-gradient(transparent, rgba(8, 10, 13, 0.85) 40%);
+  z-index: 10;
 }
 
-.transport .button {
+.t-btn {
+  background: rgba(40, 46, 56, 0.9);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.3rem 0.6rem;
+  font-size: 0.85rem;
+  cursor: pointer;
   white-space: nowrap;
 }
 
-.scrub {
+.t-btn:hover {
+  border-color: var(--accent);
+}
+
+.t-play {
+  font-size: 1rem;
+  min-width: 2.2rem;
+}
+
+.t-timeline {
+  position: relative;
   flex: 1;
   min-width: 0;
+  height: 22px;
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 4px;
+  cursor: pointer;
+  touch-action: none;
 }
 
-.timecode {
+.t-region {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: rgba(110, 168, 255, 0.28);
+  border-left: 1px solid var(--accent);
+  border-right: 1px solid var(--accent);
+}
+
+.t-handle {
+  position: absolute;
+  top: -3px;
+  width: 10px;
+  height: 28px;
+  margin-left: -5px;
+  background: var(--accent);
+  border-radius: 3px;
+  cursor: ew-resize;
+  touch-action: none;
+}
+
+.t-playhead {
+  position: absolute;
+  top: -3px;
+  width: 2px;
+  height: 28px;
+  margin-left: -1px;
+  background: #ff5a5a;
+  pointer-events: none;
+}
+
+.t-time {
   font-variant-numeric: tabular-nums;
-  font-size: 0.8rem;
-  color: var(--text-dim);
+  font-size: 0.78rem;
+  color: var(--text);
   white-space: nowrap;
+}
+
+.section {
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 0.3rem;
+  margin: 1.4rem 0 0.6rem;
+}
+
+.field.sub {
+  padding-left: 0.8rem;
+  font-size: 0.85rem;
+  color: var(--text-dim);
+}
+
+.field.sub input[type="range"] {
+  flex: 1;
+  min-width: 0;
+  max-width: 9rem;
 }
 
 .field {
