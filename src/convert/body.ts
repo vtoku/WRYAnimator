@@ -193,9 +193,29 @@ export function extractBodyMeshes(
     return dir.lengthSq() > 1e-8 ? dir.normalize() : null;
   });
 
-  // --- 2. FK-align the source rest pose to OUR T-pose -----------------------
+  // Canonical T-pose target axis per bone. Aligning to the RECORDED avatar's
+  // bind axes instead imports its quirks (VRM toe joints below the floor →
+  // feet sink; drifting spine → caved chest; non-lateral arms → lumpy T).
+  const alignmentTarget = (unityName: string, cur: THREE.Vector3): THREE.Vector3 | null => {
+    if (/^Left(Shoulder|UpperArm|LowerArm|Hand|Thumb|Index|Middle|Ring|Little)/.test(unityName)) {
+      return new THREE.Vector3(1, 0, 0);
+    }
+    if (/^Right(Shoulder|UpperArm|LowerArm|Hand|Thumb|Index|Middle|Ring|Little)/.test(unityName)) {
+      return new THREE.Vector3(-1, 0, 0);
+    }
+    if (/^(Spine|Chest|UpperChest|Neck)$/.test(unityName)) return new THREE.Vector3(0, 1, 0);
+    if (/UpperLeg|LowerLeg/.test(unityName)) return new THREE.Vector3(0, -1, 0);
+    if (/Foot|Toes/.test(unityName)) {
+      // Keep the model's natural foot pitch; turn the heading to +Z.
+      const horiz = Math.hypot(cur.x, cur.z);
+      return new THREE.Vector3(0, cur.y, horiz).normalize();
+    }
+    return null; // Hips/Head/etc: leave as authored
+  };
+
+  // --- 2. FK-align the source rest pose to a canonical T-pose ---------------
   // Visit bones parents-first; rotate each so its (mean child) segment
-  // direction matches our corresponding segment direction in world space.
+  // direction matches the canonical T-pose direction in world space.
   const order = [...skeleton.bones].sort((a, b) => {
     const depth = (o: THREE.Object3D) => {
       let d = 0;
@@ -207,12 +227,39 @@ export function extractBodyMeshes(
   const childBones = (b: THREE.Bone) => b.children.filter((c) => (c as THREE.Bone).isBone) as THREE.Bone[];
   const tmpQ = new THREE.Quaternion();
   const parentQ = new THREE.Quaternion();
+
+  // First, yaw the whole rig so it faces +Z (detected from the feet heading) —
+  // the per-bone pass skips the hips, so pelvis verts would keep the rest
+  // facing otherwise.
+  {
+    const heading = new THREE.Vector3();
+    skeleton.bones.forEach((b, j) => {
+      if (!directlyMapped[j]) return;
+      const u = unityNames[boneOurIndex[j]];
+      if (u !== "LeftToes" && u !== "RightToes") return;
+      const parentBone = b.parent as THREE.Bone;
+      if (!parentBone?.isBone) return;
+      heading.add(b.getWorldPosition(new THREE.Vector3()).sub(parentBone.getWorldPosition(new THREE.Vector3())));
+    });
+    heading.y = 0;
+    if (heading.lengthSq() > 1e-8) {
+      heading.normalize();
+      const yaw = Math.atan2(heading.x, heading.z); // angle from +Z
+      // World-space yaw, conjugated into the root bone's local frame —
+      // rotateOnWorldAxis assumes an unrotated parent, but Blender exports
+      // sit under a -90° X armature node.
+      tmpQ.setFromAxisAngle(new THREE.Vector3(0, 1, 0), -yaw);
+      order[0].parent!.getWorldQuaternion(parentQ);
+      const local = parentQ.clone().invert().multiply(tmpQ).multiply(parentQ);
+      order[0].quaternion.premultiply(local);
+      scene.updateWorldMatrix(true, true);
+    }
+  }
+
   for (const b of order) {
     const j = skeleton.bones.indexOf(b);
     const m = boneOurIndex[j];
     if (!directlyMapped[j]) continue;
-    const target = ourAxis[m];
-    if (!target) continue;
     const kids = childBones(b).filter((c) => {
       const cj = skeleton.bones.indexOf(c);
       return cj >= 0 && directlyMapped[cj] && boneOurIndex[cj] !== m;
@@ -224,6 +271,8 @@ export function extractBodyMeshes(
     for (const c of kids) cur.add(c.getWorldPosition(new THREE.Vector3()).sub(own));
     if (cur.lengthSq() < 1e-10) continue;
     cur.normalize();
+    const target = alignmentTarget(unityNames[m], cur);
+    if (!target) continue;
     // World-space corrective rotation, applied in the bone's local frame.
     tmpQ.setFromUnitVectors(cur, target);
     b.parent!.getWorldQuaternion(parentQ);
