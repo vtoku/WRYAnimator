@@ -292,16 +292,47 @@ export function extractBodyMeshes(
     }
   });
 
-  // Per-bone girth trim (perpendicular-to-axis), applied during transfer.
+  const segLen = (a: Vec3, b: Vec3) => Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+
+  // Per-bone girth (perpendicular-to-axis) = width ratio between the two
+  // skeletons (shoulder span for the upper body, hip span for the lower) ×
+  // an aesthetic slimming table (the asset is heroic/bodybuilder-shaped;
+  // trim it toward a generic mannequin).
+  const span = (w: (Vec3 | null)[], a: number, b: number): number => {
+    const pa = w[a], pb = w[b];
+    return pa && pb ? segLen(pa, pb) : 0;
+  };
+  const iLA = unityNames.indexOf("LeftUpperArm"), iRA = unityNames.indexOf("RightUpperArm");
+  const iLL = unityNames.indexOf("LeftUpperLeg"), iRL = unityNames.indexOf("RightUpperLeg");
+  const ourShoulderW = segLen(ourWorld[iLA], ourWorld[iRA]);
+  const ourHipW = segLen(ourWorld[iLL], ourWorld[iRL]);
+  const srcShoulderW = span(joints, iLA, iRA);
+  const srcHipW = span(joints, iLL, iRL);
+  const shoulderRatio = srcShoulderW > 1e-4 ? ourShoulderW / srcShoulderW : 1;
+  const hipRatio = srcHipW > 1e-4 ? ourHipW / srcHipW : 1;
+  const SLIM: [RegExp, number][] = [
+    [/^(Chest|UpperChest)$|Shoulder/, 0.85],
+    [/UpperArm/, 0.78],
+    [/LowerArm/, 0.85],
+    [/Hand|Thumb|Index|Middle|Ring|Little/, 0.92],
+    [/UpperLeg/, 0.9],
+    [/LowerLeg/, 0.92],
+    [/^(Hips|Spine)$/, 0.95],
+  ];
+  const girthCache = new Map<number, number>();
   const girthFor = (mi: number): number => {
+    const cached = girthCache.get(mi);
+    if (cached !== undefined) return cached;
     const u = unityNames[mi];
-    if (/^(Chest|UpperChest)$|Shoulder/.test(u)) return 0.9;
-    if (/UpperArm|LowerArm/.test(u)) return 0.9;
-    return 1;
+    const upper = /Chest|Shoulder|Arm|Hand|Thumb|Index|Middle|Ring|Little|Neck/.test(u);
+    let g = upper ? shoulderRatio : hipRatio;
+    for (const [re, f] of SLIM) if (re.test(u)) { g *= f; break; }
+    g = Math.min(1.3, Math.max(0.5, g));
+    girthCache.set(mi, g);
+    return g;
   };
 
   // Per-bone segment-length stretch ratio (mean over children on both sides).
-  const segLen = (a: Vec3, b: Vec3) => Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
   const mean = (xs: number[]) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 0);
   const srcChildren = skeleton.bones.map((b) =>
     childBones(b).map((c) => skeleton.bones.indexOf(c)).filter((x) => x >= 0),
@@ -317,6 +348,28 @@ export function extractBodyMeshes(
     if (oLen < 1e-4 && parents[m] >= 0) oLen = segLen(ourWorld[parents[m]], ourWorld[m]);
     if (xLen < 1e-4 || oLen < 1e-4) return 1;
     return Math.min(2.5, Math.max(0.3, oLen / xLen));
+  });
+
+  // Per-bone rotation from the source's ALIGNED axis onto OUR skeleton's
+  // actual axis — without it, segments whose recorded axis differs from the
+  // canonical one (e.g. heel-pitched feet) don't tilt with the bone and the
+  // mesh crumples there. Identity in body-proportions mode.
+  const srcAxis = skeleton.bones.map((b, j) => {
+    const dir = new THREE.Vector3();
+    for (const cj of srcChildren[j]) dir.add(jointWorld[cj].clone().sub(jointWorld[j]));
+    if (dir.lengthSq() < 1e-8 && b.parent && (b.parent as THREE.Bone).isBone) {
+      const pj = skeleton.bones.indexOf(b.parent as THREE.Bone);
+      if (pj >= 0) dir.subVectors(jointWorld[j], jointWorld[pj]);
+    }
+    return dir.lengthSq() > 1e-8 ? dir.normalize() : Y_UP.clone();
+  });
+  const boneRot = skeleton.bones.map((_, j) => {
+    const dst = ourAxis[boneOurIndex[j]];
+    if (!dst) return null;
+    const q = new THREE.Quaternion().setFromUnitVectors(srcAxis[j], dst);
+    return q.angleTo(new THREE.Quaternion()) < 1e-4
+      ? null
+      : new THREE.Matrix3().setFromMatrix4(new THREE.Matrix4().makeRotationFromQuaternion(q));
   });
 
   // --- 3+4. evaluate skin in the aligned pose; transfer vertices -----------
@@ -349,13 +402,22 @@ export function extractBodyMeshes(
         if (w === 0) continue;
         const mi = boneOurIndex[j];
         const ax = ourAxis[mi] ?? Y_UP;
-        const ox = v.x - jointWorld[j].x;
-        const oy = v.y - jointWorld[j].y;
-        const oz = v.z - jointWorld[j].z;
+        let ox = v.x - jointWorld[j].x;
+        let oy = v.y - jointWorld[j].y;
+        let oz = v.z - jointWorld[j].z;
+        // Rotate the offset from the source's aligned axis onto our axis
+        // (tilts heel-pitched feet, drifting spines, etc. with the bone).
+        const R = boneRot[j];
+        if (R) {
+          const e = R.elements; // column-major
+          const rx = e[0] * ox + e[3] * oy + e[6] * oz;
+          const ry = e[1] * ox + e[4] * oy + e[7] * oz;
+          const rz = e[2] * ox + e[5] * oy + e[8] * oz;
+          ox = rx; oy = ry; oz = rz;
+        }
         const axial = ox * ax.x + oy * ax.y + oz * ax.z;
         // Axial part stretched by the segment ratio; perpendicular part
-        // (girth) trimmed per bone — the asset's heroic upper body reads
-        // oversized next to the face head.
+        // (girth) fitted/slimmed per bone.
         const g = girthFor(mi);
         const px = (ox - ax.x * axial) * g;
         const py = (oy - ax.y * axial) * g;
@@ -386,7 +448,9 @@ export function extractBodyMeshes(
       headWeight[vi] > 0.5 && outPos[vi * 3 + 1] > cutY;
     for (let t = 0; t < srcIndices.length; t += 3) {
       const a = srcIndices[t], b2 = srcIndices[t + 1], c2 = srcIndices[t + 2];
-      if (aboveCut(a) && aboveCut(b2) && aboveCut(c2)) continue;
+      // Drop tris touching ANY removed head vert — keeping boundary-crossing
+      // tris leaves upward spikes around the neck.
+      if (aboveCut(a) || aboveCut(b2) || aboveCut(c2)) continue;
       keptTris.push(a, b2, c2);
     }
     const remap = new Int32Array(count).fill(-1);
