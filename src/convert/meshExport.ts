@@ -9,9 +9,9 @@ import { toFacecapName } from "../preview/face.ts";
 // centered 11.5cm above the Head joint, at a 1.512m head-joint height.
 // The facecap head is sized proportionally to the skeleton's actual head
 // height so it matches the body's own head 1:1 in body-proportions mode.
-export const BODY_HEAD_HEIGHT_M = 0.285;
-export const BODY_HEAD_LIFT_M = 0.115;
-export const BODY_HEAD_JOINT_Y = 1.512;
+export const BODY_HEAD_HEIGHT_M = 0.313;
+export const BODY_HEAD_LIFT_M = 0.096;
+export const BODY_HEAD_JOINT_Y = 1.548;
 
 /**
  * Bake the facecap head into world-space T-pose coordinates (cm), skinned

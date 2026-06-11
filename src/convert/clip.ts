@@ -138,22 +138,34 @@ function lerp(a: number, b: number, t: number): number {
  * the new leg length. Bones the target lacks (e.g. Jaw) keep their original
  * offsets scaled uniformly.
  */
-export function retargetProportions(c: ConvertedClip, targetJoints: (Vec3 | null)[]): ConvertedClip {
+export function retargetProportions(
+  c: ConvertedClip,
+  targetJoints: (Vec3 | null)[],
+  opts: { shoulderScale?: number } = {},
+): ConvertedClip {
   const ourWorld = bindWorldPositions(c.parents, c.bindPos);
   const ourHipsY = ourWorld[0][1] || 1;
   const tgtHipsY = targetJoints[0]?.[1] || ourHipsY;
   const s = tgtHipsY / ourHipsY;
+  const shoulderScale = opts.shoulderScale ?? 1;
 
   const newBind: Vec3[] = c.bindPos.map((p, i) => {
     const t = targetJoints[i];
     const parent = c.parents[i];
     const tp = parent >= 0 ? targetJoints[parent] : null;
+    let bind: Vec3;
     if (t && (parent < 0 || tp)) {
-      return parent < 0
+      bind = parent < 0
         ? [t[0], t[1], t[2]]
         : [t[0] - tp![0], t[1] - tp![1], t[2] - tp![2]];
+    } else {
+      bind = [p[0] * s, p[1] * s, p[2] * s];
     }
-    return [p[0] * s, p[1] * s, p[2] * s];
+    // Optionally narrow the clavicle span (heroic assets attach the arms wide).
+    if (shoulderScale !== 1 && /Shoulder|UpperArm/.test(c.names[i])) {
+      bind = [bind[0] * shoulderScale, bind[1], bind[2]];
+    }
+    return bind;
   });
 
   const frames = c.times.length;
