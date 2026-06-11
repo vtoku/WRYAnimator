@@ -8,10 +8,10 @@ const { GLTFLoader } = await import("three/examples/jsm/loaders/GLTFLoader.js");
 const { MeshoptDecoder } = await import("three/examples/jsm/libs/meshopt_decoder.module.js");
 const { FBXLoader } = await import("three/examples/jsm/loaders/FBXLoader.js");
 const { parseWanim } = await import("../src/wanim/parse.ts");
-const { convertCharacter, resample } = await import("../src/convert/clip.ts");
+const { convertCharacter, resample, retargetProportions } = await import("../src/convert/clip.ts");
 const { writeAnimationFbx } = await import("../src/fbx/animationFbx.ts");
 const { buildFaceMesh } = await import("../src/convert/meshExport.ts");
-const { extractBodyMeshes, bodyToSkinnedMeshExports } = await import("../src/convert/body.ts");
+const { extractBodyMeshes, bodyToSkinnedMeshExports, bodyJointsForBones } = await import("../src/convert/body.ts");
 
 const loadGlb = async (path) => {
   const loader = new GLTFLoader();
@@ -57,12 +57,17 @@ const faceData = { positions, normals, indices, center: [c.x, c.y, c.z], height:
 // --- wanim → resampled ---
 const buf = readFileSync(process.argv[2] ?? "C:\\Users\\VTOKU\\Downloads\\All-The-Things-2-2026-05-24-18-55-10.wanim");
 const clip = parseWanim(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength));
-const resampled = resample(convertCharacter(clip, 0), 30);
+let converted = convertCharacter(clip, 0);
+const bodyGltfEarly = await loadGlb("public/body.glb");
+if (process.env.WANIM_PROPORTIONS === "ybot") {
+  converted = retargetProportions(converted, bodyJointsForBones(bodyGltfEarly.scene, converted.names));
+  console.log("proportions: ybot");
+}
+const resampled = resample(converted, 30);
 
 // --- meshes ---
 const meshes = [buildFaceMesh(resampled, faceData)];
-const bodyGltf = await loadGlb("public/body.glb");
-const bodyData = extractBodyMeshes(bodyGltf.scene, resampled.parents, resampled.bindPos, resampled.names);
+const bodyData = extractBodyMeshes(bodyGltfEarly.scene, resampled.parents, resampled.bindPos, resampled.names);
 console.log("body meshes:", bodyData.map((m) => `${m.name}(${m.positions.length / 3}v ${m.indices.length / 3}t)`).join(", "));
 meshes.push(...bodyToSkinnedMeshExports(bodyData));
 console.log("face channels:", meshes[0].channels.length);

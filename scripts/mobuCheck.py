@@ -88,6 +88,27 @@ from pyfbsdk import FBModel  # noqa: E402
 models = [c for c in scene.Components if isinstance(c, FBModel) and not isinstance(c, FBModelSkeleton)]
 emit("models:", ", ".join("%s<%s>" % (m.Name, type(m).__name__) for m in models[:12]))
 
+# Mesh sizes as MoBu sees them.
+from pyfbsdk import FBVector3d  # noqa: E402
+
+for m in models:
+    if m.Name in ("FaceMesh", "BodySurface", "BodyJoints"):
+        try:
+            geom = m.Geometry
+            n = geom.VertexCount()
+            mn = [1e30, 1e30, 1e30]
+            mx = [-1e30, -1e30, -1e30]
+            step = max(1, n // 2000)
+            for i in range(0, n, step):
+                vtx = geom.VertexGet(i)
+                for a in range(3):
+                    mn[a] = min(mn[a], vtx[a])
+                    mx[a] = max(mx[a], vtx[a])
+            emit("geom %s: %d verts; y %.1f..%.1f  x %.1f..%.1f  z %.1f..%.1f"
+                 % (m.Name, n, mn[1], mx[1], mn[0], mx[0], mn[2], mx[2]))
+        except Exception as e:  # noqa: BLE001
+            emit("geom %s: error %s" % (m.Name, e))
+
 face = None
 for comp in scene.Components:
     if isinstance(comp, FBModel) and comp.Name == "FaceMesh":

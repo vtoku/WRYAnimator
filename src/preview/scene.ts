@@ -4,6 +4,7 @@ import { bindWorldPositions, type ConvertedClip } from "../convert/clip.ts";
 import { buildBodyData } from "../convert/body.ts";
 import { buildBodyMeshes } from "./body.ts";
 import { FaceOverlay } from "./face.ts";
+import { YBOT_HEAD_HEIGHT_M, YBOT_HEAD_LIFT_M, YBOT_HEAD_JOINT_Y } from "../convert/meshExport.ts";
 
 const BG = 0x0e1014;
 
@@ -111,10 +112,13 @@ export class PreviewScene {
     if (!head) return;
     face.group.parent?.remove(face.group);
     head.add(face.group);
-    // Seat the head: ~0.25 m tall, just above the neck-top joint. No rotation:
-    // the facecap head faces +Z, the same way the converted skeleton faces.
-    face.group.scale.setScalar(0.25);
-    face.group.position.set(0, 0.05, 0);
+    // Seat the head proportionally to the skeleton's head-joint height,
+    // matching Ybot's original head (0.267 m tall, centered 0.076 m above the
+    // joint, at 1.596 m). No rotation: facecap and skeleton both face +Z.
+    const headWorldY = bindWorldPositions(this.clip.parents, this.clip.bindPos)[this.headIndex][1];
+    const k = headWorldY / YBOT_HEAD_JOINT_Y;
+    face.group.scale.setScalar(YBOT_HEAD_HEIGHT_M * k);
+    face.group.position.set(0, YBOT_HEAD_LIFT_M * k, 0);
     face.group.rotation.set(0, 0, 0);
     face.bindNames(this.clip.face.names);
     this.faceWeights = new Float32Array(this.clip.face.names.length);

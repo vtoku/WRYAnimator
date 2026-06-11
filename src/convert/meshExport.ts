@@ -4,8 +4,14 @@ import type { SkinnedMeshExport } from "../fbx/animationFbx.ts";
 import type { FaceMeshData } from "../preview/face.ts";
 import { toFacecapName } from "../preview/face.ts";
 
-const FACE_HEAD_CM = 25; // exported head height (matches the preview's 0.25 m)
-const FACE_LIFT_CM = 5; // raise above the neck-top joint (preview: 0.05 m)
+// Measured from Ybot's original head mesh (scripts/measureYbotHead.mjs):
+// 26.7cm tall, centered 7.6cm above the Head joint, on a 1.596m head-joint
+// height. The facecap head is sized proportionally to the skeleton's actual
+// head height so it matches Ybot 1:1 in Ybot-proportions mode and scales for
+// any recorded avatar.
+export const YBOT_HEAD_HEIGHT_M = 0.267;
+export const YBOT_HEAD_LIFT_M = 0.076;
+export const YBOT_HEAD_JOINT_Y = 1.596;
 
 /**
  * Bake the facecap head into world-space T-pose coordinates (cm), skinned
@@ -14,10 +20,15 @@ const FACE_LIFT_CM = 5; // raise above the neck-top joint (preview: 0.05 m)
 export function buildFaceMesh(resampled: ResampledClip, mesh: FaceMeshData): SkinnedMeshExport {
   const headIndex = resampled.names.indexOf("Head");
   const headWorld = bindWorldPositions(resampled.parents, resampled.bindPos)[headIndex];
-  const scale = FACE_HEAD_CM / (mesh.height || 1);
+  // Proportional to the skeleton's head-joint height: 1:1 with Ybot's original
+  // head in Ybot-proportions mode, scaled accordingly for recorded avatars.
+  const k = headWorld[1] / YBOT_HEAD_JOINT_Y;
+  const heightCm = YBOT_HEAD_HEIGHT_M * 100 * k;
+  const liftCm = YBOT_HEAD_LIFT_M * 100 * k;
+  const scale = heightCm / (mesh.height || 1);
   const [cx, cy, cz] = mesh.center;
   const hx = headWorld[0] * 100;
-  const hy = headWorld[1] * 100 + FACE_LIFT_CM;
+  const hy = headWorld[1] * 100 + liftCm;
   const hz = headWorld[2] * 100;
 
   // No rotation: the facecap head faces +Z, the same way the exported body
