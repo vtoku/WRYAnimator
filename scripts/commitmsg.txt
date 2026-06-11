@@ -1,11 +1,26 @@
-Add Definitions PropertyTemplates (FbxNode/FbxSkeleton/FbxAnimStack/...)
+v0.7.0: FBX verified in MotionBuilder 2026 - no legacy warning, take +
+skeleton + animation + 48 blendshape channels import
 
-The FBX SDK resolves class-default properties from Definitions
-PropertyTemplate blocks; Blender and assimp both write them. This was the
-last structural difference vs Blender's MotionBuilder-accepted output.
-Templates added for Model (full FbxNode set), NodeAttribute (FbxSkeleton),
-AnimationStack, AnimationLayer, and AnimationCurveNode.
+Discovered MotionBuilder 2026 installed locally and built a headless
+verification harness (motionbuilder.exe -batch + scripts/mobuCheck.py,
+target via WANIM_FBX env var). Bisected against MoBu's own saved output:
 
-Round-trip verified incl. the blendshape path (104 tracks, 48 morphs).
+- Legacy warning fix: Creator strings "FBX SDK/FBX Plugins version 2020.3.7"
+  (the SDK parses this form to date the file; even Blender's export warns),
+  plus OtherFlags/TCDefinition 127, FBXHeaderVersion 1004, FBX version 7700.
+- Mesh fix: Properties70 DefaultAttributeIndex=0 on mesh Models - without it
+  the SDK template default (-1 = no active attribute) silently imports the
+  mesh as a Null. Also added per-vertex normals LayerElement to the embedded
+  face geometry (extracted from the GLB).
+- Takes node kept (Blender writes it; MoBu lists the take from it).
+
+Verified headlessly in real MoBu 2026: FileOpen ok, no legacy warning,
+take 'Take 001' at full duration, 55 bones under the Reference null, 6387
+keys/axis on Hips translation+rotation and limbs, FaceMesh imports as a
+real FBModel with 48 animated ARKit blendshape properties (jawOpen,
+mouthPucker, tongueOut, ...) at 6387 keys each.
+
+New diagnostics kept in scripts/: mobuCheck.py, mobuSave.py, dumpTree.mjs,
+fbxHeaderDiff.mjs, meshProbe.ts, blenderExport.py.
 
 Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>

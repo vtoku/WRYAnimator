@@ -22,9 +22,12 @@ gltf.scene.traverse((o) => { if (o.isMesh && o.morphTargetDictionary) mesh = o; 
 const src = mesh.geometry;
 const posAttr = src.getAttribute("position");
 const positions = new Float32Array(posAttr.array);
+const normals = new Float32Array(src.getAttribute("normal").array);
 const indices = src.index ? new Uint32Array(src.index.array) : Uint32Array.from({ length: posAttr.count }, (_, i) => i);
 const matW = mesh.matrixWorld, v = new THREE.Vector3();
 for (let i = 0; i < positions.length; i += 3) { v.set(positions[i], positions[i + 1], positions[i + 2]).applyMatrix4(matW); positions[i] = v.x; positions[i + 1] = v.y; positions[i + 2] = v.z; }
+const nmat = new THREE.Matrix3().getNormalMatrix(matW);
+for (let i = 0; i < normals.length; i += 3) { v.set(normals[i], normals[i + 1], normals[i + 2]).applyMatrix3(nmat).normalize(); normals[i] = v.x; normals[i + 1] = v.y; normals[i + 2] = v.z; }
 const box = new THREE.Box3().setFromArray(positions);
 const c = box.getCenter(new THREE.Vector3()), size = box.getSize(new THREE.Vector3());
 const morphs = {};
@@ -56,10 +59,15 @@ console.log("animated channels:", channels.length);
 
 const fbx = writeAnimationFbx(resampled, {
   takeName: "Take 001", tposeRest: true,
-  face: { positions, indices, center: meshData.center, height: meshData.height, channels },
+  face: { positions, normals, indices, center: meshData.center, height: meshData.height, channels },
   headIndex: resampled.names.indexOf("Head"),
 });
 console.log("fbx size", (fbx.length / 1e6).toFixed(2), "MB");
+if (process.argv[3]) {
+  const { writeFileSync } = await import("node:fs");
+  writeFileSync(process.argv[3], fbx);
+  console.log("wrote", process.argv[3]);
+}
 
 // --- round-trip ---
 const group = new FBXLoader().parse(fbx.buffer.slice(fbx.byteOffset, fbx.byteOffset + fbx.byteLength), "");

@@ -13,6 +13,8 @@ export function toFacecapName(arkit: string): string {
 export interface FaceMeshData {
   /** Flat control-point positions (xyz), in the model's own units. */
   positions: Float32Array;
+  /** Flat per-control-point normals (xyz). */
+  normals: Float32Array;
   /** Triangle control-point indices (flat, 3 per face). */
   indices: Uint32Array;
   /** Bounds center + height, for seating the head on the skeleton. */
@@ -55,6 +57,17 @@ export async function loadFaceMeshData(): Promise<FaceMeshData> {
       positions[i] = v.x; positions[i + 1] = v.y; positions[i + 2] = v.z;
     }
 
+    const normalAttr = src.getAttribute("normal");
+    const normals = new Float32Array(positions.length);
+    if (normalAttr) {
+      normals.set(normalAttr.array as ArrayLike<number>);
+      const nm = new THREE.Matrix3().getNormalMatrix(mat);
+      for (let i = 0; i < normals.length; i += 3) {
+        v.set(normals[i], normals[i + 1], normals[i + 2]).applyMatrix3(nm).normalize();
+        normals[i] = v.x; normals[i + 1] = v.y; normals[i + 2] = v.z;
+      }
+    }
+
     const box = new THREE.Box3();
     box.setFromArray(positions as unknown as number[]);
     const c = box.getCenter(new THREE.Vector3());
@@ -78,6 +91,7 @@ export async function loadFaceMeshData(): Promise<FaceMeshData> {
 
     return {
       positions,
+      normals,
       indices,
       center: [c.x, c.y, c.z],
       height: size.y,

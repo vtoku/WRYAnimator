@@ -28,6 +28,8 @@ const P = (name: string, ...rest: FbxProp[]): FbxNode => node("P", [S(name), ...
 export interface FaceExport {
   /** Flat control-point positions (xyz) in the head model's own units. */
   positions: Float32Array;
+  /** Flat per-control-point normals (xyz). */
+  normals: Float32Array;
   /** Triangle control-point indices (flat). */
   indices: Uint32Array;
   center: [number, number, number];
@@ -227,19 +229,49 @@ export function writeAnimationFbx(clip: ResampledClip, opts: WriteAnimOpts = {})
     const meshModelId = id();
     const blendShapeId = id();
 
+    // Normals, transformed like the positions (rotation only — no recenter/lift).
+    const bakedNormals = new Float64Array(face.normals.length);
+    for (let i = 0; i < face.normals.length; i += 3) {
+      bakedNormals[i] = -face.normals[i]; // Ry180
+      bakedNormals[i + 1] = face.normals[i + 1];
+      bakedNormals[i + 2] = -face.normals[i + 2];
+    }
+
+    // The FBX SDK needs a normals layer to accept the node as a real Mesh —
+    // without it, MotionBuilder imports the model as a Null (verified).
     objects.push(node("Geometry", [L(geoId), S(objName("Face", "Geometry")), S("Mesh")], [
       node("GeometryVersion", [I(124)]),
       node("Vertices", [aD(baked)]),
       node("PolygonVertexIndex", [aI(poly)]),
+      node("LayerElementNormal", [I(0)], [
+        node("Version", [I(102)]),
+        node("Name", [S("")]),
+        node("MappingInformationType", [S("ByVertice")]),
+        node("ReferenceInformationType", [S("Direct")]),
+        node("Normals", [aD(bakedNormals)]),
+      ]),
+      node("Layer", [I(0)], [
+        node("Version", [I(100)]),
+        node("LayerElement", [], [
+          node("Type", [S("LayerElementNormal")]),
+          node("TypedIndex", [I(0)]),
+        ]),
+      ]),
     ]));
     objects.push(node("Model", [L(meshModelId), S(objName("FaceMesh", "Model")), S("Mesh")], [
       node("Version", [I(232)]),
       node("Properties70", [], [
+        // DefaultAttributeIndex=0 is REQUIRED: the SDK template default (-1)
+        // means "no active attribute" and MotionBuilder imports the model as a
+        // Null instead of a Mesh (verified by probe bisection).
+        P("DefaultAttributeIndex", S("int"), S("Integer"), S(""), I(0)),
         P("InheritType", S("enum"), S(""), S(""), I(1)),
         P("Lcl Translation", S("Lcl Translation"), S(""), S("A"), D(0), D(0), D(0)),
         P("Lcl Rotation", S("Lcl Rotation"), S(""), S("A"), D(0), D(0), D(0)),
         P("Lcl Scaling", S("Lcl Scaling"), S(""), S("A"), D(1), D(1), D(1)),
       ]),
+      node("MultiLayer", [I(0)]),
+      node("MultiTake", [I(0)]),
       node("Shading", [C(true)]),
       node("Culling", [S("CullingOff")]),
     ]));
@@ -457,15 +489,22 @@ export function writeAnimationFbx(clip: ResampledClip, opts: WriteAnimOpts = {})
 
   // ---- top-level ---------------------------------------------------------
   const header = node("FBXHeaderExtension", [], [
-    node("FBXHeaderVersion", [I(1003)]),
-    node("FBXVersion", [I(7500)]),
+    // 1004 = what MotionBuilder 2026 itself writes. MoBu's "legacy file"
+    // warning keys off FBXHeaderVersion (1003 warns — even Blender's output
+    // does); verified by diffing a MoBu-saved file against ours.
+    node("FBXHeaderVersion", [I(1004)]),
+    node("FBXVersion", [I(7700)]),
     node("EncryptionType", [I(0)]),
     node("CreationTimeStamp", [], [
       node("Version", [I(1000)]),
       node("Year", [I(FBX_TIMESTAMP.year)]), node("Month", [I(FBX_TIMESTAMP.month)]), node("Day", [I(FBX_TIMESTAMP.day)]),
       node("Hour", [I(FBX_TIMESTAMP.hour)]), node("Minute", [I(FBX_TIMESTAMP.minute)]), node("Second", [I(FBX_TIMESTAMP.second)]), node("Millisecond", [I(FBX_TIMESTAMP.millisecond)]),
     ]),
-    node("Creator", [S("WANIMxFBX")]),
+    // The FBX SDK parses this exact "FBX SDK/FBX Plugins version X" form to
+    // date the file; unrecognized creators (incl. Blender's) trip MotionBuilder's
+    // "legacy file" warning.
+    node("Creator", [S("FBX SDK/FBX Plugins version 2020.3.7")]),
+    node("OtherFlags", [], [node("TCDefinition", [I(127)])]),
     node("SceneInfo", [S(objName("GlobalInfo", "SceneInfo")), S("UserData")], [
       node("Type", [S("UserData")]),
       node("Version", [I(100)]),
@@ -497,7 +536,7 @@ export function writeAnimationFbx(clip: ResampledClip, opts: WriteAnimOpts = {})
   ]);
   const fileId = node("FileId", [R(FILE_ID)]);
   const creationTime = node("CreationTime", [S(CREATION_TIME)]);
-  const creator = node("Creator", [S("WANIMxFBX")]);
+  const creator = node("Creator", [S("FBX SDK/FBX Plugins version 2020.3.7 build=0")]);
 
   const globalSettings = node("GlobalSettings", [], [
     node("Version", [I(1000)]),
@@ -561,5 +600,8 @@ export function writeAnimationFbx(clip: ResampledClip, opts: WriteAnimOpts = {})
     takes,
   ];
 
-  return serializeFbxBinary(top, 7500);
+  // 7700 = FBX SDK 2020+ format (same 64-bit binary layout as 7500).
+  // MotionBuilder 2026 shows "legacy file" for anything older — verified: it
+  // warns even on Blender's 7400 output, and stops warning at 7700.
+  return serializeFbxBinary(top, 7700);
 }

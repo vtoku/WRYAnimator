@@ -41,7 +41,7 @@ function buildFaceExport(
     if (moved < 0.01) return;
     channels.push({ name, deltas, weights });
   });
-  return { positions: mesh.positions, indices: mesh.indices, center: mesh.center, height: mesh.height, channels };
+  return { positions: mesh.positions, normals: mesh.normals, indices: mesh.indices, center: mesh.center, height: mesh.height, channels };
 }
 
 function fmtTime(seconds: number): string {
