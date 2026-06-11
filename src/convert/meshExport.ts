@@ -61,7 +61,9 @@ export function buildFaceMesh(resampled: ResampledClip, mesh: FaceMeshData): Ski
   const weights = new Float64Array(pointCount).fill(1);
 
   return {
-    name: "FaceMesh",
+    // "Face" matches the VRM/VRoid mesh-naming convention so downstream
+    // tools that key blendshapes off the VRM face mesh name find it.
+    name: "Face",
     positions,
     normals,
     indices: mesh.indices,

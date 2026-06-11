@@ -92,7 +92,7 @@ emit("models:", ", ".join("%s<%s>" % (m.Name, type(m).__name__) for m in models[
 from pyfbsdk import FBVector3d  # noqa: E402
 
 for m in models:
-    if m.Name in ("FaceMesh", "BodySurface", "BodyJoints"):
+    if m.Name in ("Face", "BodySurface", "BodyJoints"):
         try:
             geom = m.Geometry
             n = geom.VertexCount()
@@ -111,7 +111,7 @@ for m in models:
 
 face = None
 for comp in scene.Components:
-    if isinstance(comp, FBModel) and comp.Name == "FaceMesh":
+    if isinstance(comp, FBModel) and comp.Name == "Face":
         face = comp
         break
 if face is not None:
