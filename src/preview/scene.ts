@@ -1,6 +1,8 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
-import type { ConvertedClip } from "../convert/clip.ts";
+import { bindWorldPositions, type ConvertedClip } from "../convert/clip.ts";
+import { buildBodyData } from "../convert/body.ts";
+import { buildBodyMeshes } from "./body.ts";
 import { FaceOverlay } from "./face.ts";
 
 const BG = 0x0e1014;
@@ -27,8 +29,9 @@ export class PreviewScene {
   private clock = new THREE.Clock();
 
   private clip: ConvertedClip | null = null;
-  private boneNodes: THREE.Object3D[] = [];
+  private boneNodes: THREE.Bone[] = [];
   private boneRoot: THREE.Group | null = null;
+  private body: THREE.Group | null = null;
   private links: Array<[number, number]> = [];
   private lines: THREE.LineSegments | null = null;
   private joints: THREE.Points | null = null;
@@ -82,6 +85,25 @@ export class PreviewScene {
       .catch((err) => console.warn("face overlay unavailable:", err));
   }
 
+  private attachBody(clip: ConvertedClip) {
+    if (this.body) {
+      this.scene.remove(this.body);
+      this.body = null;
+    }
+    const root = this.boneRoot;
+    void buildBodyData(clip.parents, clip.bindPos, clip.names)
+      .then((data) => {
+        // The clip may have been replaced while loading.
+        if (this.clip !== clip || this.boneRoot !== root || !root) return;
+        const bindWorld = bindWorldPositions(clip.parents, clip.bindPos);
+        this.body = buildBodyMeshes(data, this.boneNodes, bindWorld);
+        // At the scene root: the bones' world matrices already include the
+        // boneRoot display flip, so the skinned mesh must not inherit it too.
+        this.scene.add(this.body);
+      })
+      .catch((err) => console.warn("body mesh unavailable:", err));
+  }
+
   private attachFace() {
     const face = this.face;
     if (!face || !this.clip || this.headIndex < 0 || !this.clip.face || !face.hasMorphs()) return;
@@ -110,10 +132,9 @@ export class PreviewScene {
     this.clearClip();
     this.clip = clip;
 
-    // Build bone Object3D hierarchy (parents before children: HumanBodyBones
-    // order is already topologically sorted, root first).
-    const nodes: THREE.Object3D[] = clip.names.map((name) => {
-      const o = new THREE.Object3D();
+    // Build the bone hierarchy (THREE.Bone so SkinnedMeshes can bind to it).
+    const nodes: THREE.Bone[] = clip.names.map((name) => {
+      const o = new THREE.Bone();
       o.name = name;
       return o;
     });
@@ -162,6 +183,7 @@ export class PreviewScene {
 
     this.faceWeights = null;
     this.attachFace();
+    this.attachBody(clip);
 
     this.trimStart = 0;
     this.trimEnd = clip.duration;
@@ -324,6 +346,14 @@ export class PreviewScene {
   }
 
   private clearClip() {
+    if (this.body) {
+      this.scene.remove(this.body);
+      this.body.traverse((o) => {
+        const mesh = o as THREE.Mesh;
+        if (mesh.geometry) mesh.geometry.dispose();
+      });
+      this.body = null;
+    }
     if (this.boneRoot) {
       this.scene.remove(this.boneRoot);
       this.boneRoot = null;

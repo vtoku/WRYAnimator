@@ -25,30 +25,32 @@ function unwrapDegrees(values: number[]): void {
 
 const P = (name: string, ...rest: FbxProp[]): FbxNode => node("P", [S(name), ...rest]);
 
-export interface FaceExport {
-  /** Flat control-point positions (xyz) in the head model's own units. */
-  positions: Float32Array;
-  /** Flat per-control-point normals (xyz). */
-  normals: Float32Array;
-  /** Triangle control-point indices (flat). */
+/**
+ * A skinned mesh to embed. Geometry is in WORLD-space bind coordinates (cm),
+ * pre-baked by the caller against the skeleton's T-pose; skinning is expressed
+ * as clusters over the export skeleton's bone indices.
+ */
+export interface SkinnedMeshExport {
+  name: string;
+  /** Flat control-point positions (xyz, world bind space, cm). */
+  positions: Float64Array;
+  /** Flat per-control-point normals (xyz, world bind space). */
+  normals: Float64Array;
+  /** Triangle control-point indices (flat, 3 per face). */
   indices: Uint32Array;
-  center: [number, number, number];
-  height: number;
-  /** One per animated blendshape: ARKit name, per-control-point deltas, weight track. */
-  channels: { name: string; deltas: Float32Array; weights: Float32Array }[];
+  /** Skin clusters: bone index (into clip bones) + the points it influences. */
+  clusters: { boneIndex: number; pointIndices: Int32Array; weights: Float64Array }[];
+  /** Optional blendshape channels (deltas in world-scale cm). */
+  channels?: { name: string; deltas: Float64Array; weights: Float32Array }[];
 }
 
 export interface WriteAnimOpts {
   takeName?: string;
   names?: string[];
   tposeRest?: boolean;
-  /** Embed an animated blendshape head mesh, seated on the given Head bone. */
-  face?: FaceExport;
-  headIndex?: number;
+  /** Skinned meshes to embed (face head, body, ...). */
+  meshes?: SkinnedMeshExport[];
 }
-
-const TARGET_HEAD_CM = 22; // exported head height
-const HEAD_LIFT_CM = 9; // raise the head above the neck-top joint
 
 export function writeAnimationFbx(clip: ResampledClip, opts: WriteAnimOpts = {}): Uint8Array {
   const takeName = opts.takeName ?? "Take 001";
@@ -82,6 +84,29 @@ export function writeAnimationFbx(clip: ResampledClip, opts: WriteAnimOpts = {})
   const transX = clip.localPos[0].map((p) => p[0] * METERS_TO_CM);
   const transY = clip.localPos[0].map((p) => p[1] * METERS_TO_CM);
   const transZ = clip.localPos[0].map((p) => p[2] * METERS_TO_CM);
+
+  // T-pose world joint positions (cm): cumulative bind offsets with identity
+  // rotations. Resolved recursively — the bone array is NOT topologically
+  // sorted (UpperChest parents earlier-indexed bones).
+  const bindWorld: Vec3[] = new Array(boneCount);
+  const resolveWorld = (i: number): Vec3 => {
+    if (bindWorld[i]) return bindWorld[i];
+    const p = parents[i];
+    const base: Vec3 = p >= 0 ? resolveWorld(p) : [0, 0, 0];
+    const lp = clip.bindPos[i];
+    return (bindWorld[i] = [
+      base[0] + lp[0] * METERS_TO_CM,
+      base[1] + lp[1] * METERS_TO_CM,
+      base[2] + lp[2] * METERS_TO_CM,
+    ]);
+  };
+  for (let i = 0; i < boneCount; i++) resolveWorld(i);
+
+  // Column-major identity-rotation matrices for skinning/bind pose.
+  const translationMatrix = (t: Vec3): number[] =>
+    [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, t[0], t[1], t[2], 1];
+  const inverseTranslationMatrix = (t: Vec3): number[] =>
+    [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, -t[0], -t[1], -t[2], 1];
 
   // IDs.
   let nextId = 1000000;
@@ -119,8 +144,9 @@ export function writeAnimationFbx(clip: ResampledClip, opts: WriteAnimOpts = {})
     objects.push(node("NodeAttribute", [L(boneAttrId[i]), S(objName("", "NodeAttribute")), S("LimbNode")], [
       node("Properties70", [], [
         P("Color", S("ColorRGB"), S("Color"), S(""), D(0.8), D(0.8), D(0.8)),
-        P("Size", S("double"), S("Number"), S(""), D(10)),
-        P("LimbLength", S("double"), S("Number"), S("H"), D(5)),
+        // Display size of the joint in MoBu/Maya — too small makes the rig
+        // hard to see and select ("really thin"); SDK default is 100.
+        P("Size", S("double"), S("Number"), S(""), D(100)),
       ]),
       node("TypeFlags", [S("Skeleton")]),
     ]));
@@ -173,82 +199,106 @@ export function writeAnimationFbx(clip: ResampledClip, opts: WriteAnimOpts = {})
     ]);
 
   const flags = new Int32Array([24840]);
-  const refCount = new Int32Array([frameCount]);
   const attrData = new Float32Array([0, 0, 0, 0]);
-  const curve = (curveId: number, values: number[]): FbxNode =>
+  const curve = (curveId: number, values: number[], times: number[] = keyTimes): FbxNode =>
     node("AnimationCurve", [L(curveId), S(objName("", "AnimCurve")), S("")], [
       node("Default", [D(values[0] ?? 0)]),
       node("KeyVer", [I(4009)]),
-      node("KeyTime", [aL(keyTimes)]),
+      node("KeyTime", [aL(times)]),
       node("KeyValueFloat", [aF(Float32Array.from(values))]),
       node("KeyAttrFlags", [aI(flags)]),
       node("KeyAttrDataFloat", [aF(attrData)]),
-      node("KeyAttrRefCount", [aI(refCount)]),
+      node("KeyAttrRefCount", [aI(new Int32Array([times.length]))]),
     ]);
 
+  // Curve-node defaults: under tposeRest the no-key fallback must be the
+  // T-pose, or an empty take leaves the character in the first frame's pose.
   names.forEach((_, i) => {
     const ch = rotNode[i];
-    objects.push(curveNode(ch.nodeId, "R", [eulerX[i][0], eulerY[i][0], eulerZ[i][0]]));
+    const defs: [number, number, number] = tposeRest
+      ? [0, 0, 0]
+      : [eulerX[i][0], eulerY[i][0], eulerZ[i][0]];
+    objects.push(curveNode(ch.nodeId, "R", defs));
     objects.push(curve(ch.curveIds[0], eulerX[i]));
     objects.push(curve(ch.curveIds[1], eulerY[i]));
     objects.push(curve(ch.curveIds[2], eulerZ[i]));
   });
-  objects.push(curveNode(hipsTrans.nodeId, "T", [transX[0], transY[0], transZ[0]]));
+  const hipDefs: [number, number, number] = tposeRest
+    ? [bindWorld[0][0], bindWorld[0][1], bindWorld[0][2]]
+    : [transX[0], transY[0], transZ[0]];
+  objects.push(curveNode(hipsTrans.nodeId, "T", hipDefs));
   objects.push(curve(hipsTrans.curveIds[0], transX));
   objects.push(curve(hipsTrans.curveIds[1], transY));
   objects.push(curve(hipsTrans.curveIds[2], transZ));
 
-  // ---- optional blendshape face -----------------------------------------
-  const faceConns: { kind: "OO" | "OP"; a: number; b: number; p?: string }[] = [];
-  if (opts.face && opts.headIndex !== undefined && opts.headIndex >= 0) {
-    const face = opts.face;
-    const headModelId = boneModelId[opts.headIndex];
-    const scale = TARGET_HEAD_CM / (face.height || 1);
-    const [cx, cy, cz] = face.center;
+  // ---- "TPose" take: a one-key stance take so DCC tools can characterize
+  // from a guaranteed T-pose (also fixes feet/limb auto-mapping in MoBu).
+  const tposeStackId = id();
+  const tposeLayerId = id();
+  const tposeTimes = [0];
+  const tposeConns: { a: number; b: number; p?: string }[] = [];
+  objects.push(node("AnimationStack", [L(tposeStackId), S(objName("TPose", "AnimStack")), S("")], [
+    node("Properties70", [], [
+      P("Description", S("KString"), S(""), S(""), S("T-pose stance for characterization")),
+      P("LocalStart", S("KTime"), S("Time"), S(""), L(0)),
+      P("LocalStop", S("KTime"), S("Time"), S(""), L(FBX_TIME_SECOND)),
+      P("ReferenceStart", S("KTime"), S("Time"), S(""), L(0)),
+      P("ReferenceStop", S("KTime"), S("Time"), S(""), L(FBX_TIME_SECOND)),
+    ]),
+  ]));
+  objects.push(node("AnimationLayer", [L(tposeLayerId), S(objName("BaseLayer", "AnimLayer")), S("")], [
+    node("Properties70", [], [P("Weight", S("Number"), S(""), S("A"), D(100))]),
+  ]));
+  tposeConns.push({ a: tposeLayerId, b: tposeStackId });
+  names.forEach((_, i) => {
+    const cnId = id();
+    const ids = [id(), id(), id()];
+    objects.push(curveNode(cnId, "R", [0, 0, 0]));
+    for (let c = 0; c < 3; c++) objects.push(curve(ids[c], [0], tposeTimes));
+    tposeConns.push({ a: cnId, b: tposeLayerId });
+    tposeConns.push({ a: cnId, b: boneModelId[i], p: "Lcl Rotation" });
+    const comps = ["d|X", "d|Y", "d|Z"];
+    for (let c = 0; c < 3; c++) tposeConns.push({ a: ids[c], b: cnId, p: comps[c] });
+  });
+  {
+    const cnId = id();
+    const ids = [id(), id(), id()];
+    objects.push(curveNode(cnId, "T", [bindWorld[0][0], bindWorld[0][1], bindWorld[0][2]]));
+    for (let c = 0; c < 3; c++) objects.push(curve(ids[c], [bindWorld[0][c]], tposeTimes));
+    tposeConns.push({ a: cnId, b: tposeLayerId });
+    tposeConns.push({ a: cnId, b: boneModelId[0], p: "Lcl Translation" });
+    const comps = ["d|X", "d|Y", "d|Z"];
+    for (let c = 0; c < 3; c++) tposeConns.push({ a: ids[c], b: cnId, p: comps[c] });
+  }
 
-    // Seat into the Head bone's local space (cm): recenter, scale, rotate 180°
-    // about Y so the head faces the same way as the body, lift above the joint.
-    const baked = new Float64Array(face.positions.length);
-    for (let i = 0; i < face.positions.length; i += 3) {
-      const x = (face.positions[i] - cx) * scale;
-      const y = (face.positions[i + 1] - cy) * scale;
-      const z = (face.positions[i + 2] - cz) * scale;
-      baked[i] = -x;            // Ry180
-      baked[i + 1] = y + HEAD_LIFT_CM;
-      baked[i + 2] = -z;
-    }
-    // Polygon vertex index: triangles with the last index of each face negated.
-    const poly = new Int32Array(face.indices.length);
-    for (let i = 0; i < face.indices.length; i += 3) {
-      poly[i] = face.indices[i];
-      poly[i + 1] = face.indices[i + 1];
-      poly[i + 2] = -face.indices[i + 2] - 1;
-    }
-
+  // ---- skinned meshes (face head, body) ----------------------------------
+  const meshConns: { kind: "OO" | "OP"; a: number; b: number; p?: string }[] = [];
+  const meshModelIds: number[] = [];
+  for (const mesh of opts.meshes ?? []) {
     const geoId = id();
     const meshModelId = id();
-    const blendShapeId = id();
+    meshModelIds.push(meshModelId);
 
-    // Normals, transformed like the positions (rotation only — no recenter/lift).
-    const bakedNormals = new Float64Array(face.normals.length);
-    for (let i = 0; i < face.normals.length; i += 3) {
-      bakedNormals[i] = -face.normals[i]; // Ry180
-      bakedNormals[i + 1] = face.normals[i + 1];
-      bakedNormals[i + 2] = -face.normals[i + 2];
+    // Polygon vertex index: triangles, last index of each face negated.
+    const poly = new Int32Array(mesh.indices.length);
+    for (let i = 0; i < mesh.indices.length; i += 3) {
+      poly[i] = mesh.indices[i];
+      poly[i + 1] = mesh.indices[i + 1];
+      poly[i + 2] = -mesh.indices[i + 2] - 1;
     }
 
     // The FBX SDK needs a normals layer to accept the node as a real Mesh —
-    // without it, MotionBuilder imports the model as a Null (verified).
-    objects.push(node("Geometry", [L(geoId), S(objName("Face", "Geometry")), S("Mesh")], [
+    // without one, MotionBuilder imports the model as a Null (verified).
+    objects.push(node("Geometry", [L(geoId), S(objName(mesh.name, "Geometry")), S("Mesh")], [
       node("GeometryVersion", [I(124)]),
-      node("Vertices", [aD(baked)]),
+      node("Vertices", [aD(mesh.positions)]),
       node("PolygonVertexIndex", [aI(poly)]),
       node("LayerElementNormal", [I(0)], [
         node("Version", [I(102)]),
         node("Name", [S("")]),
         node("MappingInformationType", [S("ByVertice")]),
         node("ReferenceInformationType", [S("Direct")]),
-        node("Normals", [aD(bakedNormals)]),
+        node("Normals", [aD(mesh.normals)]),
       ]),
       node("Layer", [I(0)], [
         node("Version", [I(100)]),
@@ -258,12 +308,12 @@ export function writeAnimationFbx(clip: ResampledClip, opts: WriteAnimOpts = {})
         ]),
       ]),
     ]));
-    objects.push(node("Model", [L(meshModelId), S(objName("FaceMesh", "Model")), S("Mesh")], [
+    // Skinned mesh at the scene root with identity transform; the clusters
+    // carry the bind. DefaultAttributeIndex=0 is REQUIRED: the SDK template
+    // default (-1 = no active attribute) makes MoBu import a Null (verified).
+    objects.push(node("Model", [L(meshModelId), S(objName(mesh.name, "Model")), S("Mesh")], [
       node("Version", [I(232)]),
       node("Properties70", [], [
-        // DefaultAttributeIndex=0 is REQUIRED: the SDK template default (-1)
-        // means "no active attribute" and MotionBuilder imports the model as a
-        // Null instead of a Mesh (verified by probe bisection).
         P("DefaultAttributeIndex", S("int"), S("Integer"), S(""), I(0)),
         P("InheritType", S("enum"), S(""), S(""), I(1)),
         P("Lcl Translation", S("Lcl Translation"), S(""), S("A"), D(0), D(0), D(0)),
@@ -275,51 +325,92 @@ export function writeAnimationFbx(clip: ResampledClip, opts: WriteAnimOpts = {})
       node("Shading", [C(true)]),
       node("Culling", [S("CullingOff")]),
     ]));
-    objects.push(node("Deformer", [L(blendShapeId), S(objName("", "BlendShape")), S("BlendShape")], [
-      node("Version", [I(100)]),
+    meshConns.push({ kind: "OO", a: geoId, b: meshModelId });
+    meshConns.push({ kind: "OO", a: meshModelId, b: 0 });
+
+    // Skin deformer + one cluster per influencing bone. Bind matrices are
+    // identity-rotation T-pose transforms (the same the BindPose carries).
+    const skinId = id();
+    objects.push(node("Deformer", [L(skinId), S(objName(`Skin ${mesh.name}`, "Deformer")), S("Skin")], [
+      node("Version", [I(101)]),
+      node("Link_DeformAcuracy", [D(50)]),
     ]));
-
-    faceConns.push({ kind: "OO", a: geoId, b: meshModelId });
-    faceConns.push({ kind: "OO", a: meshModelId, b: headModelId });
-    faceConns.push({ kind: "OO", a: blendShapeId, b: geoId });
-
-    for (const ch of face.channels) {
-      const channelId = id();
-      const shapeId = id();
-      const cnId = id();
-      const curveId = id();
-      const deltas = new Float64Array(ch.deltas.length);
-      for (let i = 0; i < ch.deltas.length; i += 3) {
-        deltas[i] = -ch.deltas[i] * scale; // Ry180 + scale (vector: no translation/lift)
-        deltas[i + 1] = ch.deltas[i + 1] * scale;
-        deltas[i + 2] = -ch.deltas[i + 2] * scale;
-      }
-      const idxAll = new Int32Array(face.positions.length / 3);
-      for (let i = 0; i < idxAll.length; i++) idxAll[i] = i;
-
-      objects.push(node("Deformer", [L(channelId), S(objName(ch.name, "SubDeformer")), S("BlendShapeChannel")], [
+    meshConns.push({ kind: "OO", a: skinId, b: geoId });
+    for (const cl of mesh.clusters) {
+      const clusterId = id();
+      objects.push(node("Deformer", [L(clusterId), S(objName(`Cluster ${names[cl.boneIndex]}`, "SubDeformer")), S("Cluster")], [
         node("Version", [I(100)]),
-        node("DeformPercent", [D(0)]),
-        node("FullWeights", [aD(new Float64Array([100]))]),
+        node("UserData", [S(""), S("")]),
+        node("Indexes", [aI(cl.pointIndices)]),
+        node("Weights", [aD(cl.weights)]),
+        node("Transform", [aD(Float64Array.from(inverseTranslationMatrix(bindWorld[cl.boneIndex])))]),
+        node("TransformLink", [aD(Float64Array.from(translationMatrix(bindWorld[cl.boneIndex])))]),
       ]));
-      objects.push(node("Geometry", [L(shapeId), S(objName(ch.name, "Geometry")), S("Shape")], [
-        node("Version", [I(100)]),
-        node("Indexes", [aI(idxAll)]),
-        node("Vertices", [aD(deltas)]),
-      ]));
-      // DeformPercent animation (weights 0..1 → percent 0..100).
-      const percent = Float32Array.from(ch.weights, (w) => w * 100);
-      objects.push(node("AnimationCurveNode", [L(cnId), S(objName("DeformPercent", "AnimCurveNode")), S("")], [
-        node("Properties70", [], [P("d|DeformPercent", S("Number"), S(""), S("A"), D(percent[0] ?? 0))]),
-      ]));
-      objects.push(curve(curveId, Array.from(percent)));
-
-      faceConns.push({ kind: "OO", a: channelId, b: blendShapeId });
-      faceConns.push({ kind: "OO", a: shapeId, b: channelId });
-      faceConns.push({ kind: "OO", a: cnId, b: layerId });
-      faceConns.push({ kind: "OP", a: cnId, b: channelId, p: "DeformPercent" });
-      faceConns.push({ kind: "OP", a: curveId, b: cnId, p: "d|DeformPercent" });
+      meshConns.push({ kind: "OO", a: clusterId, b: skinId });
+      meshConns.push({ kind: "OO", a: boneModelId[cl.boneIndex], b: clusterId });
     }
+
+    // Blendshape channels (face): deltas + DeformPercent curves on the main take.
+    if (mesh.channels && mesh.channels.length > 0) {
+      const blendShapeId = id();
+      objects.push(node("Deformer", [L(blendShapeId), S(objName("", "BlendShape")), S("BlendShape")], [
+        node("Version", [I(100)]),
+      ]));
+      meshConns.push({ kind: "OO", a: blendShapeId, b: geoId });
+      const idxAll = new Int32Array(mesh.positions.length / 3);
+      for (let i = 0; i < idxAll.length; i++) idxAll[i] = i;
+      for (const ch of mesh.channels) {
+        const channelId = id();
+        const shapeId = id();
+        const cnId = id();
+        const curveId = id();
+        objects.push(node("Deformer", [L(channelId), S(objName(ch.name, "SubDeformer")), S("BlendShapeChannel")], [
+          node("Version", [I(100)]),
+          node("DeformPercent", [D(0)]),
+          node("FullWeights", [aD(new Float64Array([100]))]),
+        ]));
+        objects.push(node("Geometry", [L(shapeId), S(objName(ch.name, "Geometry")), S("Shape")], [
+          node("Version", [I(100)]),
+          node("Indexes", [aI(idxAll)]),
+          node("Vertices", [aD(ch.deltas)]),
+        ]));
+        const percent = Float32Array.from(ch.weights, (w) => w * 100);
+        objects.push(node("AnimationCurveNode", [L(cnId), S(objName("DeformPercent", "AnimCurveNode")), S("")], [
+          node("Properties70", [], [P("d|DeformPercent", S("Number"), S(""), S("A"), D(0))]),
+        ]));
+        objects.push(curve(curveId, Array.from(percent)));
+        meshConns.push({ kind: "OO", a: channelId, b: blendShapeId });
+        meshConns.push({ kind: "OO", a: shapeId, b: channelId });
+        meshConns.push({ kind: "OO", a: cnId, b: layerId });
+        meshConns.push({ kind: "OP", a: cnId, b: channelId, p: "DeformPercent" });
+        meshConns.push({ kind: "OP", a: curveId, b: cnId, p: "d|DeformPercent" });
+      }
+    }
+  }
+
+  // ---- BindPose: T-pose world matrices for every bone + each mesh. DCC
+  // tools use this as the rest/stance pose and for skinning consistency.
+  {
+    const poseId = id();
+    const poseNodes: FbxNode[] = [];
+    names.forEach((_, i) => {
+      poseNodes.push(node("PoseNode", [], [
+        node("Node", [L(boneModelId[i])]),
+        node("Matrix", [aD(Float64Array.from(translationMatrix(bindWorld[i])))]),
+      ]));
+    });
+    for (const mid of meshModelIds) {
+      poseNodes.push(node("PoseNode", [], [
+        node("Node", [L(mid)]),
+        node("Matrix", [aD(Float64Array.from(translationMatrix([0, 0, 0])))]),
+      ]));
+    }
+    objects.push(node("Pose", [L(poseId), S(objName("BIND_POSES", "Pose")), S("BindPose")], [
+      node("Type", [S("BindPose")]),
+      node("Version", [I(100)]),
+      node("NbPoseNodes", [I(poseNodes.length)]),
+      ...poseNodes,
+    ]));
   }
 
   // ---- Connections -------------------------------------------------------
@@ -346,9 +437,13 @@ export function writeAnimationFbx(clip: ResampledClip, opts: WriteAnimOpts = {})
   OP(hipsTrans.nodeId, boneModelId[0], "Lcl Translation");
   for (let c = 0; c < 3; c++) OP(hipsTrans.curveIds[c], hipsTrans.nodeId, comp[c]);
 
-  for (const fc of faceConns) {
-    if (fc.kind === "OO") OO(fc.a, fc.b);
-    else OP(fc.a, fc.b, fc.p!);
+  for (const mc of meshConns) {
+    if (mc.kind === "OO") OO(mc.a, mc.b);
+    else OP(mc.a, mc.b, mc.p!);
+  }
+  for (const tc of tposeConns) {
+    if (tc.p) OP(tc.a, tc.b, tc.p);
+    else OO(tc.a, tc.b);
   }
 
   // ---- Definitions with PropertyTemplates (as Blender/assimp/the SDK write).
@@ -575,14 +670,19 @@ export function writeAnimationFbx(clip: ResampledClip, opts: WriteAnimOpts = {})
     ]),
   ]);
 
-  // Takes: Blender writes this alongside the AnimationStack and its output
-  // imports into MotionBuilder cleanly — MoBu uses it to list/select the take.
+  // Takes: MoBu builds its take list from THIS node, not from AnimationStacks
+  // alone (verified: a stack without a Take entry here doesn't show up).
   const takes = node("Takes", [], [
     node("Current", [S("")]),
     node("Take", [S(takeName)], [
       node("FileName", [S(`${takeName.replace(/\s+/g, "_")}.tak`)]),
       node("LocalTime", [L(0), L(stopTime)]),
       node("ReferenceTime", [L(0), L(stopTime)]),
+    ]),
+    node("Take", [S("TPose")], [
+      node("FileName", [S("TPose.tak")]),
+      node("LocalTime", [L(0), L(FBX_TIME_SECOND)]),
+      node("ReferenceTime", [L(0), L(FBX_TIME_SECOND)]),
     ]),
   ]);
 

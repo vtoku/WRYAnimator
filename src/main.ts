@@ -1,12 +1,14 @@
 import "./style.css";
 import { parseWanim, BONE_COUNT, type WanimClip } from "./wanim/parse.ts";
-import { convertCharacter, resample, type ConvertedClip, type ResampledClip } from "./convert/clip.ts";
+import { convertCharacter, resample, type ConvertedClip } from "./convert/clip.ts";
 import { cleanClip, type CleanOpts } from "./convert/clean.ts";
-import { writeAnimationFbx, type FaceExport } from "./fbx/animationFbx.ts";
+import { writeAnimationFbx, type SkinnedMeshExport } from "./fbx/animationFbx.ts";
 import { remapNames, type NameScheme } from "./convert/skeleton.ts";
+import { buildFaceMesh } from "./convert/meshExport.ts";
+import { buildBodyData, bodyToSkinnedMeshExports } from "./convert/body.ts";
 import { sanitizeFilename, downloadBytes } from "./fbx/export.ts";
 import { PreviewScene } from "./preview/scene.ts";
-import { loadFaceMeshData, toFacecapName } from "./preview/face.ts";
+import { loadFaceMeshData } from "./preview/face.ts";
 import { createTransport, type Transport } from "./ui/transport.ts";
 
 const emptyState = document.getElementById("empty-state") as HTMLElement;
@@ -26,23 +28,6 @@ function showError(message: string) {
   errorEl.hidden = false;
 }
 
-/** Pair recorded ARKit weight tracks with the facecap morph deltas by name. */
-function buildFaceExport(
-  resampled: ResampledClip,
-  mesh: Awaited<ReturnType<typeof loadFaceMeshData>>,
-): FaceExport {
-  const channels: FaceExport["channels"] = [];
-  resampled.face!.names.forEach((name, n) => {
-    const deltas = mesh.morphs[toFacecapName(name)];
-    if (!deltas) return;
-    const weights = resampled.face!.tracks[n];
-    let moved = 0;
-    for (let i = 0; i < weights.length; i++) moved = Math.max(moved, Math.abs(weights[i]));
-    if (moved < 0.01) return;
-    channels.push({ name, deltas, weights });
-  });
-  return { positions: mesh.positions, normals: mesh.normals, indices: mesh.indices, center: mesh.center, height: mesh.height, channels };
-}
 
 function fmtTime(seconds: number): string {
   const m = Math.floor(seconds / 60);
@@ -120,6 +105,10 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
       <span>Face blendshapes</span>
       <input id="face" type="checkbox" ${converted.face ? "checked" : "disabled"} />
     </label>
+    <label class="field">
+      <span>Ybot body mesh</span>
+      <input id="body" type="checkbox" checked />
+    </label>
     <button id="download" class="button primary">Download FBX</button>
     <p class="note">Trim with the in/out handles on the timeline. Exports binary
       FBX 7.5 (MotionBuilder-compatible); the face head + its morph animation are
@@ -138,6 +127,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
   const namesSel = document.getElementById("names") as HTMLSelectElement;
   const restSel = document.getElementById("rest") as HTMLSelectElement;
   const faceChk = document.getElementById("face") as HTMLInputElement;
+  const bodyChk = document.getElementById("body") as HTMLInputElement;
   const downloadBtn = document.getElementById("download") as HTMLButtonElement;
   const resetBtn = document.getElementById("reset") as HTMLButtonElement;
 
@@ -174,19 +164,20 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
       const trim = transport?.getTrim() ?? { start: 0, end: loaded.cleaned.duration };
       const resampled = resample(loaded.cleaned, fps, trim.start, trim.end);
       const names = remapNames(resampled.names, namesSel.value as NameScheme);
-      let face: FaceExport | undefined;
-      let headIndex: number | undefined;
+      const meshes: SkinnedMeshExport[] = [];
       if (faceChk.checked && resampled.face) {
         const mesh = await loadFaceMeshData();
-        face = buildFaceExport(resampled, mesh);
-        headIndex = resampled.names.indexOf("Head");
+        meshes.push(buildFaceMesh(resampled, mesh));
+      }
+      if (bodyChk.checked) {
+        const body = await buildBodyData(resampled.parents, resampled.bindPos, resampled.names);
+        meshes.push(...bodyToSkinnedMeshExports(body));
       }
       const fbx = writeAnimationFbx(resampled, {
         takeName: sanitizeFilename(loaded.name),
         names,
         tposeRest: restSel.value === "tpose",
-        face,
-        headIndex,
+        meshes,
       });
       downloadBytes(`${sanitizeFilename(loaded.name)}.fbx`, fbx);
     } catch (err) {

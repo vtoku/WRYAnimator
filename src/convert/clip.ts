@@ -128,6 +128,25 @@ function lerp(a: number, b: number, t: number): number {
 }
 
 /**
+ * T-pose world joint positions (meters): cumulative bind offsets with identity
+ * rotations. Resolved recursively — the bone array is NOT topologically sorted
+ * (UpperChest is index 54 but parents earlier-indexed bones).
+ */
+export function bindWorldPositions(parents: number[], bindPos: Vec3[]): Vec3[] {
+  const world: (Vec3 | undefined)[] = new Array(parents.length);
+  const resolve = (i: number): Vec3 => {
+    const cached = world[i];
+    if (cached) return cached;
+    const p = parents[i];
+    const base: Vec3 = p >= 0 ? resolve(p) : [0, 0, 0];
+    const lp = bindPos[i];
+    return (world[i] = [base[0] + lp[0], base[1] + lp[1], base[2] + lp[2]]);
+  };
+  for (let i = 0; i < parents.length; i++) resolve(i);
+  return world as Vec3[];
+}
+
+/**
  * Resample variable-rate motion onto a fixed frame rate (linear pos, slerp rot).
  * `trimStart`/`trimEnd` (seconds from clip start) restrict the exported range;
  * output time is rebased so the first kept frame is t=0.
