@@ -1,9 +1,9 @@
 {
   "name": "wanim-to-fbx",
   "private": true,
-  "version": "0.12.0",
+  "version": "0.12.1",
   "type": "module",
-  "description": "Browser-based Warudo .wanim → FBX animation converter. Runs entirely client-side.",
+  "description": "Browser-based Warudo .wanim to FBX animation converter. Runs entirely client-side.",
   "license": "MIT",
   "scripts": {
     "dev": "vite",

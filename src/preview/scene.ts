@@ -102,6 +102,14 @@ export class PreviewScene {
     if (this.clip) this.attachBody(this.clip);
   }
 
+  private faceVisible = true;
+
+  /** Hide/show the facecap overlay (hidden while a user VRM keeps its own head). */
+  setFaceVisible(visible: boolean) {
+    this.faceVisible = visible;
+    if (this.face) this.face.group.visible = visible;
+  }
+
   private clearBody() {
     if (!this.body) return;
     this.scene.remove(this.body);
@@ -145,6 +153,7 @@ export class PreviewScene {
     face.group.scale.setScalar(BODY_HEAD_HEIGHT_M * k);
     face.group.position.set(0, BODY_HEAD_LIFT_M * k, 0);
     face.group.rotation.set(0, 0, 0);
+    face.group.visible = this.faceVisible;
     face.bindNames(this.clip.face.names);
     this.faceWeights = new Float32Array(this.clip.face.names.length);
   }

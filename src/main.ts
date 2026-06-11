@@ -5,7 +5,7 @@ import { cleanClip, type CleanOpts } from "./convert/clean.ts";
 import { writeAnimationFbx, type SkinnedMeshExport } from "./fbx/animationFbx.ts";
 import { remapNames, type NameScheme } from "./convert/skeleton.ts";
 import { buildFaceMesh } from "./convert/meshExport.ts";
-import { buildBodyData, bodyToSkinnedMeshExports, getBodyJoints, setBodySource } from "./convert/body.ts";
+import { buildBodyData, bodyToSkinnedMeshExports, getBodyJoints, setBodySource, hasUserBody } from "./convert/body.ts";
 import { sanitizeFilename, downloadBytes } from "./fbx/export.ts";
 import { PreviewScene } from "./preview/scene.ts";
 import { loadFaceMeshData } from "./preview/face.ts";
@@ -195,6 +195,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     lastBodyChoice = bodySel.value;
     void setBodySource(null).then(() => {
       preview?.setBodyMode(bodySel.value === "none" ? "none" : "human");
+      preview?.setFaceVisible(true);
       preview?.refreshBody();
       if (propSel.value === "body") void reclean();
     });
@@ -210,6 +211,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
       const mapped = await setBodySource(await file.arrayBuffer());
       lastBodyChoice = "vrm";
       preview?.setBodyMode("human");
+      preview?.setFaceVisible(false); // the VRM keeps its own head
       preview?.refreshBody();
       if (propSel.value === "body") await reclean();
       if (mapped === 0) {
@@ -218,6 +220,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     } catch (err) {
       bodySel.value = lastBodyChoice;
       await setBodySource(null);
+      preview?.setFaceVisible(true);
       showError(err instanceof Error ? err.message : String(err));
     }
   });
@@ -236,7 +239,8 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
       const resampled = resample(loaded.display, fps, trim.start, trim.end);
       const names = remapNames(resampled.names, namesSel.value as NameScheme);
       const meshes: SkinnedMeshExport[] = [];
-      if (faceChk.checked && resampled.face) {
+      // A user VRM keeps its own head, so the facecap Face mesh is omitted.
+      if (faceChk.checked && resampled.face && !hasUserBody()) {
         const mesh = await loadFaceMeshData();
         meshes.push(buildFaceMesh(resampled, mesh));
       }

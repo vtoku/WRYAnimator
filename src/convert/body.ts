@@ -146,8 +146,9 @@ function loadBundledGltf(): Promise<BodySource> {
   if (gltfCache) return gltfCache;
   const loader = new GLTFLoader();
   loader.setMeshoptDecoder(MeshoptDecoder);
+  // ?v= busts the Pages/browser cache — bump when swapping the bundled asset.
   gltfCache = loader
-    .loadAsync(`${import.meta.env.BASE_URL}body.glb`)
+    .loadAsync(`${import.meta.env.BASE_URL}body.glb?v=xbot1`)
     .then((g) => ({ scene: g.scene, boneUnity: null }));
   return gltfCache;
 }
@@ -174,6 +175,11 @@ export function boneUnityFromAssociations(gltf: any, nodeMap: Map<number, string
  * Use a user-provided VRM/GLB as the body source (null restores the bundled
  * body). Returns the number of humanoid-mapped bones (0 = name-based mapping).
  */
+/** True while a user-provided VRM/GLB is the active body source. */
+export function hasUserBody(): boolean {
+  return userSource !== null;
+}
+
 export async function setBodySource(buffer: ArrayBuffer | null): Promise<number> {
   if (buffer === null) {
     userSource = null;
@@ -209,7 +215,10 @@ export function buildBodyData(
   const key = bindPos.map((p) => p.map((v) => v.toFixed(4)).join(",")).join(";");
   if (bodyCache?.key === key) return bodyCache.data;
   const data = getActiveSource().then((src) =>
-    extractBodyMeshes(src.scene, parents, bindPos, unityNames, src.boneUnity ?? undefined),
+    extractBodyMeshes(src.scene, parents, bindPos, unityNames, src.boneUnity ?? undefined, {
+      // A user's VRM keeps its own head/hair; the facecap Face is suppressed.
+      keepHead: userSource !== null,
+    }),
   );
   bodyCache = { key, data };
   return data;
@@ -222,6 +231,7 @@ export function extractBodyMeshes(
   bindPos: Vec3[],
   unityNames: string[],
   boneUnity?: Map<THREE.Object3D, string>,
+  opts: { keepHead?: boolean } = {},
 ): BodyExtract {
   scene.updateWorldMatrix(true, true);
   const ourWorld = bindWorldPositions(parents, bindPos);
@@ -548,7 +558,7 @@ export function extractBodyMeshes(
     const m = skinnedMeshes[mi2];
     // Modular packs ship the swappable head as separate sub-meshes (incl.
     // earrings/glasses) — skip the whole section; the Face mesh replaces it.
-    if (/(^|_)(Head|Ears?)(_|$)/i.test(m.name)) continue;
+    if (!opts.keepHead && /(^|_)(Head|Ears?)(_|$)/i.test(m.name)) continue;
     const rest = restWorldVerts[mi2];
     const geo = m.geometry;
     const sIdx = geo.getAttribute("skinIndex");
@@ -593,10 +603,10 @@ export function extractBodyMeshes(
       : Array.from({ length: count }, (_, i) => i);
     const keptTris: number[] = [];
     const aboveCut = (vi: number) =>
-      headWeight[vi] > 0.5 && outPos[vi * 3 + 1] > cutY;
+      !opts.keepHead && headWeight[vi] > 0.5 && outPos[vi * 3 + 1] > cutY;
     for (let t = 0; t < srcIndices.length; t += 3) {
       const a = srcIndices[t], b2 = srcIndices[t + 1], c2 = srcIndices[t + 2];
-      // Drop tris touching ANY removed head vert ??? keeping boundary-crossing
+      // Drop tris touching ANY removed head vert - keeping boundary-crossing
       // tris leaves upward spikes around the neck.
       if (aboveCut(a) || aboveCut(b2) || aboveCut(c2)) continue;
       keptTris.push(a, b2, c2);

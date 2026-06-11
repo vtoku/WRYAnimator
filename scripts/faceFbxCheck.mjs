@@ -80,12 +80,14 @@ if (process.env.WANIM_PROPORTIONS === "body") {
 }
 const resampled = resample(converted, 30);
 
-// --- meshes ---
-const meshes = [buildFaceMesh(resampled, faceData)];
-const bodyData = extractBodyMeshes(bodyGltfEarly.scene, resampled.parents, resampled.bindPos, resampled.names, bodyBoneUnity).meshes;
+// --- meshes --- (a user VRM keeps its own head, so no facecap Face mesh)
+const meshes = process.env.WANIM_BODY_FILE ? [] : [buildFaceMesh(resampled, faceData)];
+const bodyData = extractBodyMeshes(bodyGltfEarly.scene, resampled.parents, resampled.bindPos, resampled.names, bodyBoneUnity, {
+  keepHead: !!process.env.WANIM_BODY_FILE,
+}).meshes;
 console.log("body meshes:", bodyData.map((m) => `${m.name}(${m.positions.length / 3}v ${m.indices.length / 3}t)`).join(", "));
 meshes.push(...bodyToSkinnedMeshExports(bodyData));
-console.log("face channels:", meshes[0].channels.length);
+if (!process.env.WANIM_BODY_FILE) console.log("face channels:", meshes[0].channels.length);
 
 const fbx = writeAnimationFbx(resampled, { takeName: "Take 001", tposeRest: true, meshes });
 console.log("fbx size", (fbx.length / 1e6).toFixed(2), "MB");
