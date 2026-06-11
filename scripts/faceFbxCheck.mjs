@@ -58,9 +58,23 @@ const faceData = { positions, normals, indices, center: [c.x, c.y, c.z], height:
 const buf = readFileSync(process.argv[2] ?? "C:\\Users\\VTOKU\\Downloads\\All-The-Things-2-2026-05-24-18-55-10.wanim");
 const clip = parseWanim(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength));
 let converted = convertCharacter(clip, 0);
-const bodyGltfEarly = await loadGlb("public/body.glb");
+let bodyGltfEarly, bodyBoneUnity;
+if (process.env.WANIM_BODY_FILE) {
+  const { sanitizeGlb, parseVrmHumanoid } = await import("../src/vrm/vrmHumanoid.ts");
+  const { boneUnityFromAssociations } = await import("../src/convert/body.ts");
+  const raw = readFileSync(process.env.WANIM_BODY_FILE);
+  const clean = sanitizeGlb(raw.buffer.slice(raw.byteOffset, raw.byteOffset + raw.byteLength));
+  const nodeMap = parseVrmHumanoid(clean);
+  const loader2 = new GLTFLoader();
+  loader2.setMeshoptDecoder(MeshoptDecoder);
+  bodyGltfEarly = await loader2.parseAsync(clean, "");
+  bodyBoneUnity = nodeMap ? boneUnityFromAssociations(bodyGltfEarly, nodeMap) : undefined;
+  console.log("body source:", process.env.WANIM_BODY_FILE.split("\\").pop(), "humanoid bones:", bodyBoneUnity?.size ?? 0);
+} else {
+  bodyGltfEarly = await loadGlb("public/body.glb");
+}
 if (process.env.WANIM_PROPORTIONS === "body") {
-  const probe = extractBodyMeshes(bodyGltfEarly.scene, converted.parents, converted.bindPos, converted.names);
+  const probe = extractBodyMeshes(bodyGltfEarly.scene, converted.parents, converted.bindPos, converted.names, bodyBoneUnity);
   converted = retargetProportions(converted, probe.joints);
   console.log("proportions: body skeleton");
 }
@@ -68,7 +82,7 @@ const resampled = resample(converted, 30);
 
 // --- meshes ---
 const meshes = [buildFaceMesh(resampled, faceData)];
-const bodyData = extractBodyMeshes(bodyGltfEarly.scene, resampled.parents, resampled.bindPos, resampled.names).meshes;
+const bodyData = extractBodyMeshes(bodyGltfEarly.scene, resampled.parents, resampled.bindPos, resampled.names, bodyBoneUnity).meshes;
 console.log("body meshes:", bodyData.map((m) => `${m.name}(${m.positions.length / 3}v ${m.indices.length / 3}t)`).join(", "));
 meshes.push(...bodyToSkinnedMeshExports(bodyData));
 console.log("face channels:", meshes[0].channels.length);

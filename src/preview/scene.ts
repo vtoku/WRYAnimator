@@ -97,6 +97,11 @@ export class PreviewScene {
     if (this.clip) this.attachBody(this.clip);
   }
 
+  /** Rebuild the body mesh (e.g. after the body source changed). */
+  refreshBody() {
+    if (this.clip) this.attachBody(this.clip);
+  }
+
   private clearBody() {
     if (!this.body) return;
     this.scene.remove(this.body);

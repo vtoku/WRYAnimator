@@ -133,14 +133,63 @@ function modularToUnity(name: string): string | null {
   return prefix ? `${prefix}${mapped}` : null;
 }
 
-let gltfCache: Promise<{ scene: THREE.Object3D }> | null = null;
+interface BodySource {
+  scene: THREE.Object3D;
+  /** Explicit bone mapping (VRM humanoid): bone Object3D → Unity bone name. */
+  boneUnity: Map<THREE.Object3D, string> | null;
+}
 
-function loadBodyGltf(): Promise<{ scene: THREE.Object3D }> {
+let gltfCache: Promise<BodySource> | null = null;
+let userSource: BodySource | null = null;
+
+function loadBundledGltf(): Promise<BodySource> {
   if (gltfCache) return gltfCache;
   const loader = new GLTFLoader();
   loader.setMeshoptDecoder(MeshoptDecoder);
-  gltfCache = loader.loadAsync(`${import.meta.env.BASE_URL}body.glb`);
+  gltfCache = loader
+    .loadAsync(`${import.meta.env.BASE_URL}body.glb`)
+    .then((g) => ({ scene: g.scene, boneUnity: null }));
   return gltfCache;
+}
+
+function getActiveSource(): Promise<BodySource> {
+  return userSource ? Promise.resolve(userSource) : loadBundledGltf();
+}
+
+/** Build a Object3D→Unity map from a parsed GLTF + a node-index humanoid map. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function boneUnityFromAssociations(gltf: any, nodeMap: Map<number, string>): Map<THREE.Object3D, string> {
+  const out = new Map<THREE.Object3D, string>();
+  const assoc: Map<THREE.Object3D, { nodes?: number }> = gltf.parser.associations;
+  assoc.forEach((v, obj) => {
+    if (v && typeof v.nodes === "number") {
+      const unity = nodeMap.get(v.nodes);
+      if (unity) out.set(obj, unity);
+    }
+  });
+  return out;
+}
+
+/**
+ * Use a user-provided VRM/GLB as the body source (null restores the bundled
+ * body). Returns the number of humanoid-mapped bones (0 = name-based mapping).
+ */
+export async function setBodySource(buffer: ArrayBuffer | null): Promise<number> {
+  if (buffer === null) {
+    userSource = null;
+    bodyCache = null;
+    return 0;
+  }
+  const { sanitizeGlb, parseVrmHumanoid } = await import("../vrm/vrmHumanoid.ts");
+  const clean = sanitizeGlb(buffer);
+  const nodeMap = parseVrmHumanoid(clean);
+  const loader = new GLTFLoader();
+  loader.setMeshoptDecoder(MeshoptDecoder);
+  const gltf = await loader.parseAsync(clean, "");
+  const boneUnity = nodeMap ? boneUnityFromAssociations(gltf, nodeMap) : null;
+  userSource = { scene: gltf.scene, boneUnity };
+  bodyCache = null;
+  return boneUnity?.size ?? 0;
 }
 
 export interface BodyExtract {
@@ -159,8 +208,8 @@ export function buildBodyData(
 ): Promise<BodyExtract> {
   const key = bindPos.map((p) => p.map((v) => v.toFixed(4)).join(",")).join(";");
   if (bodyCache?.key === key) return bodyCache.data;
-  const data = loadBodyGltf().then((gltf) =>
-    extractBodyMeshes(gltf.scene, parents, bindPos, unityNames),
+  const data = getActiveSource().then((src) =>
+    extractBodyMeshes(src.scene, parents, bindPos, unityNames, src.boneUnity ?? undefined),
   );
   bodyCache = { key, data };
   return data;
@@ -172,6 +221,7 @@ export function extractBodyMeshes(
   parents: number[],
   bindPos: Vec3[],
   unityNames: string[],
+  boneUnity?: Map<THREE.Object3D, string>,
 ): BodyExtract {
   scene.updateWorldMatrix(true, true);
   const ourWorld = bindWorldPositions(parents, bindPos);
@@ -189,7 +239,22 @@ export function extractBodyMeshes(
     if (m.isSkinnedMesh) skinnedMeshes.push(m);
   });
   if (skinnedMeshes.length === 0) return { meshes: [], joints: unityNames.map(() => null) };
-  const skeleton = skinnedMeshes[0].skeleton;
+  // UNION of all skeletons' bones — VRMs often bind body and hair/clothing
+  // meshes to DIFFERENT Skeleton objects; resolving every mesh's skin indices
+  // against the first skeleton shreds the others (hair ribbons).
+  const allBones: THREE.Bone[] = [];
+  const unionIndex = new Map<THREE.Bone, number>();
+  for (const sm of skinnedMeshes) {
+    for (const b of sm.skeleton.bones) {
+      if (!unionIndex.has(b)) {
+        unionIndex.set(b, allBones.length);
+        allBones.push(b);
+      }
+    }
+  }
+  const skeleton = { bones: allBones };
+  const localToUnion = (sm: THREE.SkinnedMesh) =>
+    sm.skeleton.bones.map((b) => unionIndex.get(b) ?? -1);
 
   // Capture the REST state in plain world space, using the asset's OWN
   // skinning for the rest shape (whatever its bind convention — 2017-era
@@ -222,10 +287,11 @@ export function extractBodyMeshes(
       const sIdx = m.geometry.getAttribute("skinIndex");
       const sWgt = m.geometry.getAttribute("skinWeight");
       const rest = restWorldVerts[mi3];
+      const l2u = localToUnion(m);
       for (let i = 0; i < rest.length / 3; i++) {
         for (let k = 0; k < 4; k++) {
-          const j = sIdx.getComponent(i, k);
-          if (sWgt.getComponent(i, k) < 0.4) continue;
+          const j = l2u[sIdx.getComponent(i, k)];
+          if (j < 0 || sWgt.getComponent(i, k) < 0.4) continue;
           if (!/Foot/.test(skeleton.bones[j]?.name ?? "")) continue;
           let e = sums.get(j);
           if (!e) sums.set(j, (e = { c: new THREE.Vector3(), n: 0 }));
@@ -241,9 +307,12 @@ export function extractBodyMeshes(
     });
   }
 
-  // Resolve a source bone name → our index via all known naming families.
-  const resolveName = (raw: string): number | undefined => {
-    const n = normalizeBoneName(raw);
+  // Resolve a source bone → our index: explicit humanoid map (VRM) first,
+  // then all known naming families.
+  const resolveBone = (obj: THREE.Object3D): number | undefined => {
+    const explicit = boneUnity?.get(obj);
+    if (explicit !== undefined) return nameToIndex.get(explicit);
+    const n = normalizeBoneName(obj.name);
     return (
       nameToIndex.get(n) ??
       nameToIndex.get(RIGIFY_MAP[n] ?? "") ??
@@ -254,13 +323,13 @@ export function extractBodyMeshes(
   const boneOurIndex = skeleton.bones.map((b) => {
     let cur: THREE.Object3D | null = b;
     while (cur) {
-      const idx = resolveName(cur.name);
+      const idx = resolveBone(cur);
       if (idx !== undefined) return idx;
       cur = cur.parent;
     }
     return 0;
   });
-  const directlyMapped = skeleton.bones.map((b) => resolveName(b.name) !== undefined);
+  const directlyMapped = skeleton.bones.map((b) => resolveBone(b) !== undefined);
 
   const headIdx = unityNames.indexOf("Head");
   const eyeIdx = [unityNames.indexOf("LeftEye"), unityNames.indexOf("RightEye")];
@@ -433,7 +502,8 @@ export function extractBodyMeshes(
       0, 0, 0, 1,
     );
   };
-  const boneDelta = skeleton.bones.map((_, j) => {
+  const boneDelta: (THREE.Matrix4 | null)[] = skeleton.bones.map((_, j) => {
+    if (!directlyMapped[j]) return null; // inherit from the mapped ancestor below
     const m = boneOurIndex[j];
     const D = new THREE.Matrix4().makeTranslation(-restJoint[j].x, -restJoint[j].y, -restJoint[j].z);
     D.premultiply(G);
@@ -451,6 +521,22 @@ export function extractBodyMeshes(
     }
     D.premultiply(new THREE.Matrix4().makeTranslation(ourWorld[m][0], ourWorld[m][1], ourWorld[m][2]));
     return D;
+  });
+  // Unmapped helper bones (VRM hair/skirt spring chains, finger tips,
+  // HeadTop_End…) ride RIGIDLY with their nearest mapped ancestor — giving
+  // them their own rotation deltas shreds hair into ribbons.
+  skeleton.bones.forEach((b, j) => {
+    if (boneDelta[j]) return;
+    let cur: THREE.Object3D | null = b.parent;
+    while (cur) {
+      const pj = skeleton.bones.indexOf(cur as THREE.Bone);
+      if (pj >= 0 && boneDelta[pj]) {
+        boneDelta[j] = boneDelta[pj];
+        return;
+      }
+      cur = cur.parent;
+    }
+    boneDelta[j] = new THREE.Matrix4();
   });
 
 
@@ -476,15 +562,16 @@ export function extractBodyMeshes(
 
     const v = new THREE.Vector3();
     const acc = new THREE.Vector3();
+    const l2u = localToUnion(m);
 
     for (let i = 0; i < count; i++) {
       acc.set(0, 0, 0);
       let wsum = 0;
       for (let k = 0; k < 4; k++) {
-        const j = sIdx.getComponent(i, k);
+        const j = l2u[sIdx.getComponent(i, k)];
         const w = sWgt.getComponent(i, k);
-        if (w === 0) continue;
-        v.set(rest[i * 3], rest[i * 3 + 1], rest[i * 3 + 2]).applyMatrix4(boneDelta[j]);
+        if (w === 0 || j < 0) continue;
+        v.set(rest[i * 3], rest[i * 3 + 1], rest[i * 3 + 2]).applyMatrix4(boneDelta[j]!);
         acc.addScaledVector(v, w);
         wsum += w;
         outIdx[i * 4 + k] = boneOurIndex[j];

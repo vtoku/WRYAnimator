@@ -5,9 +5,9 @@ import { cleanClip, type CleanOpts } from "./convert/clean.ts";
 import { writeAnimationFbx, type SkinnedMeshExport } from "./fbx/animationFbx.ts";
 import { remapNames, type NameScheme } from "./convert/skeleton.ts";
 import { buildFaceMesh } from "./convert/meshExport.ts";
-import { buildBodyData, bodyToSkinnedMeshExports, getBodyJoints } from "./convert/body.ts";
+import { buildBodyData, bodyToSkinnedMeshExports, getBodyJoints, setBodySource } from "./convert/body.ts";
 import { sanitizeFilename, downloadBytes } from "./fbx/export.ts";
-import { PreviewScene, type BodyMode } from "./preview/scene.ts";
+import { PreviewScene } from "./preview/scene.ts";
 import { loadFaceMeshData } from "./preview/face.ts";
 import { createTransport, type Transport } from "./ui/transport.ts";
 
@@ -121,10 +121,12 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     <label class="field">
       <span>Body mesh</span>
       <select id="body">
-        <option value="human" selected>Human (CC0)</option>
+        <option value="human" selected>Ybot (bundled)</option>
+        <option value="vrm">Your VRM / GLB…</option>
         <option value="none">None</option>
       </select>
     </label>
+    <input id="bodyfile" type="file" accept=".vrm,.glb" hidden />
     <button id="download" class="button primary">Download FBX</button>
     <p class="note">Trim with the in/out handles on the timeline. Exports binary
       FBX 7.5 (MotionBuilder-compatible); the face head + its morph animation are
@@ -182,7 +184,43 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
   for (const c of [despikeChk, smoothChk]) c.addEventListener("change", () => void reclean());
   for (const r of [despikeDeg, cutoff]) r.addEventListener("change", () => void reclean());
   propSel.addEventListener("change", () => void reclean());
-  bodySel.addEventListener("change", () => preview?.setBodyMode(bodySel.value as BodyMode));
+
+  const bodyFile = document.getElementById("bodyfile") as HTMLInputElement;
+  let lastBodyChoice = bodySel.value;
+  bodySel.addEventListener("change", () => {
+    if (bodySel.value === "vrm") {
+      bodyFile.click(); // async; handled below
+      return;
+    }
+    lastBodyChoice = bodySel.value;
+    void setBodySource(null).then(() => {
+      preview?.setBodyMode(bodySel.value === "none" ? "none" : "human");
+      preview?.refreshBody();
+      if (propSel.value === "body") void reclean();
+    });
+  });
+  bodyFile.addEventListener("change", async () => {
+    const file = bodyFile.files?.[0];
+    bodyFile.value = "";
+    if (!file) {
+      bodySel.value = lastBodyChoice; // cancelled
+      return;
+    }
+    try {
+      const mapped = await setBodySource(await file.arrayBuffer());
+      lastBodyChoice = "vrm";
+      preview?.setBodyMode("human");
+      preview?.refreshBody();
+      if (propSel.value === "body") await reclean();
+      if (mapped === 0) {
+        showError(`${file.name}: no VRM humanoid mapping found — using bone-name matching.`);
+      }
+    } catch (err) {
+      bodySel.value = lastBodyChoice;
+      await setBodySource(null);
+      showError(err instanceof Error ? err.message : String(err));
+    }
+  });
 
   // Apply the default proportions selection (body-mesh skeleton) on load.
   void reclean();
@@ -202,7 +240,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
         const mesh = await loadFaceMeshData();
         meshes.push(buildFaceMesh(resampled, mesh));
       }
-      if (bodySel.value === "human") {
+      if (bodySel.value !== "none") {
         const body = await buildBodyData(resampled.parents, resampled.bindPos, resampled.names);
         meshes.push(...bodyToSkinnedMeshExports(body.meshes));
       }
