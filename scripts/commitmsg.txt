@@ -1,0 +1,18 @@
+Emit binary FBX (7500) instead of ASCII so MotionBuilder imports it
+
+MotionBuilder 2018+ dropped ASCII FBX import, so the ASCII output loaded as a
+partial dot-cloud with a "legacy file" warning. Switch to binary FBX 7500:
+
+- fbxBinary.ts: binary serializer (64-bit node records, 25-byte null
+  terminators, fixed assimp-style footer). Object names use the binary
+  separator name\x00\x01class (NOT ascii class::name) — getting that wrong
+  silently drops AnimationCurveNode channel tags and yields zero tracks.
+- animationFbx.ts: build an FBX node tree and serialize to binary; all object
+  names go through objName().
+- export.ts/main.ts: download the Uint8Array as a binary blob.
+- smoke test validates the binary header/footer; fbxcheck round-trips it
+  (55 bones, 56 tracks, MoBu names LeftArm/Spine1/LeftHandThumb1 intact).
+
+7500 also clears the legacy-version warning.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>

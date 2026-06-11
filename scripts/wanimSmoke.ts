@@ -31,27 +31,18 @@ console.log(`hips(cm)   [${hips0.join(", ")}] at frame 0`);
 
 const mbNames = remapNames(resampled.names, "motionbuilder");
 const fbx = writeAnimationFbx(resampled, { takeName: "Take 001", names: mbNames, tposeRest: true });
-const lines = fbx.split("\n").length;
-console.log(`fbx        ${(fbx.length / 1e6).toFixed(2)} MB, ${lines} lines (MoBu names, T-pose rest)`);
-for (const need of ["LeftArm", "LeftForeArm", "LeftUpLeg", "Spine1", "LeftHandThumb1"]) {
-  if (!fbx.includes(`Model::${need}`)) throw new Error(`MoBu name missing: ${need}`);
-}
-console.log(`names      MoBu scheme present (LeftArm, LeftForeArm, LeftUpLeg, Spine1, LeftHandThumb1)`);
+console.log(`fbx        ${(fbx.length / 1e6).toFixed(2)} MB binary (MoBu names, T-pose rest)`);
 
-// Sanity: balanced { } braces, expected sections present.
-let depth = 0;
-for (const ch of fbx) {
-  if (ch === "{") depth++;
-  else if (ch === "}") depth--;
-  if (depth < 0) throw new Error("unbalanced braces (extra closing)");
+// Sanity: binary FBX header + footer magic.
+const head = new TextDecoder().decode(fbx.subarray(0, 20));
+if (head !== "Kaydara FBX Binary  ") throw new Error(`bad header: ${JSON.stringify(head)}`);
+const version = new DataView(fbx.buffer, fbx.byteOffset + 23, 4).getUint32(0, true);
+console.log(`version    ${version}`);
+const footMagic = [0xf8, 0x5a, 0x8c, 0x6a, 0xde, 0xf5, 0xd9, 0x7e];
+for (let i = 0; i < footMagic.length; i++) {
+  if (fbx[fbx.length - 16 + i] !== footMagic[i]) throw new Error("bad footer magic");
 }
-if (depth !== 0) throw new Error(`unbalanced braces (depth ${depth} at EOF)`);
-for (const section of ["Objects:", "Connections:", "AnimationStack:", "AnimationCurve:", "Takes:"]) {
-  if (!fbx.includes(section)) throw new Error(`missing section: ${section}`);
-}
-const curveNodes = (fbx.match(/AnimationCurveNode:/g) ?? []).length;
-const curves = (fbx.match(/AnimationCurve: /g) ?? []).length;
-console.log(`curves     ${curveNodes} nodes, ${curves} curves`);
+console.log("footer     magic OK");
 
 if (out) {
   writeFileSync(out, fbx);

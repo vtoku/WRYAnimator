@@ -4,8 +4,8 @@ export function sanitizeFilename(name: string): string {
   return cleaned || "animation";
 }
 
-export function downloadText(filename: string, text: string) {
-  const blob = new Blob([text], { type: "application/octet-stream" });
+export function downloadBytes(filename: string, data: Uint8Array) {
+  const blob = new Blob([data as BlobPart], { type: "application/octet-stream" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;

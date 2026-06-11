@@ -3,7 +3,7 @@ import { parseWanim, BONE_COUNT, type WanimClip } from "./wanim/parse.ts";
 import { convertCharacter, resample, type ConvertedClip } from "./convert/clip.ts";
 import { writeAnimationFbx } from "./fbx/animationFbx.ts";
 import { remapNames, type NameScheme } from "./convert/skeleton.ts";
-import { sanitizeFilename, downloadText } from "./fbx/export.ts";
+import { sanitizeFilename, downloadBytes } from "./fbx/export.ts";
 import { PreviewScene } from "./preview/scene.ts";
 
 const emptyState = document.getElementById("empty-state") as HTMLElement;
@@ -133,7 +133,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
           names,
           tposeRest: restSel.value === "tpose",
         });
-        downloadText(`${sanitizeFilename(loaded!.name)}.fbx`, fbx);
+        downloadBytes(`${sanitizeFilename(loaded!.name)}.fbx`, fbx);
       } catch (err) {
         showError(err instanceof Error ? err.message : String(err));
       } finally {
