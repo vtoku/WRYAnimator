@@ -319,12 +319,134 @@ export function writeAnimationFbx(clip: ResampledClip, opts: WriteAnimOpts = {})
     else OP(fc.a, fc.b, fc.p!);
   }
 
-  // ---- Definitions counts (derived from the objects actually emitted) ----
+  // ---- Definitions with PropertyTemplates (as Blender/assimp/the SDK write).
+  // The FBX SDK resolves class-default properties from these templates; files
+  // without them are off-spec even if lenient readers cope.
+  const fbxNodeTemplate = node("PropertyTemplate", [S("FbxNode")], [
+    node("Properties70", [], [
+      P("QuaternionInterpolate", S("enum"), S(""), S(""), I(0)),
+      P("RotationOffset", S("Vector3D"), S("Vector"), S(""), D(0), D(0), D(0)),
+      P("RotationPivot", S("Vector3D"), S("Vector"), S(""), D(0), D(0), D(0)),
+      P("ScalingOffset", S("Vector3D"), S("Vector"), S(""), D(0), D(0), D(0)),
+      P("ScalingPivot", S("Vector3D"), S("Vector"), S(""), D(0), D(0), D(0)),
+      P("TranslationActive", S("bool"), S(""), S(""), I(0)),
+      P("TranslationMin", S("Vector3D"), S("Vector"), S(""), D(0), D(0), D(0)),
+      P("TranslationMax", S("Vector3D"), S("Vector"), S(""), D(0), D(0), D(0)),
+      P("TranslationMinX", S("bool"), S(""), S(""), I(0)),
+      P("TranslationMinY", S("bool"), S(""), S(""), I(0)),
+      P("TranslationMinZ", S("bool"), S(""), S(""), I(0)),
+      P("TranslationMaxX", S("bool"), S(""), S(""), I(0)),
+      P("TranslationMaxY", S("bool"), S(""), S(""), I(0)),
+      P("TranslationMaxZ", S("bool"), S(""), S(""), I(0)),
+      P("RotationOrder", S("enum"), S(""), S(""), I(0)),
+      P("RotationSpaceForLimitOnly", S("bool"), S(""), S(""), I(0)),
+      P("RotationStiffnessX", S("double"), S("Number"), S(""), D(0)),
+      P("RotationStiffnessY", S("double"), S("Number"), S(""), D(0)),
+      P("RotationStiffnessZ", S("double"), S("Number"), S(""), D(0)),
+      P("AxisLen", S("double"), S("Number"), S(""), D(10)),
+      P("PreRotation", S("Vector3D"), S("Vector"), S(""), D(0), D(0), D(0)),
+      P("PostRotation", S("Vector3D"), S("Vector"), S(""), D(0), D(0), D(0)),
+      P("RotationActive", S("bool"), S(""), S(""), I(0)),
+      P("RotationMin", S("Vector3D"), S("Vector"), S(""), D(0), D(0), D(0)),
+      P("RotationMax", S("Vector3D"), S("Vector"), S(""), D(0), D(0), D(0)),
+      P("RotationMinX", S("bool"), S(""), S(""), I(0)),
+      P("RotationMinY", S("bool"), S(""), S(""), I(0)),
+      P("RotationMinZ", S("bool"), S(""), S(""), I(0)),
+      P("RotationMaxX", S("bool"), S(""), S(""), I(0)),
+      P("RotationMaxY", S("bool"), S(""), S(""), I(0)),
+      P("RotationMaxZ", S("bool"), S(""), S(""), I(0)),
+      P("InheritType", S("enum"), S(""), S(""), I(0)),
+      P("ScalingActive", S("bool"), S(""), S(""), I(0)),
+      P("ScalingMin", S("Vector3D"), S("Vector"), S(""), D(0), D(0), D(0)),
+      P("ScalingMax", S("Vector3D"), S("Vector"), S(""), D(1), D(1), D(1)),
+      P("ScalingMinX", S("bool"), S(""), S(""), I(0)),
+      P("ScalingMinY", S("bool"), S(""), S(""), I(0)),
+      P("ScalingMinZ", S("bool"), S(""), S(""), I(0)),
+      P("ScalingMaxX", S("bool"), S(""), S(""), I(0)),
+      P("ScalingMaxY", S("bool"), S(""), S(""), I(0)),
+      P("ScalingMaxZ", S("bool"), S(""), S(""), I(0)),
+      P("GeometricTranslation", S("Vector3D"), S("Vector"), S(""), D(0), D(0), D(0)),
+      P("GeometricRotation", S("Vector3D"), S("Vector"), S(""), D(0), D(0), D(0)),
+      P("GeometricScaling", S("Vector3D"), S("Vector"), S(""), D(1), D(1), D(1)),
+      P("MinDampRangeX", S("double"), S("Number"), S(""), D(0)),
+      P("MinDampRangeY", S("double"), S("Number"), S(""), D(0)),
+      P("MinDampRangeZ", S("double"), S("Number"), S(""), D(0)),
+      P("MaxDampRangeX", S("double"), S("Number"), S(""), D(0)),
+      P("MaxDampRangeY", S("double"), S("Number"), S(""), D(0)),
+      P("MaxDampRangeZ", S("double"), S("Number"), S(""), D(0)),
+      P("MinDampStrengthX", S("double"), S("Number"), S(""), D(0)),
+      P("MinDampStrengthY", S("double"), S("Number"), S(""), D(0)),
+      P("MinDampStrengthZ", S("double"), S("Number"), S(""), D(0)),
+      P("MaxDampStrengthX", S("double"), S("Number"), S(""), D(0)),
+      P("MaxDampStrengthY", S("double"), S("Number"), S(""), D(0)),
+      P("MaxDampStrengthZ", S("double"), S("Number"), S(""), D(0)),
+      P("PreferedAngleX", S("double"), S("Number"), S(""), D(0)),
+      P("PreferedAngleY", S("double"), S("Number"), S(""), D(0)),
+      P("PreferedAngleZ", S("double"), S("Number"), S(""), D(0)),
+      P("LookAtProperty", S("object"), S(""), S("")),
+      P("UpVectorProperty", S("object"), S(""), S("")),
+      P("Show", S("bool"), S(""), S(""), I(1)),
+      P("NegativePercentShapeSupport", S("bool"), S(""), S(""), I(1)),
+      P("DefaultAttributeIndex", S("int"), S("Integer"), S(""), I(-1)),
+      P("Freeze", S("bool"), S(""), S(""), I(0)),
+      P("LODBox", S("bool"), S(""), S(""), I(0)),
+      P("Lcl Translation", S("Lcl Translation"), S(""), S("A"), D(0), D(0), D(0)),
+      P("Lcl Rotation", S("Lcl Rotation"), S(""), S("A"), D(0), D(0), D(0)),
+      P("Lcl Scaling", S("Lcl Scaling"), S(""), S("A"), D(1), D(1), D(1)),
+      P("Visibility", S("Visibility"), S(""), S("A"), D(1)),
+      P("Visibility Inheritance", S("Visibility Inheritance"), S(""), S(""), I(1)),
+    ]),
+  ]);
+  const skeletonTemplate = node("PropertyTemplate", [S("FbxSkeleton")], [
+    node("Properties70", [], [
+      P("Color", S("ColorRGB"), S("Color"), S(""), D(0.8), D(0.8), D(0.8)),
+      P("Size", S("double"), S("Number"), S(""), D(100 / 3)),
+      P("LimbLength", S("double"), S("Number"), S("H"), D(1)),
+    ]),
+  ]);
+  const animStackTemplate = node("PropertyTemplate", [S("FbxAnimStack")], [
+    node("Properties70", [], [
+      P("Description", S("KString"), S(""), S(""), S("")),
+      P("LocalStart", S("KTime"), S("Time"), S(""), L(0)),
+      P("LocalStop", S("KTime"), S("Time"), S(""), L(0)),
+      P("ReferenceStart", S("KTime"), S("Time"), S(""), L(0)),
+      P("ReferenceStop", S("KTime"), S("Time"), S(""), L(0)),
+    ]),
+  ]);
+  const animLayerTemplate = node("PropertyTemplate", [S("FbxAnimLayer")], [
+    node("Properties70", [], [
+      P("Weight", S("Number"), S(""), S("A"), D(100)),
+      P("Mute", S("bool"), S(""), S(""), I(0)),
+      P("Solo", S("bool"), S(""), S(""), I(0)),
+      P("Lock", S("bool"), S(""), S(""), I(0)),
+      P("Color", S("ColorRGB"), S("Color"), S(""), D(0.8), D(0.8), D(0.8)),
+      P("BlendMode", S("enum"), S(""), S(""), I(0)),
+      P("RotationAccumulationMode", S("enum"), S(""), S(""), I(0)),
+      P("ScaleAccumulationMode", S("enum"), S(""), S(""), I(0)),
+      P("BlendModeBypass", S("ULongLong"), S(""), S(""), L(0)),
+    ]),
+  ]);
+  const animCurveNodeTemplate = node("PropertyTemplate", [S("FbxAnimCurveNode")], [
+    node("Properties70", [], [P("d", S("Compound"), S(""), S(""))]),
+  ]);
+
+  const templateFor: Record<string, FbxNode | null> = {
+    Model: fbxNodeTemplate,
+    NodeAttribute: skeletonTemplate,
+    AnimationStack: animStackTemplate,
+    AnimationLayer: animLayerTemplate,
+    AnimationCurveNode: animCurveNodeTemplate,
+  };
+
   const typeCounts: Record<string, number> = {};
   for (const o of objects) typeCounts[o.name] = (typeCounts[o.name] ?? 0) + 1;
-  const objectTypes = Object.entries(typeCounts).map(([name, count]) =>
-    node("ObjectType", [S(name)], [node("Count", [I(count)])]),
-  );
+  const objectTypes = Object.entries(typeCounts).map(([name, count]) => {
+    const tpl = templateFor[name];
+    return node("ObjectType", [S(name)], [
+      node("Count", [I(count)]),
+      ...(tpl ? [tpl] : []),
+    ]);
+  });
   const totalDefs = 1 + objects.length;
   const definitions = node("Definitions", [], [
     node("Version", [I(100)]),
