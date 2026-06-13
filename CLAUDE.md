@@ -53,6 +53,8 @@ npm run preview    # serve built dist/ — ALWAYS test the Pages base path here,
 npm run smoke    -- <file.wanim> [out.fbx]   # parse → convert → resample → write FBX, brace/section sanity check
 npm run fbxcheck -- <file.fbx>               # load an emitted FBX back with three's FBXLoader, report bones+clip
 npm run drive    -- [file.wanim]             # Playwright: drive the running dev server, screenshot, test download
+npm run cleanCheck -- [file.wanim]           # verify the cleaning filters (despike/butterworth/wrist) on real data
+npm run vrmaCheck  -- [file.wanim] [out]     # VRMA exporter structural check (VRMC_vrm_animation layout)
 ```
 
 No unit-test framework yet — the three `npm run` scripts above are the regression checks (they import the real `src/` modules). `node --experimental-strip-types` runs the TS directly: see the gotcha below.
