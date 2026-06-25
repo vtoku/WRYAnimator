@@ -1,6 +1,6 @@
 import "./style.css";
 import { parseWanim, BONE_COUNT, type WanimClip } from "./wanim/parse.ts";
-import { convertCharacter, resample, retargetProportions, type ConvertedClip } from "./convert/clip.ts";
+import { convertCharacter, resample, retargetProportions, distributeBonelessSpine, type ConvertedClip } from "./convert/clip.ts";
 import { cleanClip, type CleanOpts } from "./convert/clean.ts";
 import { writeAnimationFbx, type SkinnedMeshExport } from "./fbx/animationFbx.ts";
 import { remapNames, type NameScheme } from "./convert/skeleton.ts";
@@ -130,6 +130,10 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
       </select>
     </label>
     <label class="field">
+      <span>Distribute spine bend</span>
+      <input id="distSpine" type="checkbox" title="For avatars without an upper-chest bone: spreads a concentrated upper-spine fold into a smooth curve. No effect when the recording's spine is already complete." />
+    </label>
+    <label class="field">
       <span>Face blendshapes</span>
       <input id="face" type="checkbox" ${converted.face ? "checked" : "disabled"} />
     </label>
@@ -162,6 +166,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
   const restSel = document.getElementById("rest") as HTMLSelectElement;
   const propSel = document.getElementById("proportions") as HTMLSelectElement;
   const faceChk = document.getElementById("face") as HTMLInputElement;
+  const distSpineChk = document.getElementById("distSpine") as HTMLInputElement;
   const bodySel = document.getElementById("body") as HTMLSelectElement;
   const downloadBtn = document.getElementById("download") as HTMLButtonElement;
   const resetBtn = document.getElementById("reset") as HTMLButtonElement;
@@ -206,6 +211,9 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
         showError(err instanceof Error ? err.message : String(err));
       }
     }
+    // After proportions (which would reset a dead bone's bind): spread a spine
+    // bend concentrated on one joint by a missing upper-chest bone.
+    if (distSpineChk.checked) display = distributeBonelessSpine(display);
     loaded.display = display;
     const trim = transport?.getTrim();
     preview.setClip(display); // duration is unchanged; this resets the pose
@@ -216,7 +224,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
   cutoffVal.value = `${cutoff.value} Hz`;
   despikeDeg.addEventListener("input", () => { despikeVal.value = `${despikeDeg.value}°`; });
   cutoff.addEventListener("input", () => { cutoffVal.value = `${cutoff.value} Hz`; });
-  for (const c of [despikeChk, smoothChk, limitWristsChk]) c.addEventListener("change", () => void reclean());
+  for (const c of [despikeChk, smoothChk, limitWristsChk, distSpineChk]) c.addEventListener("change", () => void reclean());
   for (const r of [despikeDeg, cutoff]) r.addEventListener("change", () => void reclean());
   propSel.addEventListener("change", () => void reclean());
   lockWristsSel.addEventListener("change", () => void reclean());
@@ -360,6 +368,7 @@ async function handleFile(file: File) {
     loadedState.hidden = false;
 
     if (!preview) preview = new PreviewScene(viewport);
+    (window as unknown as { __preview?: PreviewScene }).__preview = preview; // test hook
     preview.setClip(converted);
 
     transport?.dispose();

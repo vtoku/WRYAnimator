@@ -201,6 +201,67 @@ export function bindWorldPositions(parents: number[], bindPos: Vec3[]): Vec3[] {
 }
 
 /**
+ * Some VRMs omit the optional UpperChest (and/or Chest) bone. Warudo then
+ * records that bone as a degenerate zero quaternion and packs the entire
+ * upper-spine bend into the single bone below it, so the torso folds at one
+ * sharp joint — the body reads as "hunched" / bending at an odd spot.
+ *
+ * This unpacks that concentration: each dead, zero-length intermediate spine
+ * bone is given a real position halfway to its child (every joint's world
+ * position is preserved in the bind), and its parent's per-frame rotation is
+ * split evenly across the two joints, so the fold spreads into a smooth curve
+ * instead of one kink. No-op when no such dead bone exists (e.g. recordings
+ * whose avatar had a full spine), so it is safe to always offer as a toggle.
+ */
+export function distributeBonelessSpine(c: ConvertedClip): ConvertedClip {
+  const frames = c.times.length;
+  const isDegenerate = (q: Quat) => Math.hypot(q[0], q[1], q[2], q[3]) < 0.5;
+  const childrenOf = (i: number): number[] => {
+    const out: number[] = [];
+    for (let k = 0; k < c.parents.length; k++) if (c.parents[k] === i) out.push(k);
+    return out;
+  };
+  const SPINE = new Set(["Chest", "UpperChest"]);
+  const dead: number[] = [];
+  for (let i = 0; i < c.names.length; i++) {
+    if (!SPINE.has(c.names[i])) continue;
+    const len = Math.hypot(c.bindPos[i][0], c.bindPos[i][1], c.bindPos[i][2]);
+    if (len < 1e-4 && childrenOf(i).length === 1 && c.localQuat[i].every(isDegenerate)) {
+      dead.push(i);
+    }
+  }
+  if (dead.length === 0) return c;
+
+  const localQuat = c.localQuat.map((t) => t.map((q) => [...q] as Quat));
+  const localPos = c.localPos.map((t) => t.map((p) => [...p] as Vec3));
+  const bindPos = c.bindPos.map((p) => [...p] as Vec3);
+
+  for (const d of dead) {
+    const p = c.parents[d];
+    const child = childrenOf(d)[0];
+    // (1) Give the dead bone half the child's offset → it sits midway, and the
+    // child keeps the rest, so all world joint positions are preserved in bind.
+    const half: Vec3 = [bindPos[child][0] / 2, bindPos[child][1] / 2, bindPos[child][2] / 2];
+    bindPos[d] = half;
+    bindPos[child] = [bindPos[child][0] - half[0], bindPos[child][1] - half[1], bindPos[child][2] - half[2]];
+    for (let f = 0; f < frames; f++) {
+      localPos[d][f] = [...bindPos[d]] as Vec3;
+      localPos[child][f] = [...bindPos[child]] as Vec3;
+    }
+    // (2) Split the parent's rotation: parent keeps half, dead bone takes half
+    // (h·h = original, so the child chain's orientation is unchanged).
+    if (p >= 0) {
+      for (let f = 0; f < frames; f++) {
+        const h = quatSlerp([0, 0, 0, 1], localQuat[p][f], 0.5);
+        localQuat[p][f] = h;
+        localQuat[d][f] = [...h] as Quat;
+      }
+    }
+  }
+  return { ...c, localQuat, localPos, bindPos };
+}
+
+/**
  * Resample variable-rate motion onto a fixed frame rate (linear pos, slerp rot).
  * `trimStart`/`trimEnd` (seconds from clip start) restrict the exported range;
  * output time is rebased so the first kept frame is t=0.

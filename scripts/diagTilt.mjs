@@ -40,4 +40,32 @@ toMapped.normalize();
 const ang = (THREE.MathUtils.radToDeg(toUpperChest.angleTo(toMapped))).toFixed(1);
 console.log("Chest -> UpperChest (old target):", toUpperChest.toArray().map(v=>v.toFixed(3)).join(","));
 console.log("Chest -> Neck+shoulders (new target):", toMapped.toArray().map(v=>v.toFixed(3)).join(","));
-console.log("tilt between old and new target:", ang, "deg  <-- the spurious pitch removed");
+console.log("tilt between old and new target:", ang, "deg");
+
+// --- Measure the SOURCE VRM's actual chest->children direction (yaw-aligned) ---
+// Find the source bone mapped to our Chest, its joint, and mapped-children joints.
+const bones = [];
+gltf.scene.traverse((o) => { if (o.isBone) bones.push(o); });
+const srcUnity = new Map();
+boneUnity.forEach((u, obj) => srcUnity.set(obj, u));
+const chestSrc = bones.find((b) => srcUnity.get(b) === "Chest")
+  ?? bones.find((b) => /chest/i.test(b.name) && !/upper/i.test(b.name));
+console.log("\nsource Chest bone:", chestSrc?.name);
+if (chestSrc) {
+  const cj = chestSrc.getWorldPosition(new THREE.Vector3());
+  // its bone children that map to Neck / shoulders
+  const kids = [];
+  chestSrc.traverse((o) => {
+    if (o === chestSrc || !o.isBone) return;
+    const u = srcUnity.get(o);
+    if (u === "Neck" || u === "LeftShoulder" || u === "RightShoulder") kids.push(o);
+  });
+  const dir = new THREE.Vector3();
+  for (const k of kids) dir.add(k.getWorldPosition(new THREE.Vector3()).sub(cj));
+  dir.normalize();
+  // global yaw to +Z (toes heading) — approximate with the body facing; assume already +Z for VRM rest.
+  console.log("source Chest->{neck,shoulders} dir (world):", dir.toArray().map(v=>v.toFixed(3)).join(","));
+  console.log("  vs our new target:", toMapped.toArray().map(v=>v.toFixed(3)).join(","));
+  console.log("  rotation the transfer bakes in:", THREE.MathUtils.radToDeg(dir.angleTo(toMapped)).toFixed(1),
+    "deg  (sign: src z", dir.z.toFixed(3), "-> our z", toMapped.z.toFixed(3), ")");
+}
