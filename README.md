@@ -6,22 +6,22 @@ https://vtoku.github.io/WANIMxFBX/
 
 ## What it does
 
-Reads a `.wanim` file recorded in [Warudo](https://warudo.app/) and exports an `.fbx` containing the recorded skeleton animation. Conversion runs locally in the browser — the file is not uploaded.
+Reads a `.wanim` file recorded in [Warudo](https://warudo.app/) and exports an `.fbx` containing the recorded skeleton animation. Everything runs locally in your browser, so the file is never uploaded.
 
 ## How to use
 
 1. Drag a `.wanim` file onto the page (or click to select one).
-2. Watch the animated skeleton in the 3D preview — including a stand-in head that plays back the recorded ARKit face blendshapes — and scrub or pause with the transport bar.
-3. Pick an export frame rate and click **Download FBX**.
+2. Watch the animated skeleton in the 3D preview, including a stand-in head that plays back the recorded ARKit face blendshapes, and scrub or pause with the transport bar.
+3. Pick a frame rate and a format (FBX or VRMA), then hit **Download**.
 4. Import the FBX into Blender, Maya, MotionBuilder, etc.
 
 The preview face is for reference only; face data is not written to the FBX (see below).
 
 The FBX is **binary FBX 7.5** (imports into MotionBuilder, Blender, Maya, Unity): a 55-bone Unity humanoid skeleton with per-bone rotation curves and root (hips) translation, in a single take, Y-up, centimetres. Options:
 
-- **Bone names** — Unity HumanBodyBones (default) or MotionBuilder/HumanIK names (auto-characterizes in MotionBuilder).
-- **Rest pose** — T-pose (default) or first recorded frame.
-- **Face blendshapes** — embeds a stand-in head mesh with the recorded ARKit blendshape animation (52 ARKit channels) as morph targets.
+- **Bone names**: Unity HumanBodyBones (default), or MotionBuilder/HumanIK names that auto-characterize in MotionBuilder.
+- **Rest pose**: T-pose (default) or the first recorded frame.
+- **Face blendshapes**: embeds a stand-in head mesh carrying the recorded ARKit blendshape animation (52 ARKit channels) as morph targets.
 
 ## Not included
 
@@ -33,7 +33,7 @@ Independent, unofficial tool. "Warudo" is a trademark of HakuyaLabs. Not affilia
 
 ## Intended use
 
-This converts **your own** motion recordings. It is **not** for ripping animations bundled with Warudo or third-party assets. Make sure you hold the proper license (e.g. from Booth or the Unity Asset Store) for any motion you convert.
+This is for converting **your own** motion recordings. Please don't use it to rip animations that ship with Warudo or other paid assets. Make sure you actually own the rights to whatever you convert (for example, from Booth or the Unity Asset Store).
 
 ## License
 

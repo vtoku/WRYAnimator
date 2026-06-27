@@ -131,7 +131,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     </label>
     <label class="field">
       <span>Distribute spine bend</span>
-      <input id="distSpine" type="checkbox" title="For avatars without an upper-chest bone: spreads a concentrated upper-spine fold into a smooth curve. No effect when the recording's spine is already complete." />
+      <input id="distSpine" type="checkbox" title="Some avatars have no upper-chest bone, so the spine folds sharply at one joint. This spreads that fold into a smoother curve. It does nothing if the recording already has a full spine." />
     </label>
     <label class="field sub">
       <span>Spread <output id="distSpineAmtVal">50%</output></span>
@@ -157,10 +157,11 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
       </select>
       <button id="download" class="button primary">Download</button>
     </div>
-    <p class="note">Trim with the in/out handles on the timeline. FBX is binary
-      7.5 (MotionBuilder-compatible) with the face/body meshes embedded when
-      enabled. VRMA is the VRM Animation format (humanoid + expressions) for
-      Warudo/VSeeFace/Unity — plays on any VRM, no mesh needed.</p>
+    <p class="note">Drag the in/out handles on the timeline to trim. FBX comes
+      out as binary 7.5, which MotionBuilder can read, with the face and body
+      meshes baked in if you turned them on. VRMA carries the humanoid motion
+      and expressions for Warudo, VSeeFace, and Unity; it plays on any VRM and
+      doesn't need a mesh.</p>
     <button id="reset" class="button ghost">Load another file</button>
   `;
 
@@ -210,7 +211,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
       if (opts.limitWrists) parts.push(`wrists clamped: ${stats.wristClamped} frames`);
       if (opts.despike) parts.push(`pops fixed: ${stats.despiked}`);
       if (opts.smooth) parts.push(`smoothing: ±${stats.smoothedMeanDeg.toFixed(2)}° avg`);
-      cleanStatsEl.textContent = `Applied — ${parts.join(" · ")}`;
+      cleanStatsEl.textContent = `Applied: ${parts.join(" · ")}`;
     }
     if (propSel.value === "body") {
       try {
@@ -273,7 +274,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
       preview?.refreshBody();
       if (propSel.value === "body") await reclean();
       if (mapped === 0) {
-        showError(`${file.name}: no VRM humanoid mapping found — using bone-name matching.`);
+        showError(`${file.name}: no VRM humanoid mapping found, falling back to bone-name matching.`);
       }
     } catch (err) {
       bodySel.value = lastBodyChoice;
