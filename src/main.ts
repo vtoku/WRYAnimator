@@ -154,6 +154,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
       <select id="format" aria-label="Export format">
         <option value="fbx" selected>FBX</option>
         <option value="vrma">VRMA</option>
+        <option value="wanim">WANIM</option>
       </select>
       <button id="download" class="button primary">Download</button>
     </div>
@@ -161,7 +162,8 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
       out as binary 7.5, which MotionBuilder can read, with the face and body
       meshes baked in if you turned them on. VRMA carries the humanoid motion
       and expressions for Warudo, VSeeFace, and Unity; it plays on any VRM and
-      doesn't need a mesh.</p>
+      doesn't need a mesh. WANIM writes the cleaned recording back out so you
+      can take it into Warudo again.</p>
     <button id="reset" class="button ghost">Load another file</button>
   `;
 
@@ -297,6 +299,17 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     try {
       const fps = Number(fpsSel.value);
       const trim = transport?.getTrim() ?? { start: 0, end: loaded.display.duration };
+      if (format === "wanim") {
+        // Re-export the cleaned recording as .wanim for re-import into Warudo.
+        // Uses the RECORDED proportions (the body-mesh retarget is a mesh-fit
+        // concern with no meaning in a .wanim) plus the cleaning + spine
+        // changes; hips keep full motion and the character root stays identity.
+        let clip = cleanClip(loaded.converted, cleanOpts());
+        if (distSpineChk.checked) clip = distributeBonelessSpine(clip, Number(distSpineAmt.value) / 100);
+        const rs = resample(clip, fps, trim.start, trim.end);
+        const { writeWanim } = await import("./wanim/writeWanim.ts");
+        downloadBytes(`${sanitizeFilename(loaded.name)}.wanim`, writeWanim(rs, loaded.clip));
+      } else {
       const resampled = resample(loaded.display, fps, trim.start, trim.end);
       if (format === "vrma") {
         // Original ARKit tracks become custom expressions; the synthesized
@@ -334,6 +347,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
           meshes,
         });
         downloadBytes(`${sanitizeFilename(loaded.name)}.fbx`, fbx);
+      }
       }
     } catch (err) {
       showError(err instanceof Error ? err.message : String(err));

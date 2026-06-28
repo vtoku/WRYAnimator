@@ -15,14 +15,22 @@ await page.evaluate(() => document.querySelector(".download-row")?.scrollIntoVie
 await page.waitForTimeout(300);
 await page.screenshot({ path: "scripts/download-row.png", clip: { x: 720, y: 0, width: 380, height: 900 } });
 
-// Test both downloads work.
-for (const fmt of ["fbx", "vrma"]) {
+// Test all three downloads work.
+import { statSync } from "node:fs";
+for (const fmt of ["fbx", "vrma", "wanim"]) {
   await page.selectOption("#format", fmt);
   const [dl] = await Promise.all([
-    page.waitForEvent("download", { timeout: 40000 }),
+    page.waitForEvent("download", { timeout: 60000 }),
     page.click("#download"),
   ]);
-  console.log(fmt, "->", dl.suggestedFilename());
+  const path = `scripts/dl-out.${fmt}`;
+  await dl.saveAs(path);
+  console.log(fmt, "->", dl.suggestedFilename(), (statSync(path).size / 1e6).toFixed(2), "MB");
 }
+// Re-parse the downloaded .wanim to confirm it is valid.
+const { parseWanim } = await import("../src/wanim/parse.ts");
+const wb = readFileSync("scripts/dl-out.wanim");
+const rt = parseWanim(wb.buffer.slice(wb.byteOffset, wb.byteOffset + wb.byteLength));
+console.log("re-parsed wanim:", rt.times.length, "frames,", rt.characters.length, "char(s), v" + rt.version);
 if (errors.length) errors.slice(0, 5).forEach((e) => console.log("ERR", e)); else console.log("no console errors");
 await browser.close();

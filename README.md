@@ -12,8 +12,8 @@ Reads a `.wanim` file recorded in [Warudo](https://warudo.app/) and exports an `
 
 1. Drag a `.wanim` file onto the page (or click to select one).
 2. Watch the animated skeleton in the 3D preview, including a stand-in head that plays back the recorded ARKit face blendshapes, and scrub or pause with the transport bar.
-3. Pick a frame rate and a format (FBX or VRMA), then hit **Download**.
-4. Import the FBX into Blender, Maya, MotionBuilder, etc.
+3. Pick a frame rate and a format (FBX, VRMA, or WANIM), then hit **Download**.
+4. Import the FBX into Blender, Maya, MotionBuilder, etc., load the VRMA in Warudo/VSeeFace/Unity, or take the cleaned WANIM back into Warudo.
 
 The preview face is for reference only; face data is not written to the FBX (see below).
 
