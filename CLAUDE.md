@@ -53,7 +53,7 @@ npm run preview    # serve built dist/ — ALWAYS test the Pages base path here,
 npm run smoke    -- <file.wanim> [out.fbx]   # parse → convert → resample → write FBX, brace/section sanity check
 npm run fbxcheck -- <file.fbx>               # load an emitted FBX back with three's FBXLoader, report bones+clip
 npm run drive    -- [file.wanim]             # Playwright: drive the running dev server, screenshot, test download
-npm run cleanCheck -- [file.wanim]           # verify the cleaning filters (despike/butterworth/wrist) on real data
+npm run cleanCheck -- [file.wanim]           # verify the cleaning filters (despike/butterworth/wrist/forearm/feet) on real data
 npm run vrmaCheck  -- [file.wanim] [out]     # VRMA exporter structural check (VRMC_vrm_animation layout)
 ```
 
@@ -78,7 +78,7 @@ No unit-test framework yet — the three `npm run` scripts above are the regress
                           resample() → ResampledClip (fixed fps, linear pos / slerp rot) for export.
   → src/fbx/animationFbx.ts: binary FBX — LimbNode skeleton + AnimationStack/Layer, per-bone Lcl Rotation
                           curves + Hips Lcl Translation curve, skinned meshes, BindPose, TPose take. meters→cm, Y-up.
-  → src/convert/clean.ts: optional mocap cleaning — despike (pops/hand-flips via neighbour slerp) + zero-phase Butterworth low-pass (filtfilt) on rotations + hips translation. Applied to the converted clip so it shows in preview AND export.
+  → src/convert/clean.ts: optional mocap cleaning — despike (pops/hand-flips via neighbour slerp), zero-phase Butterworth low-pass (filtfilt) on rotations + hips translation, twist/swing limits + locks for wrists AND forearms (twist about the bone axis toward the child joint), and feet-contact fixing (src/convert/feet.ts: floor estimated from data per foot — resting joint height varies per avatar, never assume y=0; contact = low AND slow with hysteresis; ankle pinned per plant via two-bone leg IK, recorded knee as pole, foot keeps recorded world rotation; runs LAST so smoothing can't reintroduce drift; writes leg-chain rotations only). Applied to the converted clip so it shows in preview AND export. The cleaning panel has a hold-to-compare button; preview.setClip(clip, keepView=true) keeps camera + playhead (also why filter toggles don't reset the view).
   → src/preview/scene.ts: Three.js Object3D bone hierarchy driven per-frame; LineSegments + Points stick figure. Supports trim looping (setTrim).
   → src/ui/transport.ts: transport bar overlaid on the viewport — play/pause, click-to-seek timeline with draggable in/out trim handles. resample() takes trimStart/trimEnd to export only the trimmed range (rebased to t=0).
   → src/preview/face.ts:  ARKit face overlay — loads public/facecap-head.glb, seats it at the Head joint,

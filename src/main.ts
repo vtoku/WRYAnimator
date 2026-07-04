@@ -1,7 +1,7 @@
 import "./style.css";
 import { parseWanim, BONE_COUNT, type WanimClip } from "./wanim/parse.ts";
 import { convertCharacter, resample, retargetProportions, distributeBonelessSpine, type ConvertedClip } from "./convert/clip.ts";
-import { cleanClip, type CleanOpts } from "./convert/clean.ts";
+import { cleanClip, type CleanOpts, type CleanStats } from "./convert/clean.ts";
 import { writeAnimationFbx, type SkinnedMeshExport } from "./fbx/animationFbx.ts";
 import { remapNames, type NameScheme } from "./convert/skeleton.ts";
 import { buildFaceMesh } from "./convert/meshExport.ts";
@@ -68,13 +68,22 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     </dl>
 
     <h3 class="section">Cleaning</h3>
+    <button id="compare" class="button ghost compare" title="Press and hold to see the recording without any cleaning, so you can judge what the filters change.">Hold to see original</button>
+
+    <h4 class="group">Feet</h4>
+    <label class="field">
+      <span>Pin planted feet</span>
+      <input id="fixFeet" type="checkbox" checked title="Stops feet sliding while they're planted and keeps them from dipping under the floor. Legs are adjusted; nothing else moves." />
+    </label>
+
+    <h4 class="group">Arms &amp; hands</h4>
     <label class="field">
       <span>Limit wrists (human range)</span>
-      <input id="limitWrists" type="checkbox" checked />
+      <input id="limitWrists" type="checkbox" checked title="Caps wrist twist at ±90° and bend at 85°, the anatomical range. Only frames past those limits change." />
     </label>
     <label class="field">
       <span>Lock wrist (bad tracking)</span>
-      <select id="lockWrists">
+      <select id="lockWrists" title="Freezes the hand so it just follows the forearm. Use when a hand flails from lost tracking; fingers still animate.">
         <option value="" selected>Off</option>
         <option value="left">Left</option>
         <option value="right">Right</option>
@@ -82,20 +91,35 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
       </select>
     </label>
     <label class="field">
+      <span>Limit forearm twist (human range)</span>
+      <input id="limitLowerArms" type="checkbox" checked title="Caps forearm rotation at ±90°, the anatomical range. Elbow bend is untouched." />
+    </label>
+    <label class="field">
+      <span>Lock forearm twist</span>
+      <select id="lockLowerArmTwist" title="Removes ALL forearm rotation on the chosen side, keeping elbow bend. Use when a forearm spins from lost tracking.">
+        <option value="" selected>Off</option>
+        <option value="left">Left</option>
+        <option value="right">Right</option>
+        <option value="both">Both</option>
+      </select>
+    </label>
+
+    <h4 class="group">Jitter</h4>
+    <label class="field">
       <span>Remove pops / flips</span>
-      <input id="despike" type="checkbox" />
+      <input id="despike" type="checkbox" title="Deletes single-frame glitches: a joint that snaps away for one frame and snaps back." />
     </label>
     <label class="field sub">
       <span>Pop threshold <output id="despikeVal">35°</output></span>
-      <input id="despikeDeg" type="range" min="10" max="90" step="5" value="35" />
+      <input id="despikeDeg" type="range" min="10" max="90" step="5" value="35" title="How big a one-frame jump counts as a glitch. Lower catches more, but may eat fast real moves." />
     </label>
     <label class="field">
-      <span>Smooth (Butterworth)</span>
-      <input id="smooth" type="checkbox" />
+      <span>Smooth jitter</span>
+      <input id="smooth" type="checkbox" title="Evens out shaky tracking without delaying the motion (zero-lag Butterworth filter)." />
     </label>
     <label class="field sub">
       <span>Cutoff <output id="cutoffVal">7 Hz</output></span>
-      <input id="cutoff" type="range" min="1" max="15" step="0.5" value="7" />
+      <input id="cutoff" type="range" min="1" max="15" step="0.5" value="7" title="Lower = smoother but mushier. Anything faster than this many shakes per second is treated as noise." />
     </label>
     <p id="cleanStats" class="clean-stats"></p>
 
@@ -187,6 +211,9 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
 
   const limitWristsChk = document.getElementById("limitWrists") as HTMLInputElement;
   const lockWristsSel = document.getElementById("lockWrists") as HTMLSelectElement;
+  const limitLowerArmsChk = document.getElementById("limitLowerArms") as HTMLInputElement;
+  const lockLowerArmSel = document.getElementById("lockLowerArmTwist") as HTMLSelectElement;
+  const fixFeetChk = document.getElementById("fixFeet") as HTMLInputElement;
   const cleanOpts = (): CleanOpts => ({
     despike: despikeChk.checked,
     despikeDeg: Number(despikeDeg.value),
@@ -194,26 +221,39 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     cutoffHz: Number(cutoff.value),
     limitWrists: limitWristsChk.checked,
     lockWrists: (lockWristsSel.value || undefined) as CleanOpts["lockWrists"],
+    limitLowerArms: limitLowerArmsChk.checked,
+    lockLowerArmTwist: (lockLowerArmSel.value || undefined) as CleanOpts["lockLowerArmTwist"],
+    fixFeet: fixFeetChk.checked,
   });
 
   const cleanStatsEl = document.getElementById("cleanStats") as HTMLParagraphElement;
 
-  async function reclean() {
-    if (!loaded || !preview) return;
+  /**
+   * Build the display clip: cleaning (unless skipped — the compare button
+   * shows the uncleaned motion), then proportions + spine distribution so
+   * before/after differ ONLY by the cleaning filters.
+   */
+  async function buildDisplay(withCleaning: boolean): Promise<ConvertedClip> {
+    if (!loaded) throw new Error("no clip loaded");
     const opts = cleanOpts();
-    const stats = { despiked: 0, wristClamped: 0, smoothedMeanDeg: 0 };
-    const anyFilter = opts.despike || opts.smooth || opts.limitWrists || opts.lockWrists;
-    let display = anyFilter ? cleanClip(loaded.converted, opts, stats) : loaded.converted;
+    const stats: CleanStats = { despiked: 0, wristClamped: 0, forearmClamped: 0, smoothedMeanDeg: 0 };
+    const anyFilter = opts.despike || opts.smooth || opts.limitWrists || opts.lockWrists || opts.limitLowerArms || opts.lockLowerArmTwist || opts.fixFeet;
+    let display = withCleaning && anyFilter ? cleanClip(loaded.converted, opts, stats) : loaded.converted;
     // Report what the filters actually changed — proof they're applied.
-    if (!anyFilter) {
-      cleanStatsEl.textContent = "";
-    } else {
-      const parts: string[] = [];
-      if (opts.lockWrists) parts.push(`wrist locked: ${opts.lockWrists}`);
-      if (opts.limitWrists) parts.push(`wrists clamped: ${stats.wristClamped} frames`);
-      if (opts.despike) parts.push(`pops fixed: ${stats.despiked}`);
-      if (opts.smooth) parts.push(`smoothing: ±${stats.smoothedMeanDeg.toFixed(2)}° avg`);
-      cleanStatsEl.textContent = `Applied: ${parts.join(" · ")}`;
+    if (withCleaning) {
+      if (!anyFilter) {
+        cleanStatsEl.textContent = "";
+      } else {
+        const parts: string[] = [];
+        if (opts.fixFeet && stats.feet) parts.push(`feet pinned: ${stats.feet.spans} plants, ${stats.feet.frames} frames (max ${stats.feet.maxFixCm.toFixed(1)} cm)`);
+        if (opts.lockWrists) parts.push(`wrist locked: ${opts.lockWrists}`);
+        if (opts.limitWrists) parts.push(`wrists clamped: ${stats.wristClamped} frames`);
+        if (opts.lockLowerArmTwist) parts.push(`forearm twist locked: ${opts.lockLowerArmTwist}`);
+        if (opts.limitLowerArms) parts.push(`forearm twist clamped: ${stats.forearmClamped} frames`);
+        if (opts.despike) parts.push(`pops fixed: ${stats.despiked}`);
+        if (opts.smooth) parts.push(`smoothing: ±${stats.smoothedMeanDeg.toFixed(2)}° avg`);
+        cleanStatsEl.textContent = `Applied: ${parts.join(" · ")}`;
+      }
     }
     if (propSel.value === "body") {
       try {
@@ -228,23 +268,66 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     // After proportions (which would reset a dead bone's bind): spread a spine
     // bend concentrated on one joint by a missing upper-chest bone.
     if (distSpineChk.checked) display = distributeBonelessSpine(display, Number(distSpineAmt.value) / 100);
+    return display;
+  }
+
+  let compareBase: ConvertedClip | null = null; // uncleaned display for compare
+  let compareGen = 0; // invalidates in-flight prebuilds when options change
+
+  async function reclean() {
+    if (!loaded || !preview) return;
+    compareBase = null; // options changed
+    const gen = ++compareGen;
+    const display = await buildDisplay(true);
     loaded.display = display;
     const trim = transport?.getTrim();
-    preview.setClip(display); // duration is unchanged; this resets the pose
+    preview.setClip(display, true); // same recording: keep camera + playback position
     if (trim) preview.setTrim(trim.start, trim.end); // keep the user's trim
+    // Prebuild the uncleaned version so holding Compare swaps instantly.
+    void buildDisplay(false).then((b) => { if (gen === compareGen) compareBase = b; }).catch(() => {});
+  }
+
+  // Hold-to-compare: show the recording without cleaning while pressed. The
+  // camera, playhead, and trim all carry over, so differences pop visually.
+  const compareBtn = document.getElementById("compare") as HTMLButtonElement;
+  let comparing = false;
+  const showClip = (clip: ConvertedClip) => {
+    if (!preview) return;
+    const trim = transport?.getTrim();
+    preview.setClip(clip, true);
+    if (trim) preview.setTrim(trim.start, trim.end);
+  };
+  compareBtn.addEventListener("pointerdown", () => {
+    if (!loaded || !preview || comparing) return;
+    void (async () => {
+      compareBase ??= await buildDisplay(false);
+      comparing = true;
+      compareBtn.classList.add("active");
+      showClip(compareBase);
+    })();
+  });
+  const endCompare = () => {
+    if (!comparing || !loaded?.display) return;
+    comparing = false;
+    compareBtn.classList.remove("active");
+    showClip(loaded.display);
+  };
+  for (const ev of ["pointerup", "pointerleave", "pointercancel"] as const) {
+    compareBtn.addEventListener(ev, endCompare);
   }
 
   despikeVal.value = `${despikeDeg.value}°`;
   cutoffVal.value = `${cutoff.value} Hz`;
   despikeDeg.addEventListener("input", () => { despikeVal.value = `${despikeDeg.value}°`; });
   cutoff.addEventListener("input", () => { cutoffVal.value = `${cutoff.value} Hz`; });
-  for (const c of [despikeChk, smoothChk, limitWristsChk, distSpineChk]) c.addEventListener("change", () => void reclean());
+  for (const c of [despikeChk, smoothChk, limitWristsChk, limitLowerArmsChk, fixFeetChk, distSpineChk]) c.addEventListener("change", () => void reclean());
   for (const r of [despikeDeg, cutoff, distSpineAmt]) r.addEventListener("change", () => void reclean());
   distSpineAmtVal.value = `${distSpineAmt.value}%`;
   distSpineAmt.addEventListener("input", () => { distSpineAmtVal.value = `${distSpineAmt.value}%`; });
   distSpineChk.addEventListener("change", () => { distSpineAmt.disabled = !distSpineChk.checked; });
   propSel.addEventListener("change", () => void reclean());
   lockWristsSel.addEventListener("change", () => void reclean());
+  lockLowerArmSel.addEventListener("change", () => void reclean());
 
   const bodyFile = document.getElementById("bodyfile") as HTMLInputElement;
   let lastBodyChoice = bodySel.value;

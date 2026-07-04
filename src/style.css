@@ -271,6 +271,27 @@ main:has(.loaded-state:not([hidden])) {
   margin: 1.4rem 0 0.6rem;
 }
 
+.group {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-dim);
+  font-weight: 600;
+  margin: 1.1rem 0 0.1rem;
+}
+
+.button.compare {
+  width: 100%;
+  margin: 0.2rem 0 0.4rem;
+  user-select: none;
+  touch-action: none;
+}
+
+.button.compare.active {
+  border-color: #7fb2ff;
+  color: #7fb2ff;
+}
+
 .field.sub {
   padding-left: 0.8rem;
   font-size: 0.85rem;

@@ -1,6 +1,7 @@
 import type { ConvertedClip } from "./clip.ts";
 import type { Quat, Vec3 } from "../wanim/parse.ts";
 import { quatNormalize, quatDot, quatSlerp } from "./quat.ts";
+import { fixFeet, type FeetStats } from "./feet.ts";
 
 // Basic mocap cleaning, applied to the converted (≈uniform-rate) clip so it
 // shows in the preview and flows to the export.
@@ -25,6 +26,22 @@ export interface CleanOpts {
    * tracking; fingers still animate.
    */
   lockWrists?: "left" | "right" | "both";
+  /**
+   * Clamp forearm (LowerArm) axial twist — pronation/supination — to the human
+   * range (±90°). Elbow bend (swing) is left free. Fixes over-rotated forearms
+   * from tracking that dumps too much twist onto the lower arm.
+   */
+  limitLowerArms?: boolean;
+  /**
+   * Zero the forearm's axial twist entirely while keeping elbow bend, so the
+   * forearm stops spinning. For a forearm that twists wildly from bad tracking.
+   */
+  lockLowerArmTwist?: "left" | "right" | "both";
+  /**
+   * Pin planted feet (no sliding) and keep them on the floor (no clipping),
+   * via two-bone leg IK. Runs last so smoothing can't undo it.
+   */
+  fixFeet?: boolean;
 }
 
 /** Filled by cleanClip when passed: what each filter actually changed. */
@@ -33,8 +50,12 @@ export interface CleanStats {
   despiked: number;
   /** Wrist frames clamped by the limiter. */
   wristClamped: number;
+  /** Forearm frames changed by the twist limit/lock. */
+  forearmClamped: number;
   /** Mean per-frame change introduced by smoothing, degrees (0 = off). */
   smoothedMeanDeg: number;
+  /** What the feet fixer did (undefined = off). */
+  feet?: FeetStats;
 }
 
 const DEG2RAD = Math.PI / 180;
@@ -111,6 +132,8 @@ function smoothComponents(getN: number, get: (f: number) => number, set: (f: num
 // then clamp each to the anatomical range.
 const WRIST_TWIST_MAX = 90 * DEG2RAD; // pronation/supination carried at the wrist
 const WRIST_SWING_MAX = 85 * DEG2RAD; // flexion/extension + deviation envelope
+const FOREARM_TWIST_MAX = 90 * DEG2RAD; // pronation/supination carried at the forearm
+const NO_SWING_LIMIT = Math.PI; // swingAngle maxes at π, so this never clamps
 
 function quatMul(a: Quat, b: Quat): Quat {
   return [
@@ -121,7 +144,10 @@ function quatMul(a: Quat, b: Quat): Quat {
   ];
 }
 
-function limitTrack(track: Quat[], axis: Vec3): number {
+// Clamp each frame's local rotation by decomposing into twist about `axis` and
+// swing (the remainder), then limiting each to its max. twistMax = 0 hard-locks
+// the twist to zero (keeping swing); swingMax = NO_SWING_LIMIT leaves swing free.
+function limitTrack(track: Quat[], axis: Vec3, twistMax: number, swingMax: number): number {
   let clamped = 0;
   const [ax, ay, az] = axis;
   for (let f = 0; f < track.length; f++) {
@@ -137,20 +163,28 @@ function limitTrack(track: Quat[], axis: Vec3): number {
     const swing = quatMul(q, [-twist[0], -twist[1], -twist[2], twist[3]]);
     const swingAngle = 2 * Math.acos(Math.min(1, Math.abs(swing[3])));
 
-    const twistOver = Math.abs(twistAngle) > WRIST_TWIST_MAX;
-    const swingOver = swingAngle > WRIST_SWING_MAX;
+    const twistOver = Math.abs(twistAngle) > twistMax;
+    const swingOver = swingAngle > swingMax;
     if (!twistOver && !swingOver) continue;
 
     if (twistOver) {
-      const t = Math.sign(twistAngle) * WRIST_TWIST_MAX;
+      const t = Math.sign(twistAngle) * twistMax;
       const s = Math.sin(t / 2);
       twist = [ax * s, ay * s, az * s, Math.cos(t / 2)];
     }
-    const swing2 = swingOver ? quatSlerp([0, 0, 0, 1], swing, WRIST_SWING_MAX / swingAngle) : swing;
+    const swing2 = swingOver ? quatSlerp([0, 0, 0, 1], swing, swingMax / swingAngle) : swing;
     track[f] = quatNormalize(quatMul(swing2, twist));
     clamped++;
   }
   return clamped;
+}
+
+/** Unit bone axis in the bone's local frame = direction to its named child. */
+function boneAxis(c: ConvertedClip, childName: string, fallback: Vec3): Vec3 {
+  const child = c.names.indexOf(childName);
+  const off = child >= 0 ? c.bindPos[child] : fallback;
+  const len = Math.hypot(off[0], off[1], off[2]) || 1;
+  return [off[0] / len, off[1] / len, off[2] / len];
 }
 
 function limitWrists(c: ConvertedClip, localQuat: Quat[][]): number {
@@ -160,10 +194,24 @@ function limitWrists(c: ConvertedClip, localQuat: Quat[][]): number {
     if (hand < 0) continue;
     // Bone axis = direction to the middle finger in the hand's local frame
     // (child bind offsets are already hand-local).
-    const mid = c.names.indexOf(`${side}MiddleProximal`);
-    const off = mid >= 0 ? c.bindPos[mid] : ([side === "Left" ? 1 : -1, 0, 0] as Vec3);
-    const len = Math.hypot(off[0], off[1], off[2]) || 1;
-    clamped += limitTrack(localQuat[hand], [off[0] / len, off[1] / len, off[2] / len]);
+    const axis = boneAxis(c, `${side}MiddleProximal`, [side === "Left" ? 1 : -1, 0, 0]);
+    clamped += limitTrack(localQuat[hand], axis, WRIST_TWIST_MAX, WRIST_SWING_MAX);
+  }
+  return clamped;
+}
+
+/**
+ * Limit forearm axial twist. `twistMax = 0` locks the twist to zero; swing
+ * (elbow bend) is always left free. `sides` selects which forearms to touch.
+ */
+function limitLowerArms(c: ConvertedClip, localQuat: Quat[][], twistMax: number, sides: readonly string[]): number {
+  let clamped = 0;
+  for (const side of sides) {
+    const fore = c.names.indexOf(`${side}LowerArm`);
+    if (fore < 0) continue;
+    // Bone axis = direction to the hand (elbow→wrist) in the forearm's frame.
+    const axis = boneAxis(c, `${side}Hand`, [side === "Left" ? 1 : -1, 0, 0]);
+    clamped += limitTrack(localQuat[fore], axis, twistMax, NO_SWING_LIMIT);
   }
   return clamped;
 }
@@ -188,6 +236,16 @@ export function cleanClip(c: ConvertedClip, opts: CleanOpts, stats?: CleanStats)
   if (opts.limitWrists) {
     const n = limitWrists(c, localQuat);
     if (stats) stats.wristClamped = n;
+  }
+
+  if (opts.limitLowerArms || opts.lockLowerArmTwist) {
+    let n = 0;
+    if (opts.limitLowerArms) n += limitLowerArms(c, localQuat, FOREARM_TWIST_MAX, ["Left", "Right"]);
+    if (opts.lockLowerArmTwist) {
+      const sides = opts.lockLowerArmTwist === "both" ? ["Left", "Right"] : [opts.lockLowerArmTwist === "left" ? "Left" : "Right"];
+      n += limitLowerArms(c, localQuat, 0, sides);
+    }
+    if (stats) stats.forearmClamped = n;
   }
 
   if (opts.despike) {
@@ -232,6 +290,13 @@ export function cleanClip(c: ConvertedClip, opts: CleanOpts, stats?: CleanStats)
       }
       stats.smoothedMeanDeg = n ? (sum / n) / DEG2RAD : 0;
     }
+  }
+
+  // Feet last: pinning must survive every other filter untouched.
+  if (opts.fixFeet) {
+    const fs: FeetStats = { spans: 0, frames: 0, maxFixCm: 0 };
+    fixFeet(c, localPos, localQuat, fs);
+    if (stats) stats.feet = fs;
   }
 
   return { ...c, localQuat, localPos, bindPos: localPos.map((t) => t[0]) };

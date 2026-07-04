@@ -117,5 +117,133 @@ const check = (label, ok, detail) => {
   console.log(`      (clamped ${clamped} of ${frames * 2} wrist frames in this recording)`);
 }
 
+// --- 4. forearm twist limit clamps pronation/supination --------------------
+{
+  const deg = 180 / Math.PI;
+  const twistOf = (q, ax) => {
+    const proj = q[0] * ax[0] + q[1] * ax[1] + q[2] * ax[2];
+    let tw = Math.abs(2 * Math.atan2(proj, q[3]));
+    if (tw > Math.PI) tw = 2 * Math.PI - tw;
+    return tw;
+  };
+  const cleaned = cleanClip(c, { limitLowerArms: true });
+  let worstTwist = 0, clamped = 0;
+  for (const side of ["Left", "Right"]) {
+    const fore = c.names.indexOf(`${side}LowerArm`);
+    const hand = c.names.indexOf(`${side}Hand`);
+    const off = c.bindPos[hand];
+    const len = Math.hypot(...off);
+    const ax = off.map((v) => v / len);
+    for (let f = 0; f < frames; f++) {
+      worstTwist = Math.max(worstTwist, twistOf(cleaned.localQuat[fore][f], ax));
+      if (angle(cleaned.localQuat[fore][f], c.localQuat[fore][f]) > 0.5) clamped++;
+    }
+  }
+  check("forearm limit: twist within ±90°+ε", worstTwist * deg < 91, `worst twist=${(worstTwist * deg).toFixed(1)}°`);
+  console.log(`      (clamped ${clamped} of ${frames * 2} forearm frames in this recording)`);
+
+  // Lock: chosen side's forearm twist must be driven to ~0, other side untouched.
+  const locked = cleanClip(c, { lockLowerArmTwist: "right" });
+  const rf = c.names.indexOf("RightLowerArm"), lf = c.names.indexOf("LeftLowerArm");
+  const rax = (() => { const o = c.bindPos[c.names.indexOf("RightHand")]; const l = Math.hypot(...o); return o.map((v) => v / l); })();
+  const lax = (() => { const o = c.bindPos[c.names.indexOf("LeftHand")]; const l = Math.hypot(...o); return o.map((v) => v / l); })();
+  let maxLockedTwist = 0, leftChanged = 0;
+  for (let f = 0; f < frames; f++) {
+    maxLockedTwist = Math.max(maxLockedTwist, twistOf(locked.localQuat[rf][f], rax));
+    if (angle(locked.localQuat[lf][f], c.localQuat[lf][f]) > 0.5) leftChanged++;
+  }
+  check("forearm lock: right twist ~0", maxLockedTwist * deg < 1, `worst locked twist=${(maxLockedTwist * deg).toFixed(2)}°`);
+  check("forearm lock: left forearm untouched", leftChanged === 0, `left frames changed=${leftChanged}`);
+}
+
+// --- 5. feet fix: penetration removed, skating pinned ----------------------
+{
+  const { BONE_PARENTS } = await import("../src/convert/skeleton.ts");
+  const { quatMul, quatRotate } = await import("../src/convert/quat.ts");
+  const add = (a, b) => [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
+  // Independent FK (recursive — bone array isn't topologically sorted).
+  const worldOf = (clip2, bone, f, cache) => {
+    if (cache[bone]) return cache[bone];
+    const p = BONE_PARENTS[bone];
+    let pos, rot;
+    if (p < 0) { pos = clip2.localPos[bone][f]; rot = clip2.localQuat[bone][f]; }
+    else {
+      const par = worldOf(clip2, p, f, cache);
+      pos = add(par.pos, quatRotate(par.rot, clip2.localPos[bone][f]));
+      rot = quatMul(par.rot, clip2.localQuat[bone][f]);
+    }
+    return (cache[bone] = { pos, rot });
+  };
+  const feetTracks = (clip2) => {
+    const out = {};
+    for (const side of ["Left", "Right"]) out[side] = { ankle: [], low: [] };
+    for (let f = 0; f < frames; f++) {
+      const cache = {};
+      for (const side of ["Left", "Right"]) {
+        const a = worldOf(clip2, c.names.indexOf(`${side}Foot`), f, cache).pos;
+        const t = worldOf(clip2, c.names.indexOf(`${side}Toes`), f, cache).pos;
+        out[side].ankle.push(a);
+        out[side].low.push(Math.min(a[1], t[1]));
+      }
+    }
+    return out;
+  };
+  const pct = (arr, p) => arr.slice().sort((x, y) => x - y)[Math.floor(arr.length * p)];
+
+  const stats = { despiked: 0, wristClamped: 0, forearmClamped: 0, smoothedMeanDeg: 0 };
+  const cleaned = cleanClip(c, { fixFeet: true }, stats);
+  const before = feetTracks(c);
+  const after = feetTracks(cleaned);
+
+  let driftBefore = 0, driftAfter = 0, penBefore = 0, penAfter = 0;
+  for (const side of ["Left", "Right"]) {
+    const ground = pct(before[side].low, 0.05);
+    penBefore = Math.max(penBefore, ground - Math.min(...before[side].low));
+    penAfter = Math.max(penAfter, ground - Math.min(...after[side].low));
+
+    // Plant spans on ORIGINAL data: low + slow (independent of feet.ts logic).
+    const speed = before[side].ankle.map((a, f) => {
+      if (!f) return 0;
+      const dt = Math.max(1e-4, c.times[f] - c.times[f - 1]);
+      return Math.hypot(a[0] - before[side].ankle[f - 1][0], a[2] - before[side].ankle[f - 1][2]) / dt;
+    });
+    let start = -1;
+    for (let f = 0; f <= frames; f++) {
+      const planted = f < frames && before[side].low[f] < ground + 0.02 && speed[f] < 0.12;
+      if (planted) { if (start < 0) start = f; continue; }
+      if (start >= 0) {
+        if (c.times[f - 1] - c.times[start] >= 0.5) {
+          // Core of the span (skip 150ms blend edges): XZ path length.
+          const lo = start + Math.round(0.15 * 60), hi = f - 1 - Math.round(0.15 * 60);
+          for (let k = lo + 1; k <= hi; k++) {
+            const pl = (tr) => Math.hypot(tr[k][0] - tr[k - 1][0], tr[k][2] - tr[k - 1][2]);
+            driftBefore += pl(before[side].ankle);
+            driftAfter += pl(after[side].ankle);
+          }
+        }
+        start = -1;
+      }
+    }
+  }
+  const cm = (v) => (v * 100).toFixed(1);
+  console.log(`      feet: ${stats.feet.spans} spans pinned, ${stats.feet.frames} frames, max fix ${stats.feet.maxFixCm.toFixed(1)} cm`);
+  check("feet: penetration removed", penAfter < 0.006, `worst below-ground before=${cm(penBefore)}cm after=${cm(penAfter)}cm`);
+  check("feet: planted-foot drift mostly gone", driftAfter < driftBefore * 0.3, `in-plant path before=${cm(driftBefore)}cm after=${cm(driftAfter)}cm`);
+
+  // Only leg-chain rotations may change; everything else must be untouched.
+  const legs = new Set(["LeftUpperLeg", "LeftLowerLeg", "LeftFoot", "RightUpperLeg", "RightLowerLeg", "RightFoot"]);
+  let touched = 0;
+  for (let b = 0; b < c.names.length; b++) {
+    if (legs.has(c.names[b])) continue;
+    // Degenerate (zero-norm) tracks make the angle metric read 180° between
+    // identical quats — skip them (unused bones like Jaw in some recordings).
+    if (c.localQuat[b].some((q) => Math.hypot(...q) < 0.5)) continue;
+    for (let f = 0; f < frames; f++) {
+      if (angle(cleaned.localQuat[b][f], c.localQuat[b][f]) > 0.01) { touched++; break; }
+    }
+  }
+  check("feet: non-leg bones untouched", touched === 0, `bones changed outside legs=${touched}`);
+}
+
 if (failures) { console.error(`${failures} FAILURES`); process.exit(1); }
 console.log("OK");

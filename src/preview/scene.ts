@@ -172,7 +172,13 @@ export class PreviewScene {
     this.camera.updateProjectionMatrix();
   }
 
-  setClip(clip: ConvertedClip) {
+  /**
+   * Load a clip. `keepView` preserves the camera and playback position —
+   * used when re-cleaning the SAME recording so toggling a filter doesn't
+   * yank the view back to the framing shot.
+   */
+  setClip(clip: ConvertedClip, keepView = false) {
+    const resume = keepView && this.clip ? { time: this.time, playing: this.playing } : null;
     this.clearClip();
     this.clip = clip;
 
@@ -232,10 +238,10 @@ export class PreviewScene {
 
     this.trimStart = 0;
     this.trimEnd = clip.duration;
-    this.time = 0;
-    this.playing = true;
-    this.applyPose(0);
-    this.frameCamera();
+    this.time = resume ? Math.min(resume.time, clip.duration) : 0;
+    this.playing = resume ? resume.playing : true;
+    this.applyPose(this.time);
+    if (!resume) this.frameCamera();
     this.emitState();
   }
 
