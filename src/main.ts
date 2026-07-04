@@ -31,6 +31,14 @@ const viewport = document.getElementById("viewport") as HTMLElement;
 const panel = document.getElementById("panel") as HTMLElement;
 
 let preview: PreviewScene | null = null;
+/** Current panel's rig undo/redo, driven by the module-level hotkey listener. */
+let rigHotkeys: { undo(): void; redo(): void } | null = null;
+document.addEventListener("keydown", (e) => {
+  if (!(e.ctrlKey || e.metaKey) || !rigHotkeys) return;
+  const k = e.key.toLowerCase();
+  if (k === "z" && !e.shiftKey) { e.preventDefault(); rigHotkeys.undo(); }
+  else if (k === "y" || (k === "z" && e.shiftKey)) { e.preventDefault(); rigHotkeys.redo(); }
+});
 let transport: Transport | null = null;
 let loaded: {
   name: string;
@@ -134,16 +142,22 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     <p id="cleanStats" class="clean-stats"></p>
 
     <h3 class="section">Control rig</h3>
-    <p class="hint">Adjustment layers, MotionBuilder style. Add a layer, pause, then
-      drag a colored handle on the figure; a key lands at the playhead. Keys hold
-      until the next key, so bracket a local fix with neutral keys.</p>
+    <p class="hint">FK/IK adjustment layers, MotionBuilder style. Add a layer, pause,
+      then drag a handle on the figure; a key lands at the playhead. Spheres
+      (hips, hands, feet) move with IK and rotate; the small diamonds on the
+      body bones rotate FK-style. Keys hold until the next key, so bracket a
+      local fix with neutral keys.</p>
     <div id="rigLayers" class="rig-layers"></div>
     <div class="rig-row">
       <button id="rigAdd" class="button ghost">Add layer</button>
-      <select id="rigGizmo" title="What the viewport gizmo edits. Hands and feet move with IK; the head only rotates.">
+      <select id="rigGizmo" title="What the viewport gizmo edits. FK bones only rotate, so this switches automatically when you pick one.">
         <option value="translate" selected>Move</option>
         <option value="rotate">Rotate</option>
       </select>
+    </div>
+    <div class="rig-row">
+      <button id="rigUndo" class="button ghost" disabled title="Undo the last rig or modifier edit (Ctrl+Z)">Undo</button>
+      <button id="rigRedo" class="button ghost" disabled title="Redo (Ctrl+Y)">Redo</button>
     </div>
     <div id="rigEditor" hidden>
       <p id="rigSel" class="clean-stats"></p>
@@ -390,10 +404,62 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
   const rigKeysEl = document.getElementById("rigKeys") as HTMLDivElement;
   const rigNeutralBtn = document.getElementById("rigNeutral") as HTMLButtonElement;
   const rigDelKeyBtn = document.getElementById("rigDelKey") as HTMLButtonElement;
+  const rigUndoBtn = document.getElementById("rigUndo") as HTMLButtonElement;
+  const rigRedoBtn = document.getElementById("rigRedo") as HTMLButtonElement;
 
   let activeLayerIdx = -1;
   let selectedEffector: EffectorId | null = null;
   let layerCounter = 0;
+
+  // ---- undo / redo (snapshot the whole rig + modifier state) -------------
+  const undoStack: string[] = [];
+  const redoStack: string[] = [];
+  const rigSnapshot = () =>
+    JSON.stringify({ layers: rigLayers, mods, counter: layerCounter, active: activeLayerIdx });
+  function updateUndoUi() {
+    rigUndoBtn.disabled = !undoStack.length;
+    rigRedoBtn.disabled = !redoStack.length;
+  }
+  function pushHistorySnap(snap: string) {
+    undoStack.push(snap);
+    if (undoStack.length > 100) undoStack.shift();
+    redoStack.length = 0;
+    updateUndoUi();
+  }
+  /** Call BEFORE mutating layers or modifiers. */
+  const pushHistory = () => pushHistorySnap(rigSnapshot());
+  function restoreSnapshot(snap: string) {
+    const d = JSON.parse(snap) as {
+      layers: RigLayer[];
+      mods: ReturnType<typeof defaultModifiers>;
+      counter: number;
+      active: number;
+    };
+    const modsChanged = JSON.stringify(mods) !== JSON.stringify(d.mods);
+    rigLayers.splice(0, rigLayers.length, ...d.layers);
+    Object.assign(mods, d.mods);
+    layerCounter = d.counter;
+    activeLayerIdx = Math.min(d.active, rigLayers.length - 1);
+    syncModSliders();
+    renderRigLayers();
+    if (modsChanged) void reclean();
+    else rebakeRig();
+  }
+  function rigUndo() {
+    if (!undoStack.length) return;
+    redoStack.push(rigSnapshot());
+    restoreSnapshot(undoStack.pop()!);
+    updateUndoUi();
+  }
+  function rigRedo() {
+    if (!redoStack.length) return;
+    undoStack.push(rigSnapshot());
+    restoreSnapshot(redoStack.pop()!);
+    updateUndoUi();
+  }
+  rigUndoBtn.addEventListener("click", rigUndo);
+  rigRedoBtn.addEventListener("click", rigRedo);
+  rigHotkeys = { undo: rigUndo, redo: rigRedo };
 
   /** Rebake layers onto the (unchanged) base — cheaper than a full reclean. */
   function rebakeRig() {
@@ -428,7 +494,9 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
       del.textContent = "×";
       del.title = "Delete this key";
       del.addEventListener("click", () => {
-        if (track) deleteKeysAt(track, t, 1 / 120);
+        if (!track) return;
+        pushHistory();
+        deleteKeysAt(track, t, 1 / 120);
         rebakeRig();
         updateRigEditor();
       });
@@ -451,7 +519,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
       en.checked = layer.enabled;
       en.title = "Mute/unmute this layer";
       en.addEventListener("click", (e) => e.stopPropagation());
-      en.addEventListener("change", () => { layer.enabled = en.checked; rebakeRig(); });
+      en.addEventListener("change", () => { pushHistory(); layer.enabled = en.checked; rebakeRig(); });
 
       const name = document.createElement("span");
       name.className = "rig-name";
@@ -467,7 +535,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
         mode.appendChild(o);
       }
       mode.addEventListener("click", (e) => e.stopPropagation());
-      mode.addEventListener("change", () => { layer.mode = mode.value as RigLayer["mode"]; rebakeRig(); });
+      mode.addEventListener("change", () => { pushHistory(); layer.mode = mode.value as RigLayer["mode"]; rebakeRig(); });
 
       const weight = document.createElement("input");
       weight.type = "range";
@@ -475,8 +543,15 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
       weight.value = String(Math.round(layer.weight * 100));
       weight.title = "Layer weight";
       weight.addEventListener("click", (e) => e.stopPropagation());
-      weight.addEventListener("input", () => { layer.weight = Number(weight.value) / 100; });
-      weight.addEventListener("change", () => rebakeRig());
+      let weightSnap: string | null = null; // pre-drag state, captured on first input
+      weight.addEventListener("input", () => {
+        weightSnap ??= rigSnapshot();
+        layer.weight = Number(weight.value) / 100;
+      });
+      weight.addEventListener("change", () => {
+        if (weightSnap) { pushHistorySnap(weightSnap); weightSnap = null; }
+        rebakeRig();
+      });
 
       const del = document.createElement("button");
       del.className = "rig-del";
@@ -484,6 +559,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
       del.title = "Delete this layer and its keys";
       del.addEventListener("click", (e) => {
         e.stopPropagation();
+        pushHistory();
         rigLayers.splice(i, 1);
         if (activeLayerIdx >= rigLayers.length) activeLayerIdx = rigLayers.length - 1;
         renderRigLayers();
@@ -498,6 +574,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
   }
 
   rigAddBtn.addEventListener("click", () => {
+    pushHistory();
     rigLayers.push(makeLayer(`Layer ${++layerCounter}`));
     activeLayerIdx = rigLayers.length - 1;
     renderRigLayers();
@@ -513,6 +590,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     const def = effectorDef(selectedEffector);
     const t = preview.getTime();
     const f = nearestFrame(rigBaseClip, t);
+    pushHistory();
     const track = getTrack(layer, selectedEffector, true)!;
     if (layer.mode === "additive") {
       if (def.canMove) setPosKey(track, t, [0, 0, 0]);
@@ -535,6 +613,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     const near = keyTimes(track).reduce<number | null>(
       (best, k) => (best === null || Math.abs(k - t) < Math.abs(best - t) ? k : best), null);
     if (near === null || Math.abs(near - t) > 0.5) return; // nothing near the playhead
+    pushHistory();
     deleteKeysAt(track, near, 1 / 120);
     rebakeRig();
     updateRigEditor();
@@ -579,6 +658,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
       if (!dragCtx) return;
       const layer = rigLayers[activeLayerIdx];
       const track = getTrack(layer, dragCtx.transient.effector, true)!;
+      if (dragCtx.transient.pos || dragCtx.transient.rot) pushHistory();
       if (dragCtx.transient.pos) setPosKey(track, dragCtx.t, dragCtx.transient.pos);
       if (dragCtx.transient.rot) setRotKey(track, dragCtx.t, dragCtx.transient.rot);
       dragCtx = null;
@@ -597,22 +677,29 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     { el: document.getElementById("modElbows") as HTMLInputElement, out: document.getElementById("modElbowsVal") as HTMLOutputElement, key: "elbowsOutDeg" as const, unit: "°" },
     { el: document.getElementById("modFeet") as HTMLInputElement, out: document.getElementById("modFeetVal") as HTMLOutputElement, key: "feetApartCm" as const, unit: " cm" },
   ];
+  function syncModSliders() {
+    for (const m of modInputs) {
+      m.el.value = String(mods[m.key]);
+      m.out.value = `${m.el.value}${m.unit}`;
+    }
+  }
   for (const m of modInputs) {
     m.el.addEventListener("input", () => { m.out.value = `${m.el.value}${m.unit}`; });
     m.el.addEventListener("change", () => {
+      pushHistory(); // mods still holds the pre-change value here
       mods[m.key] = Number(m.el.value);
       void reclean();
     });
   }
   (document.getElementById("modReset") as HTMLButtonElement).addEventListener("click", () => {
-    let changed = false;
+    if (!modInputs.some((m) => mods[m.key] !== 0)) return;
+    pushHistory();
     for (const m of modInputs) {
-      if (mods[m.key] !== 0) changed = true;
       mods[m.key] = 0;
       m.el.value = "0";
       m.out.value = `0${m.unit}`;
     }
-    if (changed) void reclean();
+    void reclean();
   });
 
   despikeVal.value = `${despikeDeg.value}°`;

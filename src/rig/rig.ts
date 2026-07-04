@@ -16,7 +16,12 @@ import { worldFromLocal, type FramePose } from "../convert/fk.ts";
 // recorded plane, end bone keeps its world rotation unless a rotation key
 // says otherwise). Hips writes the root directly; head is rotation-only.
 
-export type EffectorId = "hips" | "leftHand" | "rightHand" | "leftFoot" | "rightFoot" | "head";
+export type EffectorId =
+  | "hips" | "leftHand" | "rightHand" | "leftFoot" | "rightFoot" | "head"
+  | "spine" | "chest" | "neck"
+  | "leftShoulder" | "rightShoulder"
+  | "leftUpperArm" | "rightUpperArm" | "leftLowerArm" | "rightLowerArm"
+  | "leftUpperLeg" | "rightUpperLeg" | "leftLowerLeg" | "rightLowerLeg";
 
 export interface EffectorDef {
   id: EffectorId;
@@ -29,6 +34,11 @@ export interface EffectorDef {
   canRotate: boolean;
 }
 
+/**
+ * MoBu-style cell set: IK effectors (hips, hands, feet) move AND rotate; the
+ * major body bones are FK effectors that rotate in place — translating an FK
+ * bone would stretch the skeleton, so reach for the IK effectors instead.
+ */
 export const EFFECTORS: EffectorDef[] = [
   { id: "hips", label: "Hips", bone: "Hips", canMove: true, canRotate: true },
   { id: "leftHand", label: "Left hand", bone: "LeftHand", chain: { root: "LeftUpperArm", mid: "LeftLowerArm" }, canMove: true, canRotate: true },
@@ -36,6 +46,19 @@ export const EFFECTORS: EffectorDef[] = [
   { id: "leftFoot", label: "Left foot", bone: "LeftFoot", chain: { root: "LeftUpperLeg", mid: "LeftLowerLeg" }, canMove: true, canRotate: true },
   { id: "rightFoot", label: "Right foot", bone: "RightFoot", chain: { root: "RightUpperLeg", mid: "RightLowerLeg" }, canMove: true, canRotate: true },
   { id: "head", label: "Head", bone: "Head", canMove: false, canRotate: true },
+  { id: "spine", label: "Spine", bone: "Spine", canMove: false, canRotate: true },
+  { id: "chest", label: "Chest", bone: "Chest", canMove: false, canRotate: true },
+  { id: "neck", label: "Neck", bone: "Neck", canMove: false, canRotate: true },
+  { id: "leftShoulder", label: "Left shoulder", bone: "LeftShoulder", canMove: false, canRotate: true },
+  { id: "rightShoulder", label: "Right shoulder", bone: "RightShoulder", canMove: false, canRotate: true },
+  { id: "leftUpperArm", label: "Left upper arm", bone: "LeftUpperArm", canMove: false, canRotate: true },
+  { id: "rightUpperArm", label: "Right upper arm", bone: "RightUpperArm", canMove: false, canRotate: true },
+  { id: "leftLowerArm", label: "Left forearm", bone: "LeftLowerArm", canMove: false, canRotate: true },
+  { id: "rightLowerArm", label: "Right forearm", bone: "RightLowerArm", canMove: false, canRotate: true },
+  { id: "leftUpperLeg", label: "Left thigh", bone: "LeftUpperLeg", canMove: false, canRotate: true },
+  { id: "rightUpperLeg", label: "Right thigh", bone: "RightUpperLeg", canMove: false, canRotate: true },
+  { id: "leftLowerLeg", label: "Left shin", bone: "LeftLowerLeg", canMove: false, canRotate: true },
+  { id: "rightLowerLeg", label: "Right shin", bone: "RightLowerLeg", canMove: false, canRotate: true },
 ];
 
 export const effectorDef = (id: EffectorId): EffectorDef => EFFECTORS.find((e) => e.id === id)!;

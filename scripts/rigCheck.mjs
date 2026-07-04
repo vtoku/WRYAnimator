@@ -119,6 +119,24 @@ const f0 = 0;
   check("head rot: head joint does not translate", posDrift < 1e-6, `drift ${mm(posDrift)}mm`);
 }
 
+// --- 6b. FK effector: upper-arm rotation swings the whole arm in place --------
+{
+  const arm = boneI("LeftUpperArm");
+  const handL = boneI("LeftHand");
+  const ang = 25 * Math.PI / 180;
+  const layer = makeLayer("L1");
+  setRotKey(getTrack(layer, "leftUpperArm", true), tKey, [0, 0, Math.sin(ang / 2), Math.cos(ang / 2)]);
+  const baked = applyRigLayers(c, [layer]);
+  const rotChange = qangle(world(baked, fKey).rot[arm], world(c, fKey).rot[arm]);
+  const jointDrift = dist(world(baked, fKey).pos[arm], world(c, fKey).pos[arm]);
+  const handMoved = dist(world(baked, fKey).pos[handL], world(c, fKey).pos[handL]);
+  const legDrift = dist(world(baked, fKey).pos[boneI("LeftFoot")], world(c, fKey).pos[boneI("LeftFoot")]);
+  check("FK arm rot: world rotation changes by the delta", Math.abs(rotChange - 25) < 0.1, `rotated ${rotChange.toFixed(2)}°`);
+  check("FK arm rot: joint stays in place, hand follows FK",
+    jointDrift < 1e-9 && handMoved > 0.05 && legDrift < 1e-9,
+    `joint drift ${mm(jointDrift)}mm, hand moved ${mm(handMoved)}mm`);
+}
+
 // --- 7. a hand edit leaves the legs alone -------------------------------------
 {
   const layer = makeLayer("L1");

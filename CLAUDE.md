@@ -84,13 +84,17 @@ No unit-test framework yet — the three `npm run` scripts above are the regress
                           Modifiers = whole-clip slider corrections (hips height with feet re-solved onto their
                           original targets, knees/elbows in-out via rigid rotation of the two-bone limb about its
                           end-to-end axis — swings ONLY the mid joint, closed form, no IK — and stance width).
-                          Layers = override/additive with weight, sparse pos/rot keys per effector (hips, hands,
-                          feet = two-bone IK via convert/ik.ts solveTwoBone, head = rotation-only). Keys lerp/slerp
+                          Layers = override/additive with weight, sparse pos/rot keys per effector. FK/IK cell set:
+                          hips/hands/feet = IK spheres (move via convert/ik.ts solveTwoBone + rotate); spine, chest,
+                          neck, head, shoulders, upper/lower arms and legs = FK octahedron cells (rotate-only — the
+                          generic non-chain branch in applyEffector handles any such bone). Keys lerp/slerp
                           and HOLD past the ends (MoBu semantics — bracket local fixes with neutral keys). Additive
                           keys store world-space deltas vs the stack below the layer. Order: modifiers → layers;
                           both apply to display AND all three exports (wanim path re-applies them to its own clip).
                           Viewport: effector handles + TransformControls gizmo (drag = live single-frame solve via
-                          setPoseOverride, key lands at the playhead on release, full rebake async).
+                          setPoseOverride, key lands at the playhead on release, full rebake async). Undo/redo =
+                          JSON snapshots of layers+modifiers pushed BEFORE each mutation (buttons + Ctrl+Z/Y via a
+                          module-level hotkey singleton so re-loading a file doesn't stack listeners).
   → src/preview/scene.ts: Three.js Object3D bone hierarchy driven per-frame; LineSegments + Points stick figure. Supports trim looping (setTrim).
   → src/ui/transport.ts: transport bar overlaid on the viewport — play/pause, click-to-seek timeline with draggable in/out trim handles. resample() takes trimStart/trimEnd to export only the trimmed range (rebased to t=0).
   → src/preview/face.ts:  ARKit face overlay — loads public/facecap-head.glb, seats it at the Head joint,

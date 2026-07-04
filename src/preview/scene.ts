@@ -457,7 +457,8 @@ export class PreviewScene {
     if (this.rigSelected === effector) return;
     this.rigSelected = effector;
     for (const [id, mesh] of this.rigHandles) {
-      (mesh.material as THREE.MeshBasicMaterial).opacity = id === effector ? 1 : 0.55;
+      const movable = EFFECTORS.find((e) => e.id === id)?.canMove;
+      (mesh.material as THREE.MeshBasicMaterial).opacity = id === effector ? 1 : movable ? 0.55 : 0.4;
       mesh.scale.setScalar(id === effector ? 1.35 : 1);
     }
     if (effector && this.gizmo) {
@@ -471,7 +472,7 @@ export class PreviewScene {
 
   private handleColor(id: EffectorId): number {
     if (id === "hips") return 0xffaa33;
-    if (id === "head") return 0xccee66;
+    if (id === "head" || id === "neck" || id === "spine" || id === "chest") return 0xccee66;
     return id.startsWith("left") ? 0x5599ff : 0xff5588;
   }
 
@@ -481,12 +482,17 @@ export class PreviewScene {
     for (const def of EFFECTORS) {
       const bone = this.clip.names.indexOf(def.bone);
       if (bone < 0 || !this.boneNodes[bone]) continue;
+      // IK effectors (movable) are spheres; FK rotate-only cells are smaller
+      // octahedra so the main effectors stay easy to grab.
+      const geo = def.canMove
+        ? new THREE.SphereGeometry(def.id === "hips" ? 0.045 : 0.032, 16, 12)
+        : new THREE.OctahedronGeometry(0.022);
       const mesh = new THREE.Mesh(
-        new THREE.SphereGeometry(def.id === "hips" ? 0.045 : 0.032, 16, 12),
+        geo,
         new THREE.MeshBasicMaterial({
           color: this.handleColor(def.id),
           transparent: true,
-          opacity: 0.55,
+          opacity: def.canMove ? 0.55 : 0.4,
           depthTest: false,
         }),
       );
