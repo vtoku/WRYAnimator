@@ -147,9 +147,38 @@ const f0 = 0;
   setPosKey(tr, 9, [0, 0.05, 0]);
   const bakedF = applyRigLayers(c, [lf]);
   const at = (t) => dist(world(bakedF, nearestFrame(c, t)).pos[hips], world(c, nearestFrame(c, t)).pos[hips]);
-  check("fade bumps: full at keys, zero mid-gap, zero outside",
-    at(5) > 0.045 && at(9) > 0.045 && at(7) < 0.001 && at(0.5) < 0.001,
-    `@5 ${mm(at(5))} @7 ${mm(at(7))} @9 ${mm(at(9))} @0.5 ${mm(at(0.5))} mm`);
+  // Full strength ACROSS the keyed range (values interpolate on the curve);
+  // fades to zero only outside first/last key.
+  check("fade range: full at keys, interpolated mid-range, zero outside",
+    at(5) > 0.045 && at(9) > 0.045 && at(7) > 0.02 && at(0.5) < 0.001 && at(20) < 0.001,
+    `@5 ${mm(at(5))} @7 ${mm(at(7))} @9 ${mm(at(9))} @0.5 ${mm(at(0.5))} @20 ${mm(at(20))} mm`);
+}
+
+// --- 4b. OVERRIDE SECTION HOLDS: keyed span pins the pose, no mid-span collapse --
+{
+  const layer = makeLayer("S"); // fade 0.5
+  layer.mode = "override";
+  const layers = [layer];
+  const fA = nearestFrame(c, 10);
+  const fB = nearestFrame(c, 20);
+  // Key the SAME pose (the t=10 pose) at both ends of the section.
+  const poseA = fullStackPose(c, layers, fA);
+  const bones = ["RightUpperArm", "RightLowerArm", "RightHand"];
+  captureBoneKeys(c, layers, 0, bones, poseA, fA, c.times[fA] - c.times[0]);
+  captureBoneKeys(c, layers, 0, bones, poseA, fB, c.times[fB] - c.times[0]);
+  const baked = applyRigLayers(c, layers);
+  // Across the whole section the arm's LOCALS must equal the keyed pose —
+  // frozen — even though the base motion underneath keeps dancing.
+  const arm = boneI("RightUpperArm");
+  let worst = 0;
+  for (const t of [10, 12.5, 15, 17.5, 20]) {
+    const f = nearestFrame(c, t);
+    worst = Math.max(worst, qangle(baked.localQuat[arm][f], poseA.quat[arm]));
+  }
+  const outside = qangle(baked.localQuat[arm][nearestFrame(c, 30)], c.localQuat[arm][nearestFrame(c, 30)]);
+  check("override section: pose held across the whole keyed span, released outside",
+    worst < 0.01 && outside < 0.01,
+    `worst in-span drift ${worst.toFixed(4)}°, outside drift ${outside.toFixed(4)}°`);
 }
 
 // --- 5. neutral capture = no-op; keyFullPose locks without changing ------------

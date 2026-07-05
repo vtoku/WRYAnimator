@@ -261,27 +261,24 @@ export const sampleTrackPos = samplePos;
 export const sampleTrackRot = sampleRot;
 
 /**
- * Influence envelope. Hold: 1 everywhere. Fade: each key is a LOCAL bump —
- * full strength at the key, smoothstep to zero fadeS away — and overlapping
- * bumps merge (clamped sum). Distant keys don't resurrect the span between.
+ * Influence envelope. Hold: 1 everywhere. Fade: FULL strength across the
+ * whole keyed range — keyed sections HOLD their pose, values interpolate on
+ * the layer's own curve between keys — easing to zero only OUTSIDE the
+ * first/last key. (An earlier version dipped to zero in large gaps between
+ * keys; that collapsed override sections back to the base mid-span. With
+ * bone-local curves, in-range interpolation is well-behaved — don't dip.)
  */
 function envelope(keys: Array<{ time: number }>, t: number, extent: "hold" | "fade", fadeS: number): number {
   if (!keys.length) return 0;
   if (extent === "hold") return 1;
+  const first = keys[0].time;
+  const last = keys[keys.length - 1].time;
+  if (t >= first && t <= last) return 1;
   const fade = Math.max(1e-6, fadeS);
-  let prev = -Infinity;
-  let next = Infinity;
-  for (const k of keys) {
-    if (k.time <= t) prev = k.time;
-    if (k.time >= t) { next = k.time; break; }
-  }
-  const ramp = (d: number): number => {
-    if (d <= 0) return 1;
-    if (d >= fade) return 0;
-    const x = 1 - d / fade;
-    return x * x * (3 - 2 * x);
-  };
-  return Math.min(1, ramp(t - prev) + ramp(next - t));
+  const d = t < first ? first - t : t - last;
+  if (d >= fade) return 0;
+  const x = 1 - d / fade;
+  return x * x * (3 - 2 * x);
 }
 
 const IDENTITY: Quat = [0, 0, 0, 1];

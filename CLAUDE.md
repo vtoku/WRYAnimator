@@ -107,10 +107,11 @@ No unit-test framework yet — the three `npm run` scripts above are the regress
                           deltas ("elbow +20°") that travel exactly when retimed/copied/pasted — NO base-dependent
                           conversion anywhere. A hand IK drag writes keys on its 3 chain bones = the 3 effectors
                           owning those bones (effectorForBone is 1:1 with EFFECTORS[].bone). Each layer:
-                          override/additive, weight, extent "fade" (default; per-key LOCAL bumps — clamped sum of
-                          smoothstep ramps, keys ≤ fade apart blend solidly, distant keys don't resurrect the span)
-                          or "hold" (first/last key extends; bracket with neutral keys). Drags snap to the exact
-                          frame. keyEffectorTarget() = one-call solve+capture for tests/programmatic edits.
+                          override/additive, weight, extent "fade" (default; FULL strength across the keyed range —
+                          keyed override sections HOLD their pose, values interpolate on the layer's own curve —
+                          easing to zero only OUTSIDE first/last key; a brief gap-dipping variant collapsed override
+                          sections mid-span and was reverted) or "hold" (first/last key extends; bracket with
+                          neutral keys). Drags snap to the exact frame. keyEffectorTarget() = one-call solve+capture for tests/programmatic edits.
                           PERF: bake = per-bone quat ops only (19-track full-pose layer over 12k frames ≈ 190 ms);
                           rig edits rebake IN PLACE over the edit's dirtyRange (bit-identical to full — proven),
                           repose with preview.seek, NEVER setClip; big rebakes run CHUNKED via bakeRangeAsync
