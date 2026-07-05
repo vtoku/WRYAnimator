@@ -101,8 +101,15 @@ No unit-test framework yet — the three `npm run` scripts above are the regress
                           the keyed range; OUTSIDE it each layer picks an extent: "fade" (default — the adjustment
                           smoothsteps to zero over fadeS seconds, so ONE key is a local correction) or "hold" (MoBu
                           semantics, first/last key extends across the clip; bracket with neutral keys). Envelope =
-                          per-channel weight multiplier in applyLayersToPose. Additive keys store world-space deltas
-                          vs the stack below the layer. Key tools: timeline diamond markers on the transport (click
+                          per-channel weight multiplier in applyLayersToPose; fade = per-key LOCAL bumps (clamped
+                          sum of smoothstep ramps to the bracketing keys — keys ≤ fade apart blend solidly, distant
+                          keys do NOT resurrect the span between them). Additive keys vs the stack below the layer:
+                          positions in WORLD space, rotations in the BONE'S OWN frame (post-multiplied local delta —
+                          a captured twist stays a twist as the limb moves; the earlier world-frame premultiply made
+                          fades look random). Drags snap to the exact frame (keys bake per frame; sub-frame keys
+                          popped against neighbors). Full rebakes run CHUNKED via bakeRangeAsync (12 ms slices in a
+                          promise queue with a superseded-by-reclean guard) so editing never blocks; small dirty
+                          ranges bake sync. Key tools: timeline diamond markers on the transport (click
                           = jump+select, ctrl-click = multi-pick, drag = retime, right-click = copy/paste/delete
                           menu, shift-drag timeline = band select; Ctrl+C/V/Del hotkeys), "Key pose" (keyFullPose
                           keys every effector's current effective value — locks the pose, provably changes nothing).

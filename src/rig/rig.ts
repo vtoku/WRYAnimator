@@ -196,16 +196,29 @@ export function retimeKeys(track: RigTrack, from: number, to: number): void {
 }
 
 /**
- * Influence envelope outside the keyed range: 1 inside, held or smoothly
- * faded to 0 outside, depending on the layer's extent.
+ * Influence envelope. Hold: 1 everywhere. Fade: each key is a LOCAL bump —
+ * full strength at the key, smoothstep to zero fadeS away — and overlapping
+ * bumps merge (clamped sum). Keys closer than ~2×fade blend solidly; distant
+ * corrections do NOT resurrect the span between them, which would make
+ * frames far from any key jump when a new correction lands.
  */
-function envelope(first: number, last: number, t: number, extent: "hold" | "fade", fadeS: number): number {
-  if (t >= first && t <= last) return 1;
+function envelope(keys: Array<{ time: number }>, t: number, extent: "hold" | "fade", fadeS: number): number {
+  if (!keys.length) return 0;
   if (extent === "hold") return 1;
-  const d = t < first ? first - t : t - last;
-  if (d >= fadeS || fadeS <= 0) return 0;
-  const x = 1 - d / fadeS;
-  return x * x * (3 - 2 * x); // smoothstep
+  const fade = Math.max(1e-6, fadeS);
+  let prev = -Infinity;
+  let next = Infinity;
+  for (const k of keys) {
+    if (k.time <= t) prev = k.time;
+    if (k.time >= t) { next = k.time; break; }
+  }
+  const ramp = (d: number): number => {
+    if (d <= 0) return 1;
+    if (d >= fade) return 0;
+    const x = 1 - d / fade;
+    return x * x * (3 - 2 * x);
+  };
+  return Math.min(1, ramp(t - prev) + ramp(next - t));
 }
 
 function samplePos(keys: PosKey[], t: number): Vec3 | null {
@@ -336,23 +349,26 @@ function applyEffector(
   if (!pv && !rv) return;
 
   if (effector === "hips") {
-    // Root: world == local, write directly.
+    // Root: world == local, write directly. Additive rot deltas are stored in
+    // the BONE'S OWN frame (post-multiplied) so a captured twist stays a
+    // twist as the body moves through the fade — a world-frame delta would
+    // point somewhere else on every other frame.
     if (pv) pose.pos[bone] = mode === "additive" ? vadd(pose.pos[bone], vscale(pv, wPos)) : vlerp(pose.pos[bone], pv, wPos);
     if (rv) {
       pose.quat[bone] = quatNormalize(
-        mode === "additive" ? quatMul(quatSlerp(IDENTITY, rv, wRot), pose.quat[bone]) : quatSlerp(pose.quat[bone], rv, wRot),
+        mode === "additive" ? quatMul(pose.quat[bone], quatSlerp(IDENTITY, rv, wRot)) : quatSlerp(pose.quat[bone], rv, wRot),
       );
     }
     return;
   }
 
   if (!def.chain) {
-    // Rotation-only effector (FK body bone): world-rotation edit in place.
+    // Rotation-only effector (FK body bone): bone-local additive delta.
     if (!rv) return;
     const world = worldFromLocal(parents, pose);
     const parentRot = world.rot[parents[bone]];
     const cur = world.rot[bone];
-    const desired = mode === "additive" ? quatMul(quatSlerp(IDENTITY, rv, wRot), cur) : quatSlerp(cur, rv, wRot);
+    const desired = mode === "additive" ? quatMul(cur, quatSlerp(IDENTITY, rv, wRot)) : quatSlerp(cur, rv, wRot);
     pose.quat[bone] = quatNormalize(quatMul(qconj(parentRot), desired));
     return;
   }
@@ -388,16 +404,17 @@ function applyEffector(
   if (rv) {
     const parentRot = world.rot[mid];
     const cur = world.rot[bone];
-    const desired = mode === "additive" ? quatMul(quatSlerp(IDENTITY, rv, wRot), cur) : quatSlerp(cur, rv, wRot);
+    const desired = mode === "additive" ? quatMul(cur, quatSlerp(IDENTITY, rv, wRot)) : quatSlerp(cur, rv, wRot);
     pose.quat[bone] = quatNormalize(quatMul(qconj(parentRot), desired));
   }
 }
 
 /** Per-channel envelope for a track at time t (0 = no influence). */
 function trackEnvelopes(track: RigTrack, layer: RigLayer, t: number): { pos: number; rot: number } {
-  const env = (keys: { time: number }[]) =>
-    keys.length ? envelope(keys[0].time, keys[keys.length - 1].time, t, layer.extent, layer.fadeS) : 0;
-  return { pos: env(track.posKeys), rot: env(track.rotKeys) };
+  return {
+    pos: envelope(track.posKeys, t, layer.extent, layer.fadeS),
+    rot: envelope(track.rotKeys, t, layer.extent, layer.fadeS),
+  };
 }
 
 /**
@@ -479,14 +496,13 @@ export interface TimeRange { t0: number; t1: number; }
  * keeps edits on heavily-keyed clips responsive: an edit re-bakes its
  * neighborhood, not the whole recording.
  */
-export function bakeRange(
+function makeBakeStep(
   base: ConvertedClip,
   layers: RigLayer[],
   outPos: Vec3[][],
   outQuat: Quat[][],
   range?: TimeRange,
-): void {
-  const frames = base.times.length;
+): (f: number) => void {
   const bones = base.names.length;
   const active = layers.filter((l) => l.enabled && l.weight > 0);
   // Influence windows: outside ALL of them a frame is pure base.
@@ -502,16 +518,16 @@ export function bakeRange(
   const t0 = range ? range.t0 : -Infinity;
   const t1 = range ? range.t1 : Infinity;
 
-  for (let f = 0; f < frames; f++) {
+  return (f: number) => {
     const t = base.times[f];
-    if (t < t0 || t > t1) continue; // outside the edit — keep the previous bake
+    if (t < t0 || t > t1) return; // outside the edit — keep the previous bake
     if (!windows.some((w) => t >= w.t0 && t <= w.t1)) {
       // No layer touches this frame — reset to base.
       for (let b = 0; b < bones; b++) {
         outPos[b][f] = base.localPos[b][f];
         outQuat[b][f] = base.localQuat[b][f];
       }
-      continue;
+      return;
     }
     const pose = poseAtFrame(base, f);
     applyLayersToPose(pose, base.names, base.parents, layers, t);
@@ -519,7 +535,47 @@ export function bakeRange(
       outPos[b][f] = pose.pos[b];
       outQuat[b][f] = pose.quat[b];
     }
+  };
+}
+
+export function bakeRange(
+  base: ConvertedClip,
+  layers: RigLayer[],
+  outPos: Vec3[][],
+  outQuat: Quat[][],
+  range?: TimeRange,
+): void {
+  const step = makeBakeStep(base, layers, outPos, outQuat, range);
+  for (let f = 0; f < base.times.length; f++) step(f);
+}
+
+/**
+ * Chunked bake: same result as bakeRange, but yields to the event loop every
+ * ~budgetMs so the UI never freezes on a big rebake. Writes land in place as
+ * they go (the preview shows progress). Returns false if `isStale` cancelled
+ * it — the caller's next bake supersedes this one.
+ */
+export async function bakeRangeAsync(
+  base: ConvertedClip,
+  layers: RigLayer[],
+  outPos: Vec3[][],
+  outQuat: Quat[][],
+  range?: TimeRange,
+  isStale?: () => boolean,
+  budgetMs = 12,
+): Promise<boolean> {
+  const step = makeBakeStep(base, layers, outPos, outQuat, range);
+  const frames = base.times.length;
+  let f = 0;
+  while (f < frames) {
+    const sliceEnd = performance.now() + budgetMs;
+    while (f < frames && performance.now() < sliceEnd) step(f++);
+    if (f < frames) {
+      await new Promise((r) => setTimeout(r, 0));
+      if (isStale?.()) return false;
+    }
   }
+  return true;
 }
 
 /**

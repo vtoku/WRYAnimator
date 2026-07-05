@@ -182,6 +182,57 @@ const f0 = 0;
     `joint drift ${mm(jointDrift)}mm, hand moved ${mm(handMoved)}mm`);
 }
 
+// --- 6c. additive rot deltas are BONE-LOCAL: the correction follows the limb ---
+{
+  const { quatToEulerZYX } = await import("../src/convert/quat.ts");
+  void quatToEulerZYX;
+  const arm = boneI("LeftUpperArm");
+  const ang = 20 * Math.PI / 180;
+  const delta = [Math.sin(ang / 2), 0, 0, Math.cos(ang / 2)]; // 20° about the bone's local X
+  const layer = makeLayer("L1");
+  layer.extent = "hold";
+  setRotKey(getTrack(layer, "leftUpperArm", true), tKey, delta);
+  const baked = applyRigLayers(c, [layer]);
+  const qmul = (a, b) => [
+    a[3]*b[0]+a[0]*b[3]+a[1]*b[2]-a[2]*b[1],
+    a[3]*b[1]-a[0]*b[2]+a[1]*b[3]+a[2]*b[0],
+    a[3]*b[2]+a[0]*b[1]-a[1]*b[0]+a[2]*b[3],
+    a[3]*b[3]-a[0]*b[0]-a[1]*b[1]-a[2]*b[2],
+  ];
+  // At ANY frame, world_after must equal world_base ⊗ delta (post-multiplied
+  // local delta) — the same local twist regardless of where the arm points.
+  let worst = 0;
+  for (const f of [f0, fKey, nearestFrame(c, 40)]) {
+    const expect = qmul(world(c, f).rot[arm], delta);
+    worst = Math.max(worst, qangle(world(baked, f).rot[arm], expect));
+  }
+  check("additive rot is bone-local: world_after == world_base ⊗ delta at every frame",
+    worst < 0.01, `worst ${worst.toFixed(4)}°`);
+}
+
+// --- 6d. fade keys are LOCAL bumps: distant keys don't resurrect the span ------
+{
+  const hand2 = boneI("RightHand");
+  const layer = makeLayer("L1"); // fade 0.5
+  const tr = getTrack(layer, "rightHand", true);
+  setPosKey(tr, 5, [0.05, 0, 0]);
+  setPosKey(tr, 9, [0, 0.05, 0]);
+  const baked = applyRigLayers(c, [layer]);
+  const at = (t) => dist(world(baked, nearestFrame(c, t)).pos[hand2], world(c, nearestFrame(c, t)).pos[hand2]);
+  check("fade bumps: full at keys, zero mid-gap between distant keys",
+    at(5) > 0.045 && at(9) > 0.045 && at(7) < 0.001,
+    `@5 ${mm(at(5))}mm, @7 ${mm(at(7))}mm, @9 ${mm(at(9))}mm`);
+
+  // Close keys (gap ≤ fade) still blend solidly.
+  const layer2 = makeLayer("L2");
+  const tr2 = getTrack(layer2, "rightHand", true);
+  setPosKey(tr2, 5, [0.05, 0, 0]);
+  setPosKey(tr2, 5.4, [0.05, 0, 0]);
+  const baked2 = applyRigLayers(c, [layer2]);
+  const mid = dist(world(baked2, nearestFrame(c, 5.2)).pos[hand2], world(c, nearestFrame(c, 5.2)).pos[hand2]);
+  check("fade bumps: close keys stay solid between", Math.abs(mid - 0.05) < 0.004, `mid ${mm(mid)}mm`);
+}
+
 // --- 7. a hand edit leaves the legs alone -------------------------------------
 {
   const layer = makeLayer("L1");

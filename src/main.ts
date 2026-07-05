@@ -6,7 +6,7 @@ import {
   makeLayer, getTrack, setPosKey, setRotKey, deleteKeysAt, keyTimes,
   applyRigLayers, applyLayersToPose, poseAtFrame, nearestFrame,
   effectorBaseWorld, effectorDef, effectorColor, retimeKeys, keyFullPose,
-  bakeRange, dirtyRange, unionRange, fkDragRef, setKeyEase, reduceKeys,
+  bakeRange, bakeRangeAsync, dirtyRange, unionRange, fkDragRef, setKeyEase, reduceKeys,
   type RigLayer, type EffectorId, type Transient, type TimeRange,
 } from "./rig/rig.ts";
 import { vsub, vadd, vlen, vnorm, qconj, quatFromTo } from "./convert/ik.ts";
@@ -728,16 +728,34 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
   /**
    * Rebake layers onto the (unchanged) base, IN PLACE in the display clip the
    * preview is already playing — no setClip, no body/face rebuild. `dirty`
-   * limits the bake to the frames a key edit actually changed, which is what
-   * keeps editing responsive on clips with many keyframes.
+   * limits the bake to the frames a key edit actually changed. Small ranges
+   * bake synchronously (~20 ms); big ones run CHUNKED in the background so
+   * editing is never interrupted. Bakes queue, so results stay ordered.
    */
+  let bakeQueue: Promise<void> = Promise.resolve();
   function rebakeRig(dirty?: TimeRange) {
     if (!loaded || !preview || !rigBaseClip) return;
-    const d = loaded.display;
-    bakeRange(rigBaseClip, rigLayers, d.localPos, d.localQuat, dirty);
-    d.bindPos = d.localPos.map((t) => t[0]);
-    preview.seek(preview.getTime()); // repose from the updated arrays
-    saveRigCache();
+    bakeQueue = bakeQueue.then(async () => {
+      if (!loaded || !preview || !rigBaseClip) return;
+      const d = loaded.display; // re-read: a reclean may have swapped it
+      const t0 = dirty?.t0 ?? -Infinity;
+      const t1 = dirty?.t1 ?? Infinity;
+      let count = 0;
+      for (const t of rigBaseClip.times) if (t >= t0 && t <= t1) count++;
+      if (count <= 2500) {
+        bakeRange(rigBaseClip, rigLayers, d.localPos, d.localQuat, dirty);
+      } else {
+        const done = await bakeRangeAsync(
+          rigBaseClip, rigLayers, d.localPos, d.localQuat, dirty,
+          () => loaded?.display !== d, // superseded by a reclean
+        );
+        if (!done) return;
+      }
+      if (loaded?.display !== d) return; // reclean replaced the clip mid-bake
+      d.bindPos = d.localPos.map((t) => t[0]);
+      preview.seek(preview.getTime()); // repose from the updated arrays
+      saveRigCache();
+    });
   }
 
   function keyContextItems(): Array<{ label: string; action?: () => void; disabled?: boolean }> {
@@ -1191,8 +1209,11 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
       const layer = rigLayers[activeLayerIdx];
       if (!layer.enabled) return false;
       getTrack(layer, e, true);
-      const t = preview!.getTime();
-      const f = nearestFrame(rigBaseClip, t);
+      // Snap to the exact frame: the key bakes per frame, so keying at an
+      // interpolated sub-frame time pops the pose against its neighbors.
+      const f = nearestFrame(rigBaseClip, preview!.getTime());
+      const t = rigBaseClip.times[f] - rigBaseClip.times[0];
+      preview!.seek(t);
       const base = effectorBaseWorld(rigBaseClip, rigLayers, activeLayerIdx, e, f);
       const start = preview!.getEffectorWorld(e) ?? base;
       // FK bones swing about their joint when PULLED (Poser style): pulling
@@ -1213,14 +1234,20 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
       if (posMoved && def.canMove) {
         dragCtx.transient.pos = layer.mode === "additive" ? vsub(pos, dragCtx.base.pos) : pos;
       } else if (posMoved && dragCtx.fkRef) {
-        // Swing the bone so its tip chases the drag.
+        // Swing the bone so its tip chases the drag. Additive deltas live in
+        // the bone's OWN frame (post-multiplied), so the correction follows
+        // the limb through the fade instead of pointing at a fixed world axis.
         const drag = vsub(pos, dragCtx.start.pos);
         const dir0 = vnorm(vsub(dragCtx.fkRef.tip, dragCtx.fkRef.joint));
         const dir1 = vnorm(vsub(vadd(dragCtx.fkRef.tip, drag), dragCtx.fkRef.joint));
         const swing = quatFromTo(dir0, dir1);
-        dragCtx.transient.rot = layer.mode === "additive" ? swing : quatNormalize(quatMul(swing, dragCtx.base.rot));
+        dragCtx.transient.rot =
+          layer.mode === "additive"
+            ? quatNormalize(quatMul(qconj(dragCtx.base.rot), quatMul(swing, dragCtx.base.rot)))
+            : quatNormalize(quatMul(swing, dragCtx.base.rot));
       } else if (rotMoved && def.canRotate) {
-        dragCtx.transient.rot = layer.mode === "additive" ? quatMul(rot, qconj(dragCtx.base.rot)) : rot;
+        dragCtx.transient.rot =
+          layer.mode === "additive" ? quatNormalize(quatMul(qconj(dragCtx.base.rot), rot)) : rot;
       }
       const pose = poseAtFrame(rigBaseClip, dragCtx.f);
       applyLayersToPose(pose, rigBaseClip.names, rigBaseClip.parents, rigLayers, dragCtx.t, dragCtx.transient);
