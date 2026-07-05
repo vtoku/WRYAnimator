@@ -150,6 +150,12 @@ No unit-test framework yet — the three `npm run` scripts above are the regress
                           path; the graph redraws itself — the host must NOT rebuild the view mid-drag
                           (setModel refuses while dragging). Toggled with the dope sheet via the Keys/Curves button.
   → src/ui/transport.ts: transport bar docked at the bottom of the editor suite — play/pause, click-to-seek timeline with draggable in/out trim handles, rig-key markers, and a mini DOPE SHEET (per-effector key rows for the active layer, shown only on the Rig tab; rows pixel-align to the strip by measuring against the rows element's own border box — its padding doesn't shift getBoundingClientRect). resample() takes trimStart/trimEnd to export only the trimmed range (rebased to t=0).
+  → SCENE FILES (main.ts): "Save scene…" (Info tab) bundles the ORIGINAL .wanim bytes (base64) +
+                          rig state + cleaning/export settings + trim + playhead into one `<name>.scene.json`
+                          (magic "wanimscene"). Dropping it (or any .json) on the app routes through handleFile →
+                          loadWanim(bytes) with pendingScene applied in buildPanel (adoptRigState + applyScene)
+                          before the initial reclean. Custom VRM bodies are NOT embedded (size) — body falls back
+                          to bundled. The localStorage cache also carries `settings` now (same applyScene path).
   → UI SHELL (index.html + main.ts buildPanel): editor suite — top #editbar toolbar (undo/redo, gizmo mode+space, hold-to-compare, format+Download), right #dock with tabs Clean/Rig/Export/Info, bottom #timeline-dock. buildPanel writes editbar.innerHTML + dock.innerHTML per file load (fresh nodes = no stacked listeners). Rig handles + dope sheet are GATED to the Rig tab (syncRigVisibility). Element IDs are unchanged from the single-drawer era — keep it that way, tests and wiring key off them.
   → src/preview/face.ts:  ARKit face overlay — loads public/facecap-head.glb, seats it at the Head joint,
                           drives morph targets from the recorded blendshapes (also embedded in the FBX, skinned).

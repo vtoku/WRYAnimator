@@ -35,6 +35,8 @@ export interface DopeRow {
 export interface Transport {
   element: HTMLElement;
   getTrim(): { start: number; end: number };
+  /** Restore a trim range (scene load). */
+  setTrim(start: number, end: number): void;
   /** Show rig-layer key markers on the timeline (replaces the previous set). */
   setKeys(markers: TransportKeyMarker[], cbs?: TransportKeyCallbacks): void;
   /** Mini dope sheet under the strip: per-effector key rows (empty = hidden). */
@@ -347,6 +349,11 @@ export function createTransport(preview: PreviewScene, duration: number): Transp
   return {
     element: el,
     getTrim: () => ({ start: trimStart, end: trimEnd }),
+    setTrim: (start: number, end: number) => {
+      trimStart = Math.max(0, Math.min(duration, start));
+      trimEnd = Math.max(trimStart + 0.01, Math.min(duration, end));
+      applyTrim();
+    },
     setKeys,
     setDope,
     setCurves,

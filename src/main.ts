@@ -92,10 +92,41 @@ function showCtxMenu(x: number, y: number, items: Array<{ label: string; action?
 }
 let transport: Transport | null = null;
 let transportDuration = 0; // scale the transport was built with (warp changes it)
+
+// ---- scene files ------------------------------------------------------------
+// A scene bundles the RECORDING plus every edit and setting into one JSON, so
+// a session can be reopened later by dropping that single file.
+interface SceneFile {
+  magic: "wanimscene";
+  v: number;
+  name: string;
+  settings?: Record<string, unknown>;
+  rig?: Record<string, unknown>;
+  wanim: string; // base64 of the original .wanim bytes
+}
+let pendingScene: SceneFile | null = null;
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let out = "";
+  const CHUNK = 0x8000;
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    out += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+  }
+  return btoa(out);
+}
+
+function base64ToBytes(s: string): Uint8Array {
+  const bin = atob(s);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
 let loaded: {
   name: string;
   clip: WanimClip;
   converted: ConvertedClip;
+  /** Original file bytes — embedded into saved scenes. */
+  raw: ArrayBuffer;
   /** After cleaning + optional Ybot re-proportioning — what preview/export use. */
   display: ConvertedClip;
 } | null = null;
@@ -384,6 +415,10 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     <dl class="stats">
       ${rows.map(([k, v]) => `<div><dt>${k}</dt><dd>${v}</dd></div>`).join("")}
     </dl>
+    <button id="sceneSave" class="button ghost" title="Bundles the recording plus every edit and setting into one .scene.json. Drop it on the app later to pick up exactly where you left off.">Save scene…</button>
+    <p class="hint">A scene file contains the recording, your layers, modifiers,
+      cleaning and export settings, and the trim — one file reopens the whole
+      session. A custom VRM body isn't embedded; re-pick it after loading.</p>
     <button id="reset" class="button ghost">Load another file</button>
     </div>
 
@@ -1548,7 +1583,10 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
       if (dirty) {
         localStorage.setItem(
           rigCacheKey,
-          JSON.stringify({ v: 3, layers: rigLayers, mods, counter: layerCounter, warp: warpKeys, ranges: rangeSmooths }),
+          JSON.stringify({
+            v: 3, layers: rigLayers, mods, counter: layerCounter, warp: warpKeys, ranges: rangeSmooths,
+            settings: sceneSettings(),
+          }),
         );
       } else {
         localStorage.removeItem(rigCacheKey);
@@ -1597,6 +1635,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
         counter?: number;
         warp?: WarpKey[];
         ranges?: RangeSmooth[];
+        settings?: Record<string, unknown>;
       };
       if (
         d.layers?.length ||
@@ -1605,6 +1644,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
         (d.mods && JSON.stringify({ ...defaultModifiers(), ...d.mods }) !== JSON.stringify(defaultModifiers()))
       ) {
         adoptRigState(d);
+        applyScene(d.settings);
         rigCacheNote.textContent = "Restored saved edits for this recording.";
       }
     }
@@ -1636,6 +1676,78 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
       showError(`${file.name}: ${err instanceof Error ? err.message : String(err)}`);
     }
   });
+
+  // ---- scene save / restore -------------------------------------------------
+  /** Everything outside the rig state worth restoring in a session. */
+  function sceneSettings(): Record<string, unknown> {
+    return {
+      clean: cleanOpts(),
+      fps: fpsSel.value,
+      names: namesSel.value,
+      rest: restSel.value,
+      proportions: propSel.value,
+      distSpine: distSpineChk.checked,
+      distSpineAmt: distSpineAmt.value,
+      face: faceChk.checked,
+      body: bodySel.value === "vrm" ? "human" : bodySel.value, // custom VRMs aren't embedded
+      trim: transport?.getTrim(),
+      time: preview?.getTime() ?? 0,
+    };
+  }
+
+  function applyScene(s?: Record<string, unknown>) {
+    if (!s) return;
+    const c = (s.clean ?? {}) as CleanOpts;
+    fixFeetChk.checked = c.fixFeet ?? true;
+    limitWristsChk.checked = c.limitWrists ?? true;
+    lockWristsSel.value = c.lockWrists ?? "";
+    limitLowerArmsChk.checked = c.limitLowerArms ?? true;
+    lockLowerArmSel.value = c.lockLowerArmTwist ?? "";
+    despikeChk.checked = !!c.despike;
+    if (c.despikeDeg) { despikeDeg.value = String(c.despikeDeg); despikeVal.value = `${despikeDeg.value}°`; }
+    smoothChk.checked = !!c.smooth;
+    if (c.cutoffHz) { cutoff.value = String(c.cutoffHz); cutoffVal.value = `${cutoff.value} Hz`; }
+    if (s.fps) fpsSel.value = String(s.fps);
+    if (typeof s.names === "string") namesSel.value = s.names;
+    if (typeof s.rest === "string") restSel.value = s.rest;
+    if (typeof s.proportions === "string") propSel.value = s.proportions;
+    distSpineChk.checked = !!s.distSpine;
+    distSpineAmt.disabled = !distSpineChk.checked;
+    if (s.distSpineAmt) { distSpineAmt.value = String(s.distSpineAmt); distSpineAmtVal.value = `${distSpineAmt.value}%`; }
+    if (typeof s.face === "boolean" && !faceChk.disabled) faceChk.checked = s.face;
+    if (typeof s.body === "string" && s.body !== "vrm") {
+      bodySel.value = s.body;
+      preview?.setBodyMode(s.body === "none" ? "none" : "human");
+    }
+    const trim = s.trim as { start: number; end: number } | undefined;
+    if (trim) transport?.setTrim(trim.start, trim.end);
+    if (typeof s.time === "number") {
+      preview?.pause();
+      preview?.seek(s.time);
+    }
+  }
+
+  (document.getElementById("sceneSave") as HTMLButtonElement).addEventListener("click", () => {
+    if (!loaded) return;
+    const scene: SceneFile = {
+      magic: "wanimscene",
+      v: 1,
+      name: loaded.name,
+      settings: sceneSettings(),
+      rig: { v: 3, layers: rigLayers, mods, counter: layerCounter, warp: warpKeys, ranges: rangeSmooths },
+      wanim: bytesToBase64(new Uint8Array(loaded.raw)),
+    };
+    downloadBytes(`${sanitizeFilename(loaded.name)}.scene.json`, new TextEncoder().encode(JSON.stringify(scene)));
+  });
+
+  // A dropped scene file restores rig + settings over the freshly loaded clip.
+  if (pendingScene) {
+    const sc = pendingScene;
+    pendingScene = null;
+    adoptRigState((sc.rig ?? {}) as Parameters<typeof adoptRigState>[0]);
+    applyScene(sc.settings);
+    rigCacheNote.textContent = "Scene restored.";
+  }
 
   // Apply the default proportions selection (body-mesh skeleton) on load.
   void reclean();
@@ -1730,18 +1842,39 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
 
 async function handleFile(file: File) {
   errorEl.hidden = true;
-  if (!file.name.toLowerCase().endsWith(".wanim")) {
-    showError(`"${file.name}" is not a .wanim file.`);
+  const lower = file.name.toLowerCase();
+  if (lower.endsWith(".json")) {
+    // Saved scene: recording + edits + settings in one file.
+    try {
+      const scene = JSON.parse(await file.text()) as SceneFile;
+      if (scene.magic !== "wanimscene" || typeof scene.wanim !== "string") {
+        throw new Error("not a scene file (drop a .wanim or a saved .scene.json)");
+      }
+      pendingScene = scene;
+      const bytes = base64ToBytes(scene.wanim);
+      await loadWanim(scene.name || file.name.replace(/\.scene\.json$/i, ".wanim"), bytes.buffer as ArrayBuffer);
+    } catch (err) {
+      pendingScene = null;
+      showError(`${file.name}: ${err instanceof Error ? err.message : String(err)}`);
+    }
     return;
   }
+  if (!lower.endsWith(".wanim")) {
+    showError(`"${file.name}" is not a .wanim file (or a saved .scene.json).`);
+    return;
+  }
+  await loadWanim(file.name, await file.arrayBuffer());
+}
+
+async function loadWanim(name: string, raw: ArrayBuffer) {
   try {
-    const clip = parseWanim(await file.arrayBuffer());
+    const clip = parseWanim(raw);
     if (clip.characters.length === 0) {
       showError("This recording contains no characters.");
       return;
     }
     const converted = convertCharacter(clip, 0);
-    loaded = { name: file.name, clip, converted, display: converted };
+    loaded = { name, clip, converted, raw, display: converted };
 
     emptyState.hidden = true;
     loadedState.hidden = false;
@@ -1755,7 +1888,7 @@ async function handleFile(file: File) {
     transportDuration = converted.duration;
     timelineDock.appendChild(transport.element);
 
-    buildPanel(file.name, clip, converted);
+    buildPanel(name, clip, converted);
   } catch (err) {
     showError(err instanceof Error ? err.message : String(err));
   }
