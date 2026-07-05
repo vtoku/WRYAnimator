@@ -15,6 +15,7 @@
     "cleanCheck": "node scripts/cleanCheck.mjs",
     "vrmaCheck": "node scripts/vrmaCheck.mjs",
     "rigCheck": "node scripts/rigCheck.mjs",
+    "wanimCheck": "node scripts/wanimCheck.mjs",
     "drive": "node scripts/driveApp.mjs"
   },
   "dependencies": {

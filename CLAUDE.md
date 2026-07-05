@@ -55,6 +55,7 @@ npm run fbxcheck -- <file.fbx>               # load an emitted FBX back with thr
 npm run drive    -- [file.wanim]             # Playwright: drive the running dev server, screenshot, test download
 npm run cleanCheck -- [file.wanim]           # verify the cleaning filters (despike/butterworth/wrist/forearm/feet) on real data
 npm run vrmaCheck  -- [file.wanim] [out]     # VRMA exporter structural check (VRMC_vrm_animation layout)
+npm run wanimCheck -- [file.wanim]           # WANIM re-export round-trip: set name + channels + values + bones preserved
 npm run rigCheck   -- [file.wanim]           # control-rig layers + modifiers: additive/override/weight/stacking/IK invariants
 ```
 
