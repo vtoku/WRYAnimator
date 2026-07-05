@@ -137,15 +137,71 @@ main:has(.loaded-state:not([hidden])) {
   color: var(--error);
 }
 
+/* ---- editor suite: toolbar / viewport+dock / timeline -------------------- */
 .loaded-state {
   flex: 1;
   display: grid;
-  grid-template-columns: 1fr 22rem;
+  grid-template-rows: auto 1fr auto;
+  min-height: 0;
+}
+
+.editbar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.4rem 0.8rem;
+  background: var(--bg-raise);
+  border-bottom: 1px solid var(--border);
+}
+
+.eb-group {
+  display: inline-flex;
+  gap: 0.3rem;
+  align-items: center;
+  padding-right: 0.5rem;
+  border-right: 1px solid var(--border);
+}
+
+.eb-spacer {
+  flex: 1;
+}
+
+.eb-btn,
+.editbar select {
+  background: #232833;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.35rem 0.6rem;
+  font-size: 0.82rem;
+  cursor: pointer;
+}
+
+.eb-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.eb-btn.active,
+.eb-btn:hover:not(:disabled) {
+  border-color: #7fb2ff;
+}
+
+.editbar .button.primary,
+.editbar .button.compare {
+  width: auto;
+  padding: 0.4rem 1.1rem;
+}
+
+.edit-main {
+  display: flex;
   min-height: 0;
 }
 
 .viewport {
   position: relative;
+  flex: 1;
+  min-width: 0;
   min-height: 0;
   background: #0e1014;
 }
@@ -154,42 +210,94 @@ main:has(.loaded-state:not([hidden])) {
   display: block;
 }
 
-.panel {
+.dock {
+  width: 22rem;
+  display: flex;
+  flex-direction: column;
   background: var(--bg-raise);
   border-left: 1px solid var(--border);
-  padding: 1.5rem;
-  overflow-y: auto;
+  min-height: 0;
 }
 
-.panel h2 {
+.dock-tabs {
+  display: flex;
+  border-bottom: 1px solid var(--border);
+}
+
+.dock-tab {
+  flex: 1;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--text-dim);
+  padding: 0.6rem 0.4rem;
+  font-size: 0.82rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  cursor: pointer;
+}
+
+.dock-tab:hover {
+  color: var(--text);
+}
+
+.dock-tab.active {
+  color: var(--text);
+  border-bottom-color: #7fb2ff;
+}
+
+.dock-body {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.dock .tab {
+  display: none;
+  padding: 0.9rem 1.2rem 1.5rem;
+}
+
+.dock .tab.active {
+  display: block;
+}
+
+.dock h2 {
   margin-top: 0;
-  font-size: 1.1rem;
+  font-size: 1.05rem;
   overflow-wrap: anywhere;
 }
 
+.timeline-dock {
+  border-top: 1px solid var(--border);
+  background: var(--bg-raise);
+}
+
 @media (max-width: 720px) {
-  .loaded-state {
-    grid-template-columns: 1fr;
-    grid-template-rows: 55vh auto;
+  .edit-main {
+    flex-direction: column;
   }
-  .panel {
+  .viewport {
+    min-height: 45vh;
+  }
+  .dock {
+    width: auto;
     border-left: none;
     border-top: 1px solid var(--border);
+    max-height: 40vh;
   }
 }
 
-/* Transport overlay on the 3D viewport */
+/* Transport bar (bottom timeline dock) */
 .transport-overlay {
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 0.45rem 0.9rem;
+}
+
+.t-main {
   display: flex;
   align-items: center;
   gap: 0.6rem;
-  padding: 0.6rem 0.9rem;
-  background: linear-gradient(transparent, rgba(8, 10, 13, 0.85) 40%);
-  z-index: 10;
 }
 
 .t-btn {
@@ -296,6 +404,42 @@ main:has(.loaded-state:not([hidden])) {
   background: rgba(127, 178, 255, 0.25);
   border: 1px solid rgba(127, 178, 255, 0.6);
   pointer-events: none;
+}
+
+/* Mini dope sheet under the strip */
+.t-dope {
+  max-height: 132px;
+  overflow-y: auto;
+  margin-top: 0.35rem;
+  border-top: 1px solid var(--border);
+  padding-top: 0.25rem;
+}
+
+.d-row {
+  position: relative;
+  height: 20px;
+}
+
+.d-label {
+  position: absolute;
+  left: calc(8px - var(--dope-gutter, 48px));
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 0.65rem;
+  white-space: nowrap;
+  opacity: 0.9;
+  pointer-events: none;
+}
+
+.d-strip {
+  position: relative;
+  height: 100%;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.d-strip .t-key {
+  top: 50%;
 }
 
 .ctx-menu {

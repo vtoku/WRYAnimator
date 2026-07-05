@@ -29,7 +29,9 @@ const dropzone = document.getElementById("dropzone") as HTMLElement;
 const fileInput = document.getElementById("file-input") as HTMLInputElement;
 const errorEl = document.getElementById("empty-error") as HTMLElement;
 const viewport = document.getElementById("viewport") as HTMLElement;
-const panel = document.getElementById("panel") as HTMLElement;
+const editbar = document.getElementById("editbar") as HTMLElement;
+const dock = document.getElementById("dock") as HTMLElement;
+const timelineDock = document.getElementById("timeline-dock") as HTMLElement;
 
 let preview: PreviewScene | null = null;
 /** Current panel's rig actions, driven by the module-level hotkey listener. */
@@ -124,15 +126,40 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     ["Blendshapes", blendshapeNames.size ? String(blendshapeNames.size) : "none"],
   ];
 
-  panel.innerHTML = `
-    <h2>${name}</h2>
-    <dl class="stats">
-      ${rows.map(([k, v]) => `<div><dt>${k}</dt><dd>${v}</dd></div>`).join("")}
-    </dl>
+  // ---- editor-suite toolbar: global actions, always visible ---------------
+  editbar.innerHTML = `
+    <div class="eb-group">
+      <button id="rigUndo" class="eb-btn" disabled title="Undo the last rig or modifier edit (Ctrl+Z)">↶ Undo</button>
+      <button id="rigRedo" class="eb-btn" disabled title="Redo (Ctrl+Y)">↷ Redo</button>
+    </div>
+    <div class="eb-group">
+      <select id="rigGizmo" title="Gizmo mode (W = move, E = rotate). Pulling an FK diamond in move mode swings the bone toward the drag.">
+        <option value="translate" selected>Move</option>
+        <option value="rotate">Rotate</option>
+      </select>
+      <button id="rigSpace" class="eb-btn" title="Gizmo axes: Local follows the bone, World uses the scene axes (Q toggles).">Local</button>
+    </div>
+    <button id="compare" class="eb-btn compare" title="Press and hold to see the recording without any cleaning or rig edits, so you can judge what changed.">Hold: original</button>
+    <span class="eb-spacer"></span>
+    <select id="format" aria-label="Export format" title="FBX for MotionBuilder/Maya/Blender; VRMA for Warudo/VSeeFace/Unity; WANIM back into Warudo.">
+      <option value="fbx" selected>FBX</option>
+      <option value="vrma">VRMA</option>
+      <option value="wanim">WANIM</option>
+    </select>
+    <button id="download" class="button primary">Download</button>
+  `;
 
-    <h3 class="section">Cleaning</h3>
-    <button id="compare" class="button ghost compare" title="Press and hold to see the recording without any cleaning, so you can judge what the filters change.">Hold to see original</button>
+  // ---- dock: task panels in tabs ------------------------------------------
+  dock.innerHTML = `
+    <nav class="dock-tabs" role="tablist">
+      <button class="dock-tab active" data-tab="clean">Clean</button>
+      <button class="dock-tab" data-tab="rig">Rig</button>
+      <button class="dock-tab" data-tab="export">Export</button>
+      <button class="dock-tab" data-tab="info">Info</button>
+    </nav>
+    <div class="dock-body">
 
+    <div class="tab active" id="tab-clean">
     <h4 class="group">Feet</h4>
     <label class="field">
       <span>Pin planted feet</span>
@@ -185,8 +212,9 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
       <input id="cutoff" type="range" min="1" max="15" step="0.5" value="7" title="Lower = smoother but mushier. Anything faster than this many shakes per second is treated as noise." />
     </label>
     <p id="cleanStats" class="clean-stats"></p>
+    </div>
 
-    <h3 class="section">Control rig</h3>
+    <div class="tab" id="tab-rig">
     <p class="hint">FK/IK adjustment layers, MotionBuilder style. Add a layer, pause,
       then drag a handle on the figure; a key lands at the playhead. Spheres
       (hips, hands, feet) move with IK and rotate; the small diamonds on the
@@ -196,19 +224,8 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     <div id="rigLayers" class="rig-layers"></div>
     <div class="rig-row">
       <button id="rigAdd" class="button ghost">Add layer</button>
-      <select id="rigGizmo" title="Gizmo mode (W = move, E = rotate). Pulling an FK diamond in move mode swings the bone toward the drag.">
-        <option value="translate" selected>Move</option>
-        <option value="rotate">Rotate</option>
-      </select>
-      <button id="rigSpace" class="button ghost" title="Gizmo axes: Local follows the bone, World uses the scene axes (Q toggles).">Local</button>
-    </div>
-    <div class="rig-row">
-      <button id="rigUndo" class="button ghost" disabled title="Undo the last rig or modifier edit (Ctrl+Z)">Undo</button>
-      <button id="rigRedo" class="button ghost" disabled title="Redo (Ctrl+Y)">Redo</button>
-    </div>
-    <div class="rig-row">
-      <button id="rigSave" class="button ghost" title="Download the layers + modifiers as a .rig.json file you can reload later or on another machine.">Save rig…</button>
-      <button id="rigLoadBtn" class="button ghost" title="Load a saved .rig.json onto this recording.">Load rig…</button>
+      <button id="rigSave" class="button ghost" title="Download the layers + modifiers as a .rig.json file you can reload later or on another machine.">Save…</button>
+      <button id="rigLoadBtn" class="button ghost" title="Load a saved .rig.json onto this recording.">Load…</button>
     </div>
     <input id="rigFile" type="file" accept=".json,application/json" hidden />
     <p id="rigCacheNote" class="clean-stats"></p>
@@ -224,7 +241,8 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
 
     <h3 class="section">Modifiers</h3>
     <p class="hint">Whole-clip corrections, no keys needed. Hips keeps the feet
-      planted; knees and elbows swing without moving hips, feet, or hands.</p>
+      planted; knees and elbows swing without moving hips, feet, or hands.
+      Layers apply on top of these.</p>
     <label class="field sub">
       <span>Hips height <output id="modHipsVal">0 cm</output></span>
       <input id="modHips" type="range" min="-30" max="30" step="1" value="0" title="Raise or lower the hips; the legs re-solve so the feet stay where they are." />
@@ -244,8 +262,9 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     <div class="rig-row">
       <button id="modReset" class="button ghost">Reset modifiers</button>
     </div>
+    </div>
 
-    <h3 class="section">Export</h3>
+    <div class="tab" id="tab-export">
     <label class="field">
       <span>Frame rate</span>
       <select id="fps">
@@ -296,22 +315,40 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
       </select>
     </label>
     <input id="bodyfile" type="file" accept=".vrm,.glb" hidden />
-    <div class="download-row">
-      <select id="format" aria-label="Export format">
-        <option value="fbx" selected>FBX</option>
-        <option value="vrma">VRMA</option>
-        <option value="wanim">WANIM</option>
-      </select>
-      <button id="download" class="button primary">Download</button>
+    <p class="note">Format and Download live in the toolbar. Drag the in/out
+      handles on the timeline to trim. FBX comes out as binary 7.5, which
+      MotionBuilder can read, with the face and body meshes baked in if you
+      turned them on. VRMA carries the humanoid motion and expressions for
+      Warudo, VSeeFace, and Unity; it plays on any VRM and doesn't need a
+      mesh. WANIM writes the cleaned recording back out so you can take it
+      into Warudo again.</p>
     </div>
-    <p class="note">Drag the in/out handles on the timeline to trim. FBX comes
-      out as binary 7.5, which MotionBuilder can read, with the face and body
-      meshes baked in if you turned them on. VRMA carries the humanoid motion
-      and expressions for Warudo, VSeeFace, and Unity; it plays on any VRM and
-      doesn't need a mesh. WANIM writes the cleaned recording back out so you
-      can take it into Warudo again.</p>
+
+    <div class="tab" id="tab-info">
+    <h2>${name}</h2>
+    <dl class="stats">
+      ${rows.map(([k, v]) => `<div><dt>${k}</dt><dd>${v}</dd></div>`).join("")}
+    </dl>
     <button id="reset" class="button ghost">Load another file</button>
+    </div>
+
+    </div>
   `;
+
+  // Tab switching; rig handles + dope sheet only show on the Rig tab.
+  let activeTab = "clean";
+  const tabBtns = Array.from(dock.querySelectorAll<HTMLButtonElement>(".dock-tab"));
+  function syncRigVisibility() {
+    preview?.setRigEnabled(activeTab === "rig" && rigLayers.length > 0);
+  }
+  function setTab(t: string) {
+    activeTab = t;
+    for (const b of tabBtns) b.classList.toggle("active", b.dataset.tab === t);
+    for (const el of dock.querySelectorAll(".tab")) el.classList.toggle("active", el.id === `tab-${t}`);
+    syncRigVisibility();
+    updateRigEditor();
+  }
+  for (const b of tabBtns) b.addEventListener("click", () => setTab(b.dataset.tab!));
 
   const despikeChk = document.getElementById("despike") as HTMLInputElement;
   const despikeDeg = document.getElementById("despikeDeg") as HTMLInputElement;
@@ -647,7 +684,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
           })),
         )
       : [];
-    transport?.setKeys(markers, {
+    const keyCbs = {
       onClick: (m, ctrl) => {
         const eff = m.tag as EffectorId;
         if (ctrl) {
@@ -703,7 +740,27 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
         );
         updateRigEditor();
       },
-    });
+    } satisfies Parameters<NonNullable<typeof transport>["setKeys"]>[1];
+    transport?.setKeys(markers, keyCbs);
+    // Dope sheet: one row per keyed effector, only while the Rig tab is up.
+    const dopeRows =
+      activeTab === "rig" && layer
+        ? layer.tracks
+            .filter((tr) => tr.posKeys.length + tr.rotKeys.length > 0)
+            .map((tr) => ({
+              tag: tr.effector,
+              label: effectorDef(tr.effector).label.replace("Left ", "L ").replace("Right ", "R "),
+              color: effectorColor(tr.effector),
+              keys: keyTimes(tr).map((t) => ({
+                time: t,
+                color: effectorColor(tr.effector),
+                selected: tr.effector === selectedEffector,
+                picked: isPicked(tr.effector, t),
+                tag: tr.effector,
+              })),
+            }))
+        : [];
+    transport?.setDope(dopeRows, keyCbs);
     rigEditorEl.hidden = !layer;
     if (!layer) return;
     if (!selectedEffector) {
@@ -849,7 +906,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
       row.append(en, name, mode, extent, del, sub);
       rigLayersEl.appendChild(row);
     });
-    preview?.setRigEnabled(rigLayers.length > 0);
+    syncRigVisibility();
     updateRigEditor();
   }
 
@@ -1257,7 +1314,7 @@ async function handleFile(file: File) {
 
     transport?.dispose();
     transport = createTransport(preview, converted.duration);
-    viewport.appendChild(transport.element);
+    timelineDock.appendChild(transport.element);
 
     buildPanel(file.name, clip, converted);
   } catch (err) {

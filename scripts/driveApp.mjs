@@ -23,10 +23,10 @@ await page.setInputFiles("#file-input", {
 
 // Wait for the loaded UI to appear.
 await page.waitForSelector("#loaded-state:not([hidden])", { timeout: 20000 });
-await page.waitForSelector("#panel .stats", { timeout: 20000 });
+await page.waitForSelector("#dock .stats", { timeout: 20000, state: "attached" });
 console.log("loaded-state visible");
 
-const stats = await page.$$eval("#panel .stats div", (els) =>
+const stats = await page.$$eval("#dock .stats div", (els) =>
   els.map((d) => d.textContent.replace(/\s+/g, " ").trim()),
 );
 console.log("stats:", JSON.stringify(stats));

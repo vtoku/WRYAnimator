@@ -23,11 +23,21 @@ export interface TransportKeyCallbacks {
   onBand(t0: number, t1: number): void;
 }
 
+/** One dope-sheet row: an effector's keys on the active layer. */
+export interface DopeRow {
+  tag: string;
+  label: string;
+  color: string;
+  keys: TransportKeyMarker[];
+}
+
 export interface Transport {
   element: HTMLElement;
   getTrim(): { start: number; end: number };
   /** Show rig-layer key markers on the timeline (replaces the previous set). */
   setKeys(markers: TransportKeyMarker[], cbs?: TransportKeyCallbacks): void;
+  /** Mini dope sheet under the strip: per-effector key rows (empty = hidden). */
+  setDope(rows: DopeRow[], cbs?: TransportKeyCallbacks): void;
   dispose(): void;
 }
 
@@ -50,18 +60,24 @@ export function createTransport(preview: PreviewScene, duration: number): Transp
   const el = document.createElement("div");
   el.className = "transport-overlay";
   el.innerHTML = `
-    <button class="t-btn t-play" aria-label="Play/pause">⏸</button>
-    <div class="t-timeline" role="slider" tabindex="0" aria-label="Timeline and trim">
-      <div class="t-region"></div>
-      <div class="t-keys"></div>
-      <div class="t-handle t-in" aria-label="Trim start"></div>
-      <div class="t-handle t-out" aria-label="Trim end"></div>
-      <div class="t-playhead"></div>
+    <div class="t-main">
+      <button class="t-btn t-play" aria-label="Play/pause">⏸</button>
+      <div class="t-timeline" role="slider" tabindex="0" aria-label="Timeline and trim">
+        <div class="t-region"></div>
+        <div class="t-keys"></div>
+        <div class="t-handle t-in" aria-label="Trim start"></div>
+        <div class="t-handle t-out" aria-label="Trim end"></div>
+        <div class="t-playhead"></div>
+      </div>
+      <span class="t-time">0:00.00 / 0:00.00</span>
+      <button class="t-btn t-setin" title="Set trim start to playhead">In</button>
+      <button class="t-btn t-setout" title="Set trim end to playhead">Out</button>
+      <button class="t-btn t-reset" title="Clear trim">Reset</button>
+      <button class="t-btn t-dope-toggle" hidden title="Show/hide per-part key rows">Keys ▾</button>
     </div>
-    <span class="t-time">0:00.00 / 0:00.00</span>
-    <button class="t-btn t-setin" title="Set trim start to playhead">In</button>
-    <button class="t-btn t-setout" title="Set trim end to playhead">Out</button>
-    <button class="t-btn t-reset" title="Clear trim">Reset</button>
+    <div class="t-dope" hidden>
+      <div class="t-dope-rows"></div>
+    </div>
   `;
 
   const playBtn = el.querySelector(".t-play") as HTMLButtonElement;
@@ -180,54 +196,113 @@ export function createTransport(preview: PreviewScene, duration: number): Transp
   // ---- rig key markers ----------------------------------------------------
   const keysEl = el.querySelector(".t-keys") as HTMLElement;
   let keyCbs: TransportKeyCallbacks | undefined;
+
+  /** One key diamond with the full click/drag/context behavior. */
+  function makeKeyDot(m: TransportKeyMarker, cbs?: TransportKeyCallbacks): HTMLSpanElement {
+    const dot = document.createElement("span");
+    dot.className = "t-key" + (m.selected ? " sel" : "") + (m.picked ? " picked" : "");
+    dot.style.left = `${pct(m.time)}%`;
+    dot.style.background = m.color;
+    dot.title = `${m.tag} key @ ${fmt(m.time)} — click to jump, drag to retime, right-click for options`;
+    dot.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      cbs?.onContext(m, e.clientX, e.clientY);
+    });
+    // Click = jump + select; drag past a few px = retime on release.
+    dot.addEventListener("pointerdown", (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const startX = e.clientX;
+      const ctrl = e.ctrlKey || e.metaKey;
+      let moved = false;
+      let newTime = m.time;
+      const move = (ev: PointerEvent) => {
+        if (!moved && Math.abs(ev.clientX - startX) < 4) return;
+        moved = true;
+        newTime = timeAt(ev.clientX);
+        dot.style.left = `${pct(newTime)}%`;
+        preview.pause();
+        preview.seek(newTime);
+      };
+      const up = () => {
+        window.removeEventListener("pointermove", move);
+        window.removeEventListener("pointerup", up);
+        if (moved) cbs?.onRetime(m, newTime);
+        else {
+          if (!ctrl) {
+            preview.pause();
+            preview.seek(m.time);
+          }
+          cbs?.onClick(m, ctrl);
+        }
+      };
+      window.addEventListener("pointermove", move);
+      window.addEventListener("pointerup", up);
+    });
+    return dot;
+  }
+
   function setKeys(markers: TransportKeyMarker[], cbs?: TransportKeyCallbacks) {
     keyCbs = cbs;
     keysEl.innerHTML = "";
-    for (const m of markers) {
-      const dot = document.createElement("span");
-      dot.className = "t-key" + (m.selected ? " sel" : "") + (m.picked ? " picked" : "");
-      dot.style.left = `${pct(m.time)}%`;
-      dot.style.background = m.color;
-      dot.title = `${m.tag} key @ ${fmt(m.time)} — click to jump, drag to retime, right-click for options`;
-      dot.addEventListener("contextmenu", (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        cbs?.onContext(m, e.clientX, e.clientY);
-      });
-      // Click = jump + select; drag past a few px = retime on release.
-      dot.addEventListener("pointerdown", (e) => {
-        if (e.button !== 0) return;
-        e.preventDefault();
-        e.stopPropagation();
-        const startX = e.clientX;
-        const ctrl = e.ctrlKey || e.metaKey;
-        let moved = false;
-        let newTime = m.time;
-        const move = (ev: PointerEvent) => {
-          if (!moved && Math.abs(ev.clientX - startX) < 4) return;
-          moved = true;
-          newTime = timeAt(ev.clientX);
-          dot.style.left = `${pct(newTime)}%`;
-          preview.pause();
-          preview.seek(newTime);
-        };
-        const up = () => {
-          window.removeEventListener("pointermove", move);
-          window.removeEventListener("pointerup", up);
-          if (moved) cbs?.onRetime(m, newTime);
-          else {
-            if (!ctrl) {
-              preview.pause();
-              preview.seek(m.time);
-            }
-            cbs?.onClick(m, ctrl);
-          }
-        };
-        window.addEventListener("pointermove", move);
-        window.addEventListener("pointerup", up);
-      });
-      keysEl.appendChild(dot);
+    for (const m of markers) keysEl.appendChild(makeKeyDot(m, cbs));
+  }
+
+  // ---- mini dope sheet ------------------------------------------------------
+  const dopeEl = el.querySelector(".t-dope") as HTMLElement;
+  const dopeRowsEl = el.querySelector(".t-dope-rows") as HTMLElement;
+  const dopeToggle = el.querySelector(".t-dope-toggle") as HTMLButtonElement;
+  let dopeCollapsed = false;
+  let dopeCount = 0;
+
+  // Rows must line up with the strip: pad to the timeline's pixel range.
+  const alignDope = () => {
+    const tl = timeline.getBoundingClientRect();
+    // Measure against the rows element itself — its border-box left doesn't
+    // move with its own padding, so this self-corrects in one pass.
+    const rows = dopeRowsEl.getBoundingClientRect();
+    const left = Math.max(0, tl.left - rows.left);
+    const right = Math.max(0, rows.right - tl.right);
+    dopeRowsEl.style.paddingLeft = `${left}px`;
+    dopeRowsEl.style.paddingRight = `${right}px`;
+    dopeRowsEl.style.setProperty("--dope-gutter", `${left}px`);
+  };
+  const dopeRo = new ResizeObserver(alignDope);
+  dopeRo.observe(el);
+  dopeRo.observe(timeline);
+
+  const syncDopeVisibility = () => {
+    dopeEl.hidden = dopeCollapsed || dopeCount === 0;
+    dopeToggle.hidden = dopeCount === 0;
+    dopeToggle.textContent = dopeCollapsed ? "Keys ▸" : "Keys ▾";
+  };
+  dopeToggle.addEventListener("click", () => {
+    dopeCollapsed = !dopeCollapsed;
+    syncDopeVisibility();
+  });
+
+  function setDope(rows: DopeRow[], cbs?: TransportKeyCallbacks) {
+    dopeCount = rows.length;
+    dopeRowsEl.innerHTML = "";
+    for (const row of rows) {
+      const r = document.createElement("div");
+      r.className = "d-row";
+      const label = document.createElement("span");
+      label.className = "d-label";
+      label.textContent = row.label;
+      label.style.color = row.color;
+      const strip = document.createElement("div");
+      strip.className = "d-strip";
+      for (const m of row.keys) strip.appendChild(makeKeyDot(m, cbs));
+      r.append(label, strip);
+      dopeRowsEl.appendChild(r);
     }
+    // Visibility first: showing the Keys toggle changes the timeline width,
+    // and the alignment has to measure the final layout.
+    syncDopeVisibility();
+    alignDope();
   }
 
   // Right-click on empty timeline → paste target etc.
@@ -240,9 +315,11 @@ export function createTransport(preview: PreviewScene, duration: number): Transp
     element: el,
     getTrim: () => ({ start: trimStart, end: trimEnd }),
     setKeys,
+    setDope,
     dispose: () => {
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
+      dopeRo.disconnect();
       el.remove();
     },
   };
