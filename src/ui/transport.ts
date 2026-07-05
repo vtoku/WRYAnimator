@@ -4,15 +4,23 @@ export interface TransportKeyMarker {
   time: number;
   color: string;
   selected: boolean;
+  /** In the multi-selection (drag-select / ctrl-click). */
+  picked: boolean;
   /** Opaque tag handed back in callbacks (the effector id). */
   tag: string;
 }
 
 export interface TransportKeyCallbacks {
   /** Marker clicked (no drag): jump happened; select the effector etc. */
-  onClick(marker: TransportKeyMarker): void;
+  onClick(marker: TransportKeyMarker, ctrl: boolean): void;
   /** Marker dragged to a new time and released. */
   onRetime(marker: TransportKeyMarker, newTime: number): void;
+  /** Right-click on a marker. */
+  onContext(marker: TransportKeyMarker, x: number, y: number): void;
+  /** Right-click on empty timeline. */
+  onContextBlank(x: number, y: number): void;
+  /** Shift-drag band select finished over [t0, t1]. */
+  onBand(t0: number, t1: number): void;
 }
 
 export interface Transport {
@@ -123,6 +131,31 @@ export function createTransport(preview: PreviewScene, duration: number): Transp
   outH.addEventListener("pointerdown", (e) => startDrag("out", e));
   timeline.addEventListener("pointerdown", (e) => {
     if (e.target === inH || e.target === outH) return;
+    if (e.shiftKey) {
+      // Shift-drag = band-select keys instead of scrubbing.
+      e.preventDefault();
+      const tA = timeAt(e.clientX);
+      const band = document.createElement("div");
+      band.className = "t-band";
+      timeline.appendChild(band);
+      let tB = tA;
+      const drawBand = () => {
+        const lo = Math.min(tA, tB), hi = Math.max(tA, tB);
+        band.style.left = `${pct(lo)}%`;
+        band.style.width = `${pct(hi - lo)}%`;
+      };
+      drawBand();
+      const move = (ev: PointerEvent) => { tB = timeAt(ev.clientX); drawBand(); };
+      const up = () => {
+        window.removeEventListener("pointermove", move);
+        window.removeEventListener("pointerup", up);
+        band.remove();
+        keyCbs?.onBand(Math.min(tA, tB), Math.max(tA, tB));
+      };
+      window.addEventListener("pointermove", move);
+      window.addEventListener("pointerup", up);
+      return;
+    }
     startDrag("seek", e);
   });
 
@@ -146,19 +179,28 @@ export function createTransport(preview: PreviewScene, duration: number): Transp
 
   // ---- rig key markers ----------------------------------------------------
   const keysEl = el.querySelector(".t-keys") as HTMLElement;
+  let keyCbs: TransportKeyCallbacks | undefined;
   function setKeys(markers: TransportKeyMarker[], cbs?: TransportKeyCallbacks) {
+    keyCbs = cbs;
     keysEl.innerHTML = "";
     for (const m of markers) {
       const dot = document.createElement("span");
-      dot.className = "t-key" + (m.selected ? " sel" : "");
+      dot.className = "t-key" + (m.selected ? " sel" : "") + (m.picked ? " picked" : "");
       dot.style.left = `${pct(m.time)}%`;
       dot.style.background = m.color;
-      dot.title = `${m.tag} key @ ${fmt(m.time)} — click to jump, drag to retime`;
+      dot.title = `${m.tag} key @ ${fmt(m.time)} — click to jump, drag to retime, right-click for options`;
+      dot.addEventListener("contextmenu", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        cbs?.onContext(m, e.clientX, e.clientY);
+      });
       // Click = jump + select; drag past a few px = retime on release.
       dot.addEventListener("pointerdown", (e) => {
+        if (e.button !== 0) return;
         e.preventDefault();
         e.stopPropagation();
         const startX = e.clientX;
+        const ctrl = e.ctrlKey || e.metaKey;
         let moved = false;
         let newTime = m.time;
         const move = (ev: PointerEvent) => {
@@ -174,9 +216,11 @@ export function createTransport(preview: PreviewScene, duration: number): Transp
           window.removeEventListener("pointerup", up);
           if (moved) cbs?.onRetime(m, newTime);
           else {
-            preview.pause();
-            preview.seek(m.time);
-            cbs?.onClick(m);
+            if (!ctrl) {
+              preview.pause();
+              preview.seek(m.time);
+            }
+            cbs?.onClick(m, ctrl);
           }
         };
         window.addEventListener("pointermove", move);
@@ -185,6 +229,12 @@ export function createTransport(preview: PreviewScene, duration: number): Transp
       keysEl.appendChild(dot);
     }
   }
+
+  // Right-click on empty timeline → paste target etc.
+  timeline.addEventListener("contextmenu", (e) => {
+    e.preventDefault();
+    keyCbs?.onContextBlank(e.clientX, e.clientY);
+  });
 
   return {
     element: el,

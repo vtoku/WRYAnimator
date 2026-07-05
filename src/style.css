@@ -282,6 +282,56 @@ main:has(.loaded-state:not([hidden])) {
   z-index: 1;
 }
 
+.t-key.picked {
+  outline: 2px solid #fff;
+  outline-offset: 1px;
+  opacity: 1;
+  z-index: 2;
+}
+
+.t-band {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: rgba(127, 178, 255, 0.25);
+  border: 1px solid rgba(127, 178, 255, 0.6);
+  pointer-events: none;
+}
+
+.ctx-menu {
+  position: fixed;
+  z-index: 100;
+  min-width: 180px;
+  background: #1c212b;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.3rem;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  display: flex;
+  flex-direction: column;
+}
+
+.ctx-menu button {
+  background: none;
+  border: none;
+  color: var(--text);
+  text-align: left;
+  padding: 0.45rem 0.7rem;
+  border-radius: 5px;
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+
+.ctx-menu button:hover:not(:disabled) {
+  background: #2a3140;
+}
+
+.ctx-menu button:disabled {
+  color: var(--text-dim);
+  opacity: 0.6;
+  cursor: default;
+}
+
 .t-time {
   font-variant-numeric: tabular-nums;
   font-size: 0.78rem;

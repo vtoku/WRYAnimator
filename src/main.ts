@@ -6,7 +6,8 @@ import {
   makeLayer, getTrack, setPosKey, setRotKey, deleteKeysAt, keyTimes,
   applyRigLayers, applyLayersToPose, poseAtFrame, nearestFrame,
   effectorBaseWorld, effectorDef, effectorColor, retimeKeys, keyFullPose,
-  type RigLayer, type EffectorId, type Transient,
+  bakeRange, dirtyRange, unionRange,
+  type RigLayer, type EffectorId, type Transient, type TimeRange,
 } from "./rig/rig.ts";
 import { vsub, qconj } from "./convert/ik.ts";
 import { applyModifiers, defaultModifiers } from "./rig/modifiers.ts";
@@ -31,14 +32,45 @@ const viewport = document.getElementById("viewport") as HTMLElement;
 const panel = document.getElementById("panel") as HTMLElement;
 
 let preview: PreviewScene | null = null;
-/** Current panel's rig undo/redo, driven by the module-level hotkey listener. */
-let rigHotkeys: { undo(): void; redo(): void } | null = null;
+/** Current panel's rig actions, driven by the module-level hotkey listener. */
+let rigHotkeys: { undo(): void; redo(): void; copy(): void; paste(): void; del(): void } | null = null;
 document.addEventListener("keydown", (e) => {
-  if (!(e.ctrlKey || e.metaKey) || !rigHotkeys) return;
-  const k = e.key.toLowerCase();
-  if (k === "z" && !e.shiftKey) { e.preventDefault(); rigHotkeys.undo(); }
-  else if (k === "y" || (k === "z" && e.shiftKey)) { e.preventDefault(); rigHotkeys.redo(); }
+  if (!rigHotkeys) return;
+  const tgt = e.target as HTMLElement | null;
+  const inField = !!tgt && (tgt.tagName === "INPUT" || tgt.tagName === "SELECT" || tgt.tagName === "TEXTAREA");
+  if (e.ctrlKey || e.metaKey) {
+    const k = e.key.toLowerCase();
+    if (k === "z" && !e.shiftKey) { e.preventDefault(); rigHotkeys.undo(); }
+    else if (k === "y" || (k === "z" && e.shiftKey)) { e.preventDefault(); rigHotkeys.redo(); }
+    else if (k === "c" && !inField) rigHotkeys.copy();
+    else if (k === "v" && !inField) rigHotkeys.paste();
+  } else if (e.key === "Delete" && !inField) {
+    rigHotkeys.del();
+  }
 });
+
+/** Shared right-click menu (one per page). */
+const ctxMenu = document.createElement("div");
+ctxMenu.className = "ctx-menu";
+ctxMenu.hidden = true;
+document.body.appendChild(ctxMenu);
+const hideCtxMenu = () => { ctxMenu.hidden = true; };
+window.addEventListener("pointerdown", (e) => {
+  if (!ctxMenu.hidden && !ctxMenu.contains(e.target as Node)) hideCtxMenu();
+});
+function showCtxMenu(x: number, y: number, items: Array<{ label: string; action?: () => void; disabled?: boolean }>) {
+  ctxMenu.innerHTML = "";
+  for (const it of items) {
+    const b = document.createElement("button");
+    b.textContent = it.label;
+    b.disabled = !!it.disabled;
+    b.addEventListener("click", () => { hideCtxMenu(); it.action?.(); });
+    ctxMenu.appendChild(b);
+  }
+  ctxMenu.hidden = false;
+  ctxMenu.style.left = `${Math.min(x, window.innerWidth - 190)}px`;
+  ctxMenu.style.top = `${Math.min(y, window.innerHeight - items.length * 36 - 10)}px`;
+}
 let transport: Transport | null = null;
 let loaded: {
   name: string;
@@ -145,8 +177,9 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     <p class="hint">FK/IK adjustment layers, MotionBuilder style. Add a layer, pause,
       then drag a handle on the figure; a key lands at the playhead. Spheres
       (hips, hands, feet) move with IK and rotate; the small diamonds on the
-      body bones rotate FK-style. Keys hold until the next key, so bracket a
-      local fix with neutral keys.</p>
+      body bones rotate FK-style. On the timeline: right-click a key for
+      copy/paste/delete, shift-drag to select several, ctrl-click to add one,
+      drag a key to retime it. Edits auto-save for this recording.</p>
     <div id="rigLayers" class="rig-layers"></div>
     <div class="rig-row">
       <button id="rigAdd" class="button ghost">Add layer</button>
@@ -159,6 +192,12 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
       <button id="rigUndo" class="button ghost" disabled title="Undo the last rig or modifier edit (Ctrl+Z)">Undo</button>
       <button id="rigRedo" class="button ghost" disabled title="Redo (Ctrl+Y)">Redo</button>
     </div>
+    <div class="rig-row">
+      <button id="rigSave" class="button ghost" title="Download the layers + modifiers as a .rig.json file you can reload later or on another machine.">Save rig…</button>
+      <button id="rigLoadBtn" class="button ghost" title="Load a saved .rig.json onto this recording.">Load rig…</button>
+    </div>
+    <input id="rigFile" type="file" accept=".json,application/json" hidden />
+    <p id="rigCacheNote" class="clean-stats"></p>
     <div id="rigEditor" hidden>
       <p id="rigSel" class="clean-stats"></p>
       <div id="rigKeys" class="rig-keys"></div>
@@ -341,7 +380,18 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
       // Modifiers, then control-rig layers on top; the compare view stays raw.
       display = applyModifiers(display, mods);
       rigBaseClip = display;
-      return applyRigLayers(display, rigLayers);
+      const baked = applyRigLayers(display, rigLayers);
+      // The display MUST be a private copy: rig edits rebake into its arrays
+      // in place (fast path — no scene rebuild), which would corrupt the
+      // base if they shared storage. applyRigLayers copies only when layers
+      // have content, so copy explicitly when it passed the base through.
+      if (baked !== display) return baked;
+      return {
+        ...display,
+        localPos: display.localPos.map((t) => t.map((p) => [...p] as Vec3)),
+        localQuat: display.localQuat.map((t) => t.map((q) => [...q] as Quat)),
+        bindPos: display.bindPos.map((p) => [...p] as Vec3),
+      };
     }
     return display;
   }
@@ -361,6 +411,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     const trim = transport?.getTrim();
     preview.setClip(display, true); // same recording: keep camera + playback position
     if (trim) preview.setTrim(trim.start, trim.end); // keep the user's trim
+    saveRigCache();
     // Prebuild the uncleaned version so holding Compare swaps instantly.
     void buildDisplay(false).then((b) => { if (gen === compareGen) compareBase = b; }).catch(() => {});
   }
@@ -460,18 +511,105 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
   }
   rigUndoBtn.addEventListener("click", rigUndo);
   rigRedoBtn.addEventListener("click", rigRedo);
-  rigHotkeys = { undo: rigUndo, redo: rigRedo };
 
-  /** Rebake layers onto the (unchanged) base — cheaper than a full reclean. */
-  function rebakeRig() {
+  // ---- key multi-selection + clipboard ------------------------------------
+  interface PickedKey { effector: EffectorId; time: number; }
+  let pickedKeys: PickedKey[] = [];
+  let keyClipboard: Array<{ effector: EffectorId; dt: number; pos?: Vec3; rot?: Quat }> = [];
+  const isPicked = (eff: EffectorId, t: number) => pickedKeys.some((p) => p.effector === eff && Math.abs(p.time - t) < 1e-3);
+
+  function copyPicked() {
+    const layer = rigLayers[activeLayerIdx];
+    if (!layer || !pickedKeys.length) return;
+    const t0 = Math.min(...pickedKeys.map((p) => p.time));
+    keyClipboard = [];
+    for (const p of pickedKeys) {
+      const tr = getTrack(layer, p.effector);
+      if (!tr) continue;
+      const pk = tr.posKeys.find((k) => Math.abs(k.time - p.time) < 1e-3);
+      const rk = tr.rotKeys.find((k) => Math.abs(k.time - p.time) < 1e-3);
+      if (!pk && !rk) continue;
+      keyClipboard.push({
+        effector: p.effector,
+        dt: p.time - t0,
+        pos: pk ? ([...pk.v] as Vec3) : undefined,
+        rot: rk ? ([...rk.q] as Quat) : undefined,
+      });
+    }
+  }
+
+  function pastePicked() {
+    const layer = rigLayers[activeLayerIdx];
+    if (!layer || !keyClipboard.length || !preview) return;
+    const t0 = preview.getTime();
+    pushHistory();
+    let dirty: TimeRange | null = null;
+    pickedKeys = [];
+    for (const it of keyClipboard) {
+      const tr = getTrack(layer, it.effector, true)!;
+      const t = t0 + it.dt;
+      if (it.pos) setPosKey(tr, t, [...it.pos] as Vec3);
+      if (it.rot) setRotKey(tr, t, [...it.rot] as Quat);
+      const dr = dirtyRange(layer, tr, t);
+      dirty = dirty ? unionRange(dirty, dr) : dr;
+      pickedKeys.push({ effector: it.effector, time: t });
+    }
+    rebakeRig(dirty ?? undefined);
+    updateRigEditor();
+  }
+
+  function deletePicked() {
+    const layer = rigLayers[activeLayerIdx];
+    if (!layer || !pickedKeys.length) return;
+    pushHistory();
+    let dirty: TimeRange | null = null;
+    for (const p of pickedKeys) {
+      const tr = getTrack(layer, p.effector);
+      if (!tr) continue;
+      const dr = dirtyRange(layer, tr, p.time);
+      dirty = dirty ? unionRange(dirty, dr) : dr;
+      deleteKeysAt(tr, p.time, 1 / 120);
+    }
+    pickedKeys = [];
+    rebakeRig(dirty ?? undefined);
+    updateRigEditor();
+  }
+
+  rigHotkeys = { undo: rigUndo, redo: rigRedo, copy: copyPicked, paste: pastePicked, del: deletePicked };
+
+  /**
+   * Rebake layers onto the (unchanged) base, IN PLACE in the display clip the
+   * preview is already playing — no setClip, no body/face rebuild. `dirty`
+   * limits the bake to the frames a key edit actually changed, which is what
+   * keeps editing responsive on clips with many keyframes.
+   */
+  function rebakeRig(dirty?: TimeRange) {
     if (!loaded || !preview || !rigBaseClip) return;
-    const display = applyRigLayers(rigBaseClip, rigLayers);
-    loaded.display = display;
-    showClip(display);
+    const d = loaded.display;
+    bakeRange(rigBaseClip, rigLayers, d.localPos, d.localQuat, dirty);
+    d.bindPos = d.localPos.map((t) => t[0]);
+    preview.seek(preview.getTime()); // repose from the updated arrays
+    saveRigCache();
+  }
+
+  function keyContextItems(): Array<{ label: string; action?: () => void; disabled?: boolean }> {
+    const n = pickedKeys.length;
+    return [
+      { label: `Copy ${n} key${n === 1 ? "" : "s"} (Ctrl+C)`, action: copyPicked, disabled: !n },
+      { label: "Paste at playhead (Ctrl+V)", action: pastePicked, disabled: !keyClipboard.length },
+      { label: `Delete ${n} key${n === 1 ? "" : "s"} (Del)`, action: deletePicked, disabled: !n },
+    ];
   }
 
   function updateRigEditor() {
     const layer = rigLayers[activeLayerIdx];
+    // Drop picks that no longer exist (deleted keys, switched layer).
+    pickedKeys = layer
+      ? pickedKeys.filter((p) => {
+          const tr = getTrack(layer, p.effector);
+          return !!tr && keyTimes(tr).some((t) => Math.abs(t - p.time) < 1e-3);
+        })
+      : [];
     // Timeline markers for the active layer (cleared when there is none).
     const markers = layer
       ? layer.tracks.flatMap((tr) =>
@@ -479,19 +617,65 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
             time: t,
             color: effectorColor(tr.effector),
             selected: tr.effector === selectedEffector,
+            picked: isPicked(tr.effector, t),
             tag: tr.effector,
           })),
         )
       : [];
     transport?.setKeys(markers, {
-      onClick: (m) => preview?.selectEffector(m.tag as EffectorId),
+      onClick: (m, ctrl) => {
+        const eff = m.tag as EffectorId;
+        if (ctrl) {
+          // Ctrl-click toggles the key in/out of the selection.
+          if (isPicked(eff, m.time)) pickedKeys = pickedKeys.filter((p) => !(p.effector === eff && Math.abs(p.time - m.time) < 1e-3));
+          else pickedKeys.push({ effector: eff, time: m.time });
+          updateRigEditor();
+        } else {
+          pickedKeys = [{ effector: eff, time: m.time }];
+          preview?.selectEffector(eff);
+          updateRigEditor();
+        }
+      },
       onRetime: (m, newTime) => {
         const lay = rigLayers[activeLayerIdx];
         const tr = lay ? getTrack(lay, m.tag as EffectorId) : null;
-        if (!tr) return;
+        if (!tr || !lay) return;
         pushHistory();
+        const before = dirtyRange(lay, tr, m.time);
         retimeKeys(tr, m.time, newTime);
-        rebakeRig();
+        rebakeRig(unionRange(before, dirtyRange(lay, tr, newTime)));
+        updateRigEditor();
+      },
+      onContext: (m, x, y) => {
+        if (!isPicked(m.tag as EffectorId, m.time)) {
+          pickedKeys = [{ effector: m.tag as EffectorId, time: m.time }];
+          updateRigEditor();
+        }
+        showCtxMenu(x, y, keyContextItems());
+      },
+      onContextBlank: (x, y) => {
+        const lay = rigLayers[activeLayerIdx];
+        showCtxMenu(x, y, [
+          { label: "Paste at playhead (Ctrl+V)", action: pastePicked, disabled: !keyClipboard.length },
+          {
+            label: "Select all keys",
+            disabled: !lay,
+            action: () => {
+              pickedKeys = lay
+                ? lay.tracks.flatMap((tr) => keyTimes(tr).map((t) => ({ effector: tr.effector, time: t })))
+                : [];
+              updateRigEditor();
+            },
+          },
+          { label: "Clear selection", action: () => { pickedKeys = []; updateRigEditor(); }, disabled: !pickedKeys.length },
+        ]);
+      },
+      onBand: (t0, t1) => {
+        const lay = rigLayers[activeLayerIdx];
+        if (!lay) return;
+        pickedKeys = lay.tracks.flatMap((tr) =>
+          keyTimes(tr).filter((t) => t >= t0 && t <= t1).map((t) => ({ effector: tr.effector, time: t })),
+        );
         updateRigEditor();
       },
     });
@@ -520,8 +704,10 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
       del.addEventListener("click", () => {
         if (!track) return;
         pushHistory();
+        const layerNow = rigLayers[activeLayerIdx];
+        const dirty = layerNow ? dirtyRange(layerNow, track, t) : undefined;
         deleteKeysAt(track, t, 1 / 120);
-        rebakeRig();
+        rebakeRig(dirty);
         updateRigEditor();
       });
       chip.append(label, del);
@@ -647,6 +833,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     rigLayers.push(makeLayer(`Layer ${++layerCounter}`));
     activeLayerIdx = rigLayers.length - 1;
     renderRigLayers();
+    saveRigCache();
   });
 
   rigGizmoSel.addEventListener("change", () => {
@@ -661,6 +848,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     const f = nearestFrame(rigBaseClip, t);
     pushHistory();
     const track = getTrack(layer, selectedEffector, true)!;
+    const dirty = dirtyRange(layer, track, t);
     if (layer.mode === "additive") {
       if (def.canMove) setPosKey(track, t, [0, 0, 0]);
       if (def.canRotate) setRotKey(track, t, [0, 0, 0, 1]);
@@ -669,7 +857,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
       if (def.canMove) setPosKey(track, t, base.pos);
       if (def.canRotate) setRotKey(track, t, base.rot);
     }
-    rebakeRig();
+    rebakeRig(dirty);
     updateRigEditor();
   });
 
@@ -693,8 +881,9 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
       (best, k) => (best === null || Math.abs(k - t) < Math.abs(best - t) ? k : best), null);
     if (near === null || Math.abs(near - t) > 0.5) return; // nothing near the playhead
     pushHistory();
+    const dirty = dirtyRange(layer, track, near);
     deleteKeysAt(track, near, 1 / 120);
-    rebakeRig();
+    rebakeRig(dirty);
     updateRigEditor();
   });
 
@@ -744,12 +933,13 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
         return;
       }
       const track = getTrack(layer, dragCtx.transient.effector, true)!;
+      const dirty = dirtyRange(layer, track, dragCtx.t);
       if (dragCtx.transient.pos || dragCtx.transient.rot) pushHistory();
       if (dragCtx.transient.pos) setPosKey(track, dragCtx.t, dragCtx.transient.pos);
       if (dragCtx.transient.rot) setRotKey(track, dragCtx.t, dragCtx.transient.rot);
       dragCtx = null;
       preview?.setPoseOverride(null);
-      rebakeRig();
+      rebakeRig(dirty);
       updateRigEditor();
     },
   });
@@ -838,6 +1028,71 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
       await setBodySource(null);
       preview?.setFaceVisible(true);
       showError(err instanceof Error ? err.message : String(err));
+    }
+  });
+
+  // ---- rig persistence -----------------------------------------------------
+  // Auto-saved to localStorage per recording; also exportable as a .rig.json.
+  const rigCacheKey = `wanimrig:${loaded?.name}:${converted.times.length}`;
+  const rigCacheNote = document.getElementById("rigCacheNote") as HTMLParagraphElement;
+
+  function saveRigCache() {
+    try {
+      if (rigLayers.length || modInputs.some((m) => mods[m.key] !== 0)) {
+        localStorage.setItem(rigCacheKey, JSON.stringify({ v: 1, layers: rigLayers, mods, counter: layerCounter }));
+      } else {
+        localStorage.removeItem(rigCacheKey);
+      }
+    } catch { /* quota/private mode — silently skip */ }
+  }
+
+  /** Replace the rig state wholesale (cache restore / file load). */
+  function adoptRigState(d: { layers?: RigLayer[]; mods?: Partial<ReturnType<typeof defaultModifiers>>; counter?: number }) {
+    rigLayers.splice(0, rigLayers.length, ...(Array.isArray(d.layers) ? d.layers : []));
+    for (const layer of rigLayers) {
+      // Older saves may predate newer layer fields.
+      layer.extent ??= "hold";
+      layer.fadeS ??= 0.5;
+    }
+    Object.assign(mods, defaultModifiers(), d.mods ?? {});
+    layerCounter = d.counter ?? rigLayers.length;
+    activeLayerIdx = rigLayers.length - 1;
+    pickedKeys = [];
+    syncModSliders();
+    renderRigLayers();
+  }
+
+  try {
+    const saved = localStorage.getItem(rigCacheKey);
+    if (saved) {
+      const d = JSON.parse(saved) as { layers?: RigLayer[]; mods?: ReturnType<typeof defaultModifiers>; counter?: number };
+      if (d.layers?.length || (d.mods && Object.values(d.mods).some((v) => v))) {
+        adoptRigState(d);
+        rigCacheNote.textContent = "Restored saved edits for this recording.";
+      }
+    }
+  } catch { /* corrupt cache — start clean */ }
+
+  (document.getElementById("rigSave") as HTMLButtonElement).addEventListener("click", () => {
+    if (!loaded) return;
+    const json = JSON.stringify({ v: 1, layers: rigLayers, mods, counter: layerCounter }, null, 1);
+    downloadBytes(`${sanitizeFilename(loaded.name)}.rig.json`, new TextEncoder().encode(json));
+  });
+  const rigFile = document.getElementById("rigFile") as HTMLInputElement;
+  (document.getElementById("rigLoadBtn") as HTMLButtonElement).addEventListener("click", () => rigFile.click());
+  rigFile.addEventListener("change", async () => {
+    const file = rigFile.files?.[0];
+    rigFile.value = "";
+    if (!file) return;
+    try {
+      const d = JSON.parse(await file.text()) as { layers?: RigLayer[]; mods?: ReturnType<typeof defaultModifiers>; counter?: number };
+      if (!Array.isArray(d.layers)) throw new Error("not a rig file (missing layers)");
+      pushHistory();
+      adoptRigState(d);
+      rigCacheNote.textContent = `Loaded ${file.name}.`;
+      await reclean(); // modifiers may have changed too
+    } catch (err) {
+      showError(`${file.name}: ${err instanceof Error ? err.message : String(err)}`);
     }
   });
 

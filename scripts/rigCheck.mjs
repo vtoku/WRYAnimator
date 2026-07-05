@@ -9,7 +9,7 @@
 import { readFileSync } from "node:fs";
 const { parseWanim } = await import("../src/wanim/parse.ts");
 const { convertCharacter } = await import("../src/convert/clip.ts");
-const { makeLayer, getTrack, setPosKey, setRotKey, applyRigLayers, poseAtFrame, nearestFrame, retimeKeys, keyFullPose } =
+const { makeLayer, getTrack, setPosKey, setRotKey, applyRigLayers, poseAtFrame, nearestFrame, retimeKeys, keyFullPose, bakeRange, dirtyRange } =
   await import("../src/rig/rig.ts");
 const { worldFromLocal } = await import("../src/convert/fk.ts");
 
@@ -17,7 +17,8 @@ const path = process.argv[2] ?? "C:\\Users\\VTOKU\\Downloads\\All-The-Things-2-2
 const buf = readFileSync(path);
 const clip = parseWanim(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength));
 const c = convertCharacter(clip, 0);
-console.log(`clip: ${c.times.length} frames, ${c.duration.toFixed(1)}s`);
+const frames = c.times.length;
+console.log(`clip: ${frames} frames, ${c.duration.toFixed(1)}s`);
 
 let failures = 0;
 const check = (label, ok, detail) => {
@@ -191,6 +192,44 @@ const f0 = 0;
     worst = Math.max(worst, dist(world(baked, fKey).pos[boneI(b)], world(c, fKey).pos[boneI(b)]));
   }
   check("isolation: hand edit leaves the rest of the body", worst < 1e-6, `worst other-bone drift ${mm(worst)}mm`);
+}
+
+// --- 7b. partial (dirty-range) rebake === full rebake --------------------------
+{
+  const layer = makeLayer("L1"); // fade 0.5s
+  const tr = getTrack(layer, "rightHand", true);
+  setPosKey(tr, 3, [0.03, 0, 0]);
+  setPosKey(tr, 6, [0, 0.05, 0]);
+  setPosKey(tr, 9, [0.02, 0.02, 0]);
+  const layers = [layer];
+
+  // Baked state before the edit (in-place arrays, like the app's display clip).
+  const pos = c.localPos.map((t) => t.map((p) => [...p]));
+  const quat = c.localQuat.map((t) => t.map((q) => [...q]));
+  bakeRange(c, layers, pos, quat);
+
+  // Edit the middle key, then bake ONLY its dirty window in place.
+  const dirty = dirtyRange(layer, tr, 6);
+  setPosKey(tr, 6, [0, -0.04, 0.03]);
+  bakeRange(c, layers, pos, quat, dirty);
+
+  // Reference: full bake from scratch with the edited keys.
+  const full = applyRigLayers(c, layers);
+  let worst = 0;
+  for (let b = 0; b < c.names.length; b++) {
+    // Degenerate zero-quat tracks (missing bones) break the dot metric.
+    if (c.localQuat[b].some((q) => Math.hypot(...q) < 0.5)) continue;
+    for (let f = 0; f < frames; f += 7) {
+      worst = Math.max(worst, dist(pos[b][f], full.localPos[b][f]));
+      const d = 1 - Math.abs(quat[b][f][0]*full.localQuat[b][f][0] + quat[b][f][1]*full.localQuat[b][f][1] + quat[b][f][2]*full.localQuat[b][f][2] + quat[b][f][3]*full.localQuat[b][f][3]);
+      worst = Math.max(worst, d);
+    }
+  }
+  check("partial rebake: identical to a full rebake", worst < 1e-9, `worst deviation ${worst.toExponential(1)}`);
+
+  // And it must be much cheaper: count frames the dirty window covers.
+  const covered = c.times.filter((t) => t >= dirty.t0 && t <= dirty.t1).length;
+  check("partial rebake: dirty window is a small slice", covered < frames / 4, `${covered} of ${frames} frames`);
 }
 
 // --- 8. modifiers -------------------------------------------------------------

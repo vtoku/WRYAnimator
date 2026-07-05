@@ -93,8 +93,16 @@ No unit-test framework yet — the three `npm run` scripts above are the regress
                           semantics, first/last key extends across the clip; bracket with neutral keys). Envelope =
                           per-channel weight multiplier in applyLayersToPose. Additive keys store world-space deltas
                           vs the stack below the layer. Key tools: timeline diamond markers on the transport (click
-                          = jump+select, drag = retime via retimeKeys), "Key pose" (keyFullPose keys every effector's
-                          current effective value — locks the pose, provably changes nothing). Order: modifiers → layers;
+                          = jump+select, ctrl-click = multi-pick, drag = retime, right-click = copy/paste/delete
+                          menu, shift-drag timeline = band select; Ctrl+C/V/Del hotkeys), "Key pose" (keyFullPose
+                          keys every effector's current effective value — locks the pose, provably changes nothing).
+                          PERF: rig edits rebake IN PLACE into the display clip via bakeRange over the edit's
+                          dirtyRange only (bit-identical to a full bake — rigCheck proves it) and repose with
+                          preview.seek, NEVER setClip (which rebuilds body/face meshes). No-op additive values
+                          (zero delta/identity — what Key pose writes) skip FK+IK per frame. This took a key edit
+                          on a heavily-keyed clip from multi-second to ~20 ms; don't reintroduce applyRigLayers +
+                          setClip in the edit path. Rig state auto-saves to localStorage per recording
+                          (wanimrig:<name>:<frames>) and exports/imports as .rig.json. Order: modifiers → layers;
                           both apply to display AND all three exports (wanim path re-applies them to its own clip).
                           Viewport: effector handles + TransformControls gizmo (drag = live single-frame solve via
                           setPoseOverride, key lands at the playhead on release, full rebake async). Undo/redo =

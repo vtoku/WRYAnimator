@@ -326,6 +326,12 @@ export function applyLayersToPose(
         // The live gizmo value applies at full envelope at the drag frame.
         if (transient.pos) { pv = transient.pos; env.pos = 1; }
         if (transient.rot) { rv = transient.rot; env.rot = 1; }
+      } else if (layer.mode === "additive") {
+        // No-op additive values (zero delta / identity rotation — what
+        // neutral keys and "Key pose" mostly write) must not cost an FK+IK
+        // pass per frame. This is THE fix for laggy edits on keyed-up clips.
+        if (pv && Math.abs(pv[0]) + Math.abs(pv[1]) + Math.abs(pv[2]) < 1e-7) pv = null;
+        if (rv && 1 - Math.abs(rv[3]) < 1e-10) rv = null;
       }
       if (!pv && !rv) continue;
       applyEffector(pose, names, parents, track.effector, layer.mode, layer.weight * env.pos, layer.weight * env.rot, pv, rv);
@@ -364,23 +370,91 @@ export function hasRigContent(layers: RigLayer[]): boolean {
   );
 }
 
+/** A time window a rig edit dirtied; bake only frames inside it. */
+export interface TimeRange { t0: number; t1: number; }
+
+/**
+ * Bake the layer stack from `base` into `outPos`/`outQuat` IN PLACE, only for
+ * frames within `range` (whole clip when omitted). Frames in range that no
+ * track influences are reset to the base — so a partial bake over an edit's
+ * dirty window leaves every other frame's previous bake intact. This is what
+ * keeps edits on heavily-keyed clips responsive: an edit re-bakes its
+ * neighborhood, not the whole recording.
+ */
+export function bakeRange(
+  base: ConvertedClip,
+  layers: RigLayer[],
+  outPos: Vec3[][],
+  outQuat: Quat[][],
+  range?: TimeRange,
+): void {
+  const frames = base.times.length;
+  const bones = base.names.length;
+  const active = layers.filter((l) => l.enabled && l.weight > 0);
+  // Influence windows: outside ALL of them a frame is pure base.
+  const windows: TimeRange[] = [];
+  for (const layer of active) {
+    for (const track of layer.tracks) {
+      const times = keyTimes(track);
+      if (!times.length) continue;
+      if (layer.extent === "hold") windows.push({ t0: -Infinity, t1: Infinity });
+      else windows.push({ t0: times[0] - layer.fadeS, t1: times[times.length - 1] + layer.fadeS });
+    }
+  }
+  const t0 = range ? range.t0 : -Infinity;
+  const t1 = range ? range.t1 : Infinity;
+
+  for (let f = 0; f < frames; f++) {
+    const t = base.times[f];
+    if (t < t0 || t > t1) continue; // outside the edit — keep the previous bake
+    if (!windows.some((w) => t >= w.t0 && t <= w.t1)) {
+      // No layer touches this frame — reset to base.
+      for (let b = 0; b < bones; b++) {
+        outPos[b][f] = base.localPos[b][f];
+        outQuat[b][f] = base.localQuat[b][f];
+      }
+      continue;
+    }
+    const pose = poseAtFrame(base, f);
+    applyLayersToPose(pose, base.names, base.parents, layers, t);
+    for (let b = 0; b < bones; b++) {
+      outPos[b][f] = pose.pos[b];
+      outQuat[b][f] = pose.quat[b];
+    }
+  }
+}
+
+/**
+ * The time window whose baked result changes when a key at `time` on `track`
+ * is added, replaced, moved, or removed: to the neighbor keys on either side,
+ * pushed out by the fade (or to the clip ends on a hold layer, where the
+ * first/last key extends outward).
+ */
+export function dirtyRange(layer: RigLayer, track: RigTrack, time: number): TimeRange {
+  let prev = -Infinity;
+  let next = Infinity;
+  for (const k of keyTimes(track)) {
+    if (k < time - 1e-6) prev = k;
+    else if (k > time + 1e-6) { next = k; break; }
+  }
+  if (layer.extent === "hold") return { t0: prev, t1: next };
+  return {
+    t0: (prev === -Infinity ? time : prev) - layer.fadeS,
+    t1: (next === Infinity ? time : next) + layer.fadeS,
+  };
+}
+
+export const unionRange = (a: TimeRange, b: TimeRange): TimeRange => ({
+  t0: Math.min(a.t0, b.t0),
+  t1: Math.max(a.t1, b.t1),
+});
+
 /** Bake the layer stack into a new clip (originals untouched). */
 export function applyRigLayers(clip: ConvertedClip, layers: RigLayer[]): ConvertedClip {
   if (!hasRigContent(layers)) return clip;
-  const frames = clip.times.length;
   const localPos = clip.localPos.map((t) => t.map((p) => [...p] as Vec3));
   const localQuat = clip.localQuat.map((t) => t.map((q) => [...q] as Quat));
-  for (let f = 0; f < frames; f++) {
-    const pose: FramePose = {
-      pos: localPos.map((t) => t[f]),
-      quat: localQuat.map((t) => t[f]),
-    };
-    applyLayersToPose(pose, clip.names, clip.parents, layers, clip.times[f]);
-    for (let b = 0; b < clip.names.length; b++) {
-      localPos[b][f] = pose.pos[b];
-      localQuat[b][f] = pose.quat[b];
-    }
-  }
+  bakeRange(clip, layers, localPos, localQuat);
   return { ...clip, localPos, localQuat, bindPos: localPos.map((t) => t[0]) };
 }
 
