@@ -102,3 +102,20 @@ export function quatToEulerZYX(q: Quat): Vec3 {
 }
 
 export const RAD2DEG = 180 / Math.PI;
+
+/**
+ * Intrinsic ZYX Euler (radians) → quaternion; exact inverse of
+ * quatToEulerZYX (q = qz ⊗ qy ⊗ qx). Used by the curve editor to expose
+ * rotation deltas as editable per-axis angles.
+ */
+export function eulerZYXToQuat(e: Vec3): Quat {
+  const cx = Math.cos(e[0] / 2), sx = Math.sin(e[0] / 2);
+  const cy = Math.cos(e[1] / 2), sy = Math.sin(e[1] / 2);
+  const cz = Math.cos(e[2] / 2), sz = Math.sin(e[2] / 2);
+  return [
+    sx * cy * cz - cx * sy * sz,
+    cx * sy * cz + sx * cy * sz,
+    cx * cy * sz - sx * sy * cz,
+    cx * cy * cz + sx * sy * sz,
+  ];
+}

@@ -6,12 +6,13 @@ import {
   makeLayer, getTrack, setPosKey, setRotKey, deleteKeysAt, keyTimes,
   applyRigLayers, applyLayersToPose, poseAtFrame, nearestFrame,
   effectorBaseWorld, effectorDef, effectorColor, retimeKeys, keyFullPose,
-  bakeRange, dirtyRange, unionRange, fkDragRef,
+  bakeRange, dirtyRange, unionRange, fkDragRef, setKeyEase,
   type RigLayer, type EffectorId, type Transient, type TimeRange,
 } from "./rig/rig.ts";
 import { vsub, vadd, vlen, vnorm, qconj, quatFromTo } from "./convert/ik.ts";
 import { applyModifiers, defaultModifiers } from "./rig/modifiers.ts";
-import { quatMul, quatDot, quatNormalize } from "./convert/quat.ts";
+import { quatMul, quatDot, quatNormalize, quatToEulerZYX, eulerZYXToQuat, RAD2DEG } from "./convert/quat.ts";
+import type { CurveEase } from "./ui/curves.ts";
 import type { Vec3, Quat } from "./wanim/parse.ts";
 import { writeAnimationFbx, type SkinnedMeshExport } from "./fbx/animationFbx.ts";
 import { remapNames, type NameScheme } from "./convert/skeleton.ts";
@@ -761,6 +762,113 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
             }))
         : [];
     transport?.setDope(dopeRows, keyCbs);
+
+    // Curve editor: the selected effector's key values as per-axis curves
+    // (position deltas in cm, rotation deltas as ZYX euler degrees).
+    const curveTrack = activeTab === "rig" && layer && selectedEffector ? getTrack(layer, selectedEffector) : null;
+    if (curveTrack && (curveTrack.posKeys.length || curveTrack.rotKeys.length)) {
+      const def = effectorDef(selectedEffector!);
+      const axisColor = ["#ff6b6b", "#7dda6b", "#6bb1ff"];
+      const channels = [
+        ...(def.canMove
+          ? [0, 1, 2].map((axis) => ({
+              group: "pos" as const,
+              axis: axis as 0 | 1 | 2,
+              label: `pos ${"XYZ"[axis]} (cm)`,
+              color: axisColor[axis],
+              keys: curveTrack.posKeys.map((k) => ({ time: k.time, value: k.v[axis] * 100, ease: (k.ease ?? "linear") as CurveEase })),
+            }))
+          : []),
+        ...[0, 1, 2].map((axis) => ({
+          group: "rot" as const,
+          axis: axis as 0 | 1 | 2,
+          label: `rot ${"XYZ"[axis]} (°)`,
+          color: axisColor[axis],
+          keys: curveTrack.rotKeys.map((k) => ({ time: k.time, value: quatToEulerZYX(k.q)[axis] * RAD2DEG, ease: (k.ease ?? "linear") as CurveEase })),
+        })),
+      ];
+      transport?.setCurves(
+        { duration: rigBaseClip?.duration ?? 0, title: `${def.label} · ${layer.name}`, channels },
+        {
+          onValueStart: () => pushHistory(),
+          onValue: (group, axis, time, value) => {
+            const lay = rigLayers[activeLayerIdx];
+            const tr = lay && selectedEffector ? getTrack(lay, selectedEffector) : null;
+            if (!tr || !lay) return;
+            if (group === "pos") {
+              const k = tr.posKeys.find((kk) => Math.abs(kk.time - time) < 1e-3);
+              if (k) k.v[axis] = value / 100;
+            } else {
+              const k = tr.rotKeys.find((kk) => Math.abs(kk.time - time) < 1e-3);
+              if (k) {
+                const e = quatToEulerZYX(k.q);
+                e[axis] = value / RAD2DEG;
+                k.q = eulerZYXToQuat(e);
+              }
+            }
+            rebakeRig(dirtyRange(lay, tr, time)); // live — the graph redraws itself
+          },
+          onValueEnd: () => updateRigEditor(),
+          onEase: (_g, time, ease) => {
+            const lay = rigLayers[activeLayerIdx];
+            const tr = lay && selectedEffector ? getTrack(lay, selectedEffector) : null;
+            if (!tr || !lay) return;
+            pushHistory();
+            setKeyEase(tr, time, ease);
+            rebakeRig(dirtyRange(lay, tr, time));
+            updateRigEditor();
+          },
+          onDelete: (_g, time) => {
+            const lay = rigLayers[activeLayerIdx];
+            const tr = lay && selectedEffector ? getTrack(lay, selectedEffector) : null;
+            if (!tr || !lay) return;
+            pushHistory();
+            const dirty = dirtyRange(lay, tr, time);
+            deleteKeysAt(tr, time, 1 / 120);
+            rebakeRig(dirty);
+            updateRigEditor();
+          },
+          onSeek: (t) => {
+            preview?.pause();
+            preview?.seek(t);
+          },
+          onContext: (g, time, x, y) => {
+            const mk = (ease: CurveEase) => ({ label: `Ease: ${ease}`, action: () => curveEase(g, time, ease) });
+            showCtxMenu(x, y, [
+              mk("linear"),
+              mk("smooth"),
+              mk("step"),
+              { label: "Delete key", action: () => curveDelete(g, time) },
+            ]);
+          },
+        },
+      );
+    } else {
+      transport?.setCurves(null, null);
+    }
+
+    // Context-menu helpers for the curve editor (defined after use above via
+    // hoisting; they just proxy to the same handlers).
+    function curveEase(_g: "pos" | "rot", time: number, ease: CurveEase) {
+      const lay = rigLayers[activeLayerIdx];
+      const tr = lay && selectedEffector ? getTrack(lay, selectedEffector) : null;
+      if (!tr || !lay) return;
+      pushHistory();
+      setKeyEase(tr, time, ease);
+      rebakeRig(dirtyRange(lay, tr, time));
+      updateRigEditor();
+    }
+    function curveDelete(_g: "pos" | "rot", time: number) {
+      const lay = rigLayers[activeLayerIdx];
+      const tr = lay && selectedEffector ? getTrack(lay, selectedEffector) : null;
+      if (!tr || !lay) return;
+      pushHistory();
+      const dirty = dirtyRange(lay, tr, time);
+      deleteKeysAt(tr, time, 1 / 120);
+      rebakeRig(dirty);
+      updateRigEditor();
+    }
+
     rigEditorEl.hidden = !layer;
     if (!layer) return;
     if (!selectedEffector) {

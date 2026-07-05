@@ -105,8 +105,14 @@ export function effectorColor(id: EffectorId): string {
   return id.startsWith("left") ? "#5599ff" : "#ff5588";
 }
 
-export interface PosKey { time: number; v: Vec3; }
-export interface RotKey { time: number; q: Quat; }
+/** Interpolation of the segment LEAVING this key (like DCC curve editors). */
+export type KeyEase = "linear" | "smooth" | "step";
+
+export interface PosKey { time: number; v: Vec3; ease?: KeyEase; }
+export interface RotKey { time: number; q: Quat; ease?: KeyEase; }
+
+const applyEase = (frac: number, ease?: KeyEase): number =>
+  ease === "step" ? 0 : ease === "smooth" ? frac * frac * (3 - 2 * frac) : frac;
 
 export interface RigTrack {
   effector: EffectorId;
@@ -149,7 +155,7 @@ const KEY_EPS = 1 / 120; // keys closer than half a frame replace each other
 
 export function setPosKey(track: RigTrack, time: number, v: Vec3): void {
   const i = track.posKeys.findIndex((k) => Math.abs(k.time - time) < KEY_EPS);
-  if (i >= 0) track.posKeys[i] = { time, v };
+  if (i >= 0) track.posKeys[i] = { time, v, ease: track.posKeys[i].ease }; // replace value, keep ease
   else {
     track.posKeys.push({ time, v });
     track.posKeys.sort((a, b) => a.time - b.time);
@@ -158,7 +164,7 @@ export function setPosKey(track: RigTrack, time: number, v: Vec3): void {
 
 export function setRotKey(track: RigTrack, time: number, q: Quat): void {
   const i = track.rotKeys.findIndex((k) => Math.abs(k.time - time) < KEY_EPS);
-  if (i >= 0) track.rotKeys[i] = { time, q };
+  if (i >= 0) track.rotKeys[i] = { time, q, ease: track.rotKeys[i].ease };
   else {
     track.rotKeys.push({ time, q });
     track.rotKeys.sort((a, b) => a.time - b.time);
@@ -209,7 +215,7 @@ function samplePos(keys: PosKey[], t: number): Vec3 | null {
   let i = 0;
   while (keys[i + 1].time < t) i++;
   const a = keys[i], b = keys[i + 1];
-  const frac = (t - a.time) / Math.max(1e-9, b.time - a.time);
+  const frac = applyEase((t - a.time) / Math.max(1e-9, b.time - a.time), a.ease);
   return vlerp(a.v, b.v, frac);
 }
 
@@ -220,8 +226,18 @@ function sampleRot(keys: RotKey[], t: number): Quat | null {
   let i = 0;
   while (keys[i + 1].time < t) i++;
   const a = keys[i], b = keys[i + 1];
-  const frac = (t - a.time) / Math.max(1e-9, b.time - a.time);
+  const frac = applyEase((t - a.time) / Math.max(1e-9, b.time - a.time), a.ease);
   return quatSlerp(a.q, b.q, frac);
+}
+
+/** Public sampling for the curve editor's interpolation preview. */
+export const sampleTrackPos = samplePos;
+export const sampleTrackRot = sampleRot;
+
+/** Set the ease of the pos+rot keys at `time`. */
+export function setKeyEase(track: RigTrack, time: number, ease: KeyEase): void {
+  for (const k of track.posKeys) if (Math.abs(k.time - time) < KEY_EPS) k.ease = ease;
+  for (const k of track.rotKeys) if (Math.abs(k.time - time) < KEY_EPS) k.ease = ease;
 }
 
 const IDENTITY: Quat = [0, 0, 0, 1];

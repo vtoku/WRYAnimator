@@ -116,6 +116,13 @@ No unit-test framework yet — the three `npm run` scripts above are the regress
                           JSON snapshots of layers+modifiers pushed BEFORE each mutation (buttons + Ctrl+Z/Y via a
                           module-level hotkey singleton so re-loading a file doesn't stack listeners).
   → src/preview/scene.ts: Three.js Object3D bone hierarchy driven per-frame; LineSegments + Points stick figure. Supports trim looping (setTrim).
+  → src/ui/curves.ts: canvas curve editor on the LAYER KEYS (not the dense baked motion) — selected
+                          effector's pos deltas (cm) + rot deltas (ZYX euler °, quatToEulerZYX/eulerZYXToQuat
+                          round-trip) as per-axis curves. Keys drag VERTICALLY only (retime lives on the strips);
+                          right-click = ease linear/smooth/step (per-key `ease` on the segment LEAVING the key,
+                          honored in samplePos/sampleRot) + delete. Value drags rebake live via the dirty-range
+                          path; the graph redraws itself — the host must NOT rebuild the view mid-drag
+                          (setModel refuses while dragging). Toggled with the dope sheet via the Keys/Curves button.
   → src/ui/transport.ts: transport bar docked at the bottom of the editor suite — play/pause, click-to-seek timeline with draggable in/out trim handles, rig-key markers, and a mini DOPE SHEET (per-effector key rows for the active layer, shown only on the Rig tab; rows pixel-align to the strip by measuring against the rows element's own border box — its padding doesn't shift getBoundingClientRect). resample() takes trimStart/trimEnd to export only the trimmed range (rebased to t=0).
   → UI SHELL (index.html + main.ts buildPanel): editor suite — top #editbar toolbar (undo/redo, gizmo mode+space, hold-to-compare, format+Download), right #dock with tabs Clean/Rig/Export/Info, bottom #timeline-dock. buildPanel writes editbar.innerHTML + dock.innerHTML per file load (fresh nodes = no stacked listeners). Rig handles + dope sheet are GATED to the Rig tab (syncRigVisibility). Element IDs are unchanged from the single-drawer era — keep it that way, tests and wiring key off them.
   → src/preview/face.ts:  ARKit face overlay — loads public/facecap-head.glb, seats it at the Head joint,

@@ -1,4 +1,5 @@
 import type { PreviewScene, PlaybackState } from "../preview/scene.ts";
+import { CurveView, type CurveModel, type CurveCallbacks } from "./curves.ts";
 
 export interface TransportKeyMarker {
   time: number;
@@ -38,6 +39,8 @@ export interface Transport {
   setKeys(markers: TransportKeyMarker[], cbs?: TransportKeyCallbacks): void;
   /** Mini dope sheet under the strip: per-effector key rows (empty = hidden). */
   setDope(rows: DopeRow[], cbs?: TransportKeyCallbacks): void;
+  /** Curve editor under the strip (null = unavailable). */
+  setCurves(model: CurveModel | null, cbs: CurveCallbacks | null): void;
   dispose(): void;
 }
 
@@ -80,6 +83,11 @@ export function createTransport(preview: PreviewScene, duration: number): Transp
     </div>
   `;
 
+  // Curve editor panel (shares the dock with the dope sheet; created early so
+  // the playback-state callback can reference it from the first emit).
+  const curveView = new CurveView();
+  el.appendChild(curveView.el);
+
   const playBtn = el.querySelector(".t-play") as HTMLButtonElement;
   const timeline = el.querySelector(".t-timeline") as HTMLElement;
   const region = el.querySelector(".t-region") as HTMLElement;
@@ -109,6 +117,7 @@ export function createTransport(preview: PreviewScene, duration: number): Transp
     playhead.style.left = `${pct(s.time)}%`;
     const len = trimEnd - trimStart;
     timeText.textContent = `${fmt(s.time)} / ${fmt(duration)}  ·  trim ${fmt(len)}`;
+    curveView.setPlayhead(s.time);
   });
 
   playBtn.addEventListener("click", () => preview.togglePlay());
@@ -254,33 +263,50 @@ export function createTransport(preview: PreviewScene, duration: number): Transp
   const dopeEl = el.querySelector(".t-dope") as HTMLElement;
   const dopeRowsEl = el.querySelector(".t-dope-rows") as HTMLElement;
   const dopeToggle = el.querySelector(".t-dope-toggle") as HTMLButtonElement;
-  let dopeCollapsed = false;
   let dopeCount = 0;
 
-  // Rows must line up with the strip: pad to the timeline's pixel range.
+  // Rows + curves must line up with the strip: pad to the timeline's range.
   const alignDope = () => {
     const tl = timeline.getBoundingClientRect();
-    // Measure against the rows element itself — its border-box left doesn't
+    // Measure against the target element itself — its border-box left doesn't
     // move with its own padding, so this self-corrects in one pass.
-    const rows = dopeRowsEl.getBoundingClientRect();
-    const left = Math.max(0, tl.left - rows.left);
-    const right = Math.max(0, rows.right - tl.right);
-    dopeRowsEl.style.paddingLeft = `${left}px`;
-    dopeRowsEl.style.paddingRight = `${right}px`;
-    dopeRowsEl.style.setProperty("--dope-gutter", `${left}px`);
+    const pad = (target: HTMLElement) => {
+      const r = target.getBoundingClientRect();
+      const left = Math.max(0, tl.left - r.left);
+      const right = Math.max(0, r.right - tl.right);
+      target.style.paddingLeft = `${left}px`;
+      target.style.paddingRight = `${right}px`;
+      target.style.setProperty("--dope-gutter", `${left}px`);
+    };
+    pad(dopeRowsEl);
+    pad(curveView.el);
   };
   const dopeRo = new ResizeObserver(alignDope);
   dopeRo.observe(el);
   dopeRo.observe(timeline);
 
+  // The curve editor and the dope sheet share the dock; one shows at a time.
+  let curveAvailable = false;
+  let view: "keys" | "curves" | "none" = "keys";
+
   const syncDopeVisibility = () => {
-    dopeEl.hidden = dopeCollapsed || dopeCount === 0;
-    dopeToggle.hidden = dopeCount === 0;
-    dopeToggle.textContent = dopeCollapsed ? "Keys ▸" : "Keys ▾";
+    dopeEl.hidden = view !== "keys" || dopeCount === 0;
+    curveView.el.hidden = view !== "curves" || !curveAvailable;
+    dopeToggle.hidden = dopeCount === 0 && !curveAvailable;
+    dopeToggle.textContent = view === "keys" ? "Keys ▾" : view === "curves" ? "Curves ▾" : "Panels ▸";
   };
   dopeToggle.addEventListener("click", () => {
-    dopeCollapsed = !dopeCollapsed;
+    // Cycle: keys → curves → hidden → keys (skipping unavailable views).
+    const order: Array<typeof view> = ["keys", "curves", "none"];
+    for (let i = 1; i <= order.length; i++) {
+      const next = order[(order.indexOf(view) + i) % order.length];
+      if (next === "curves" && !curveAvailable) continue;
+      if (next === "keys" && dopeCount === 0) continue;
+      view = next;
+      break;
+    }
     syncDopeVisibility();
+    alignDope();
   });
 
   function setDope(rows: DopeRow[], cbs?: TransportKeyCallbacks) {
@@ -305,6 +331,13 @@ export function createTransport(preview: PreviewScene, duration: number): Transp
     alignDope();
   }
 
+  function setCurves(model: CurveModel | null, cbs: CurveCallbacks | null) {
+    curveAvailable = !!model && model.channels.some((c) => c.keys.length > 0);
+    curveView.setModel(model, cbs);
+    syncDopeVisibility();
+    alignDope();
+  }
+
   // Right-click on empty timeline → paste target etc.
   timeline.addEventListener("contextmenu", (e) => {
     e.preventDefault();
@@ -316,10 +349,12 @@ export function createTransport(preview: PreviewScene, duration: number): Transp
     getTrim: () => ({ start: trimStart, end: trimEnd }),
     setKeys,
     setDope,
+    setCurves,
     dispose: () => {
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
       dopeRo.disconnect();
+      curveView.dispose();
       el.remove();
     },
   };

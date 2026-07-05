@@ -194,6 +194,42 @@ const f0 = 0;
   check("isolation: hand edit leaves the rest of the body", worst < 1e-6, `worst other-bone drift ${mm(worst)}mm`);
 }
 
+// --- 1d. key easing + euler round-trip -----------------------------------------
+{
+  const { setKeyEase } = await import("../src/rig/rig.ts");
+  const { quatToEulerZYX, eulerZYXToQuat } = await import("../src/convert/quat.ts");
+  // Euler round-trip on 200 random-ish quats
+  let worst = 0;
+  for (let i = 0; i < 200; i++) {
+    const a = Math.sin(i * 1.7) * 2, b = Math.cos(i * 0.9) * 1.2, cc = Math.sin(i * 2.3) * 2.8;
+    const n = Math.hypot(a, b, cc, 1);
+    const q = [a / n, b / n, cc / n, 1 / n];
+    const back = eulerZYXToQuat(quatToEulerZYX(q));
+    worst = Math.max(worst, qangle(q, back));
+  }
+  check("euler ZYX round-trip exact", worst < 1e-4, `worst ${worst.toExponential(1)}°`);
+
+  // Step ease holds until the next key; smooth differs from linear mid-segment.
+  const layer = makeLayer("L1");
+  layer.extent = "hold";
+  const tr = getTrack(layer, "hips", true);
+  setPosKey(tr, 4, [0, 0, 0]);
+  setPosKey(tr, 6, [0, 0.1, 0]);
+  const hips = boneI("Hips");
+  const fMid = nearestFrame(c, 5);
+  const linLift = world(applyRigLayers(c, [layer]), fMid).pos[hips][1] - world(c, fMid).pos[hips][1];
+  setKeyEase(tr, 4, "step");
+  const stepLift = world(applyRigLayers(c, [layer]), fMid).pos[hips][1] - world(c, fMid).pos[hips][1];
+  setKeyEase(tr, 4, "smooth");
+  const fQ = nearestFrame(c, 4.5); // quarter point: smooth < linear
+  const smoothQ = world(applyRigLayers(c, [layer]), fQ).pos[hips][1] - world(c, fQ).pos[hips][1];
+  setKeyEase(tr, 4, "linear");
+  const linQ = world(applyRigLayers(c, [layer]), fQ).pos[hips][1] - world(c, fQ).pos[hips][1];
+  check("ease: step holds, smooth lags linear early in the segment",
+    Math.abs(stepLift) < 0.0005 && Math.abs(linLift - 0.05) < 0.003 && smoothQ < linQ - 0.005,
+    `step ${mm(stepLift)}mm, linear-mid ${mm(linLift)}mm, quarter smooth ${mm(smoothQ)} < linear ${mm(linQ)}`);
+}
+
 // --- 7b. partial (dirty-range) rebake === full rebake --------------------------
 {
   const layer = makeLayer("L1"); // fade 0.5s
