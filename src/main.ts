@@ -103,8 +103,12 @@ interface SceneFile {
   settings?: Record<string, unknown>;
   rig?: Record<string, unknown>;
   wanim: string; // base64 of the original .wanim bytes
+  /** Custom VRM/GLB body, embedded so the project is fully self-contained. */
+  body?: { name: string; data: string };
 }
 let pendingScene: SceneFile | null = null;
+/** Bytes of the currently loaded custom body (kept for scene embedding). */
+let userBodyBytes: { name: string; data: ArrayBuffer } | null = null;
 
 function bytesToBase64(bytes: Uint8Array): string {
   let out = "";
@@ -177,6 +181,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     </div>
     <button id="compare" class="eb-btn compare" title="Press and hold to see the recording without any cleaning or rig edits, so you can judge what changed.">Hold: original</button>
     <span class="eb-spacer"></span>
+    <input id="outName" class="eb-name" type="text" spellcheck="false" title="Base name for exported files (e.g. myclip-clean → myclip-clean.fbx)" />
     <select id="format" aria-label="Export format" title="FBX for MotionBuilder/Maya/Blender; VRMA for Warudo/VSeeFace/Unity; WANIM back into Warudo.">
       <option value="fbx" selected>FBX</option>
       <option value="vrma">VRMA</option>
@@ -250,8 +255,8 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     <p id="cleanStats" class="clean-stats"></p>
 
     <h4 class="group">Range smoothing</h4>
-    <p class="hint">Smooth just one rough section: set the timeline trim handles
-      around it, pick a cutoff above, then apply. Blends at the edges.</p>
+    <details class="hint-box"><summary>ⓘ how this works</summary><p class="hint">Smooth just one rough section: set the timeline trim handles
+      around it, pick a cutoff above, then apply. Blends at the edges.</p></details>
     <div class="rig-row">
       <button id="rangeAdd" class="button ghost">Smooth trim range</button>
     </div>
@@ -259,12 +264,12 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     </div>
 
     <div class="tab" id="tab-rig">
-    <p class="hint">FK/IK adjustment layers, MotionBuilder style. Add a layer, pause,
+    <details class="hint-box"><summary>ⓘ how this works</summary><p class="hint">FK/IK adjustment layers, MotionBuilder style. Add a layer, pause,
       then drag a handle on the figure; a key lands at the playhead. Spheres
       (hips, hands, feet) move with IK and rotate; the small diamonds on the
       body bones rotate FK-style. On the timeline: right-click a key for
       copy/paste/delete, shift-drag to select several, ctrl-click to add one,
-      drag a key to retime it. Edits auto-save for this recording.</p>
+      drag a key to retime it. Edits auto-save for this recording.</p></details>
     <div id="rigLayers" class="rig-layers"></div>
     <div class="rig-row">
       <button id="rigAdd" class="button ghost">Add layer</button>
@@ -285,9 +290,9 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     </div>
 
     <h3 class="section">Modifiers</h3>
-    <p class="hint">Whole-clip corrections, no keys needed. Hips keeps the feet
+    <details class="hint-box"><summary>ⓘ how this works</summary><p class="hint">Whole-clip corrections, no keys needed. Hips keeps the feet
       planted; knees and elbows swing without moving hips, feet, or hands.
-      Layers apply on top of these.</p>
+      Layers apply on top of these.</p></details>
     <label class="field sub">
       <span>Hips height <output id="modHipsVal">0 cm</output></span>
       <input id="modHips" type="range" min="-30" max="30" step="1" value="0" title="Raise or lower the hips; the legs re-solve so the feet stay where they are." />
@@ -310,8 +315,8 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     </label>
 
     <h4 class="group">Reach (pull to raw path)</h4>
-    <p class="hint">Blends each hand/foot back toward where the ORIGINAL recording
-      had it, when cleaning moved it. 0% = cleaned, 100% = raw endpoint path.</p>
+    <details class="hint-box"><summary>ⓘ how this works</summary><p class="hint">Blends each hand/foot back toward where the ORIGINAL recording
+      had it, when cleaning moved it. 0% = cleaned, 100% = raw endpoint path.</p></details>
     <label class="field sub">
       <span>L hand <output id="reachLHVal">0%</output></span>
       <input id="reachLH" type="range" min="0" max="100" step="5" value="0" />
@@ -330,8 +335,8 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     </label>
 
     <h4 class="group">Time warp</h4>
-    <p class="hint">Speed keys ramp playback speed across the clip — slow-mo a
-      section, rush another. The clip's length changes; trim resets when it does.</p>
+    <details class="hint-box"><summary>ⓘ how this works</summary><p class="hint">Speed keys ramp playback speed across the clip — slow-mo a
+      section, rush another. The clip's length changes; trim resets when it does.</p></details>
     <div class="rig-row">
       <select id="warpSpeed" title="Speed at the new key">
         <option value="0.25">0.25×</option>
@@ -401,13 +406,14 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
       </select>
     </label>
     <input id="bodyfile" type="file" accept=".vrm,.glb" hidden />
+    <details class="hint-box"><summary>ⓘ about the formats</summary>
     <p class="note">Format and Download live in the toolbar. Drag the in/out
       handles on the timeline to trim. FBX comes out as binary 7.5, which
       MotionBuilder can read, with the face and body meshes baked in if you
       turned them on. VRMA carries the humanoid motion and expressions for
       Warudo, VSeeFace, and Unity; it plays on any VRM and doesn't need a
       mesh. WANIM writes the cleaned recording back out so you can take it
-      into Warudo again.</p>
+      into Warudo again.</p></details>
     </div>
 
     <div class="tab" id="tab-info">
@@ -416,9 +422,9 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
       ${rows.map(([k, v]) => `<div><dt>${k}</dt><dd>${v}</dd></div>`).join("")}
     </dl>
     <button id="sceneSave" class="button ghost" title="Bundles the recording plus every edit and setting into one .scene.json. Drop it on the app later to pick up exactly where you left off.">Save scene…</button>
-    <p class="hint">A scene file contains the recording, your layers, modifiers,
+    <details class="hint-box"><summary>ⓘ how this works</summary><p class="hint">A scene file contains the recording, your layers, modifiers,
       cleaning and export settings, and the trim — one file reopens the whole
-      session. A custom VRM body isn't embedded; re-pick it after loading.</p>
+      session. A custom VRM body is embedded too, so the file is the whole project.</p></details>
     <button id="reset" class="button ghost">Load another file</button>
     </div>
 
@@ -571,6 +577,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
       transport = createTransport(preview, display.duration);
       timelineDock.appendChild(transport.element);
       transportDuration = display.duration;
+      wireTransportScene(); // fresh bar needs its Save…/Open… buttons wired
       preview.setClip(display, true);
       updateRigEditor(); // re-point key markers + dope + curves at the new bar
     } else {
@@ -1536,6 +1543,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
       return;
     }
     lastBodyChoice = bodySel.value;
+    userBodyBytes = null;
     void setBodySource(null).then(() => {
       preview?.setBodyMode(bodySel.value === "none" ? "none" : "human");
       preview?.setFaceVisible(true);
@@ -1551,7 +1559,9 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
       return;
     }
     try {
-      const mapped = await setBodySource(await file.arrayBuffer());
+      const bytes = await file.arrayBuffer();
+      const mapped = await setBodySource(bytes);
+      userBodyBytes = { name: file.name, data: bytes };
       lastBodyChoice = "vrm";
       preview?.setBodyMode("human");
       preview?.setFaceVisible(false); // the VRM keeps its own head
@@ -1689,7 +1699,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
       distSpine: distSpineChk.checked,
       distSpineAmt: distSpineAmt.value,
       face: faceChk.checked,
-      body: bodySel.value === "vrm" ? "human" : bodySel.value, // custom VRMs aren't embedded
+      body: bodySel.value, // 'vrm' restores from the scene's embedded body
       trim: transport?.getTrim(),
       time: preview?.getTime() ?? 0,
     };
@@ -1716,6 +1726,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     if (s.distSpineAmt) { distSpineAmt.value = String(s.distSpineAmt); distSpineAmtVal.value = `${distSpineAmt.value}%`; }
     if (typeof s.face === "boolean" && !faceChk.disabled) faceChk.checked = s.face;
     if (typeof s.body === "string" && s.body !== "vrm") {
+      // 'vrm' is handled by the embedded-body restore path.
       bodySel.value = s.body;
       preview?.setBodyMode(s.body === "none" ? "none" : "human");
     }
@@ -1727,18 +1738,29 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     }
   }
 
-  (document.getElementById("sceneSave") as HTMLButtonElement).addEventListener("click", () => {
+  /** One button, whole work project: recording + edits + settings + assets. */
+  function saveScene() {
     if (!loaded) return;
     const scene: SceneFile = {
       magic: "wanimscene",
-      v: 1,
+      v: 2,
       name: loaded.name,
       settings: sceneSettings(),
       rig: { v: 3, layers: rigLayers, mods, counter: layerCounter, warp: warpKeys, ranges: rangeSmooths },
       wanim: bytesToBase64(new Uint8Array(loaded.raw)),
+      // Embed the custom body so the project is fully self-contained.
+      body: userBodyBytes
+        ? { name: userBodyBytes.name, data: bytesToBase64(new Uint8Array(userBodyBytes.data)) }
+        : undefined,
     };
     downloadBytes(`${sanitizeFilename(loaded.name)}.scene.json`, new TextEncoder().encode(JSON.stringify(scene)));
-  });
+  }
+  (document.getElementById("sceneSave") as HTMLButtonElement).addEventListener("click", saveScene);
+
+  function wireTransportScene() {
+    transport?.setSceneActions({ save: saveScene, open: () => fileInput.click() });
+  }
+  wireTransportScene();
 
   // A dropped scene file restores rig + settings over the freshly loaded clip.
   if (pendingScene) {
@@ -1747,12 +1769,37 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     adoptRigState((sc.rig ?? {}) as Parameters<typeof adoptRigState>[0]);
     applyScene(sc.settings);
     rigCacheNote.textContent = "Scene restored.";
+    if (sc.body?.data) {
+      // Restore the embedded custom body asynchronously, then refresh.
+      const bodyInfo = sc.body;
+      void (async () => {
+        try {
+          const bytes = base64ToBytes(bodyInfo.data);
+          await setBodySource(bytes.buffer as ArrayBuffer);
+          userBodyBytes = { name: bodyInfo.name, data: bytes.buffer as ArrayBuffer };
+          lastBodyChoice = "vrm";
+          bodySel.value = "vrm";
+          preview?.setBodyMode("human");
+          preview?.setFaceVisible(false);
+          preview?.refreshBody();
+          if (propSel.value === "body") await reclean();
+        } catch (err) {
+          showError(`Embedded body ${bodyInfo.name}: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      })();
+    }
+  } else {
+    userBodyBytes = null; // fresh recording — no custom body yet
   }
 
   // Apply the default proportions selection (body-mesh skeleton) on load.
   void reclean();
 
   const formatSel = document.getElementById("format") as HTMLSelectElement;
+  const outNameEl = document.getElementById("outName") as HTMLInputElement;
+  outNameEl.value = `${sanitizeFilename(name)}-clean`;
+  /** Export base name — the user names the output so "which one is cleaned" stays obvious. */
+  const outBase = () => sanitizeFilename(outNameEl.value.trim()) || `${sanitizeFilename(loaded?.name ?? "export")}-clean`;
   downloadBtn.addEventListener("click", async () => {
     if (!loaded) return;
     const format = formatSel.value;
@@ -1783,7 +1830,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
         clip = applyRigLayers(clip, rigLayers);
         const rs = resample(clip, fps, trim.start, trim.end);
         const { writeWanim } = await import("./wanim/writeWanim.ts");
-        downloadBytes(`${sanitizeFilename(loaded.name)}.wanim`, writeWanim(rs, loaded.clip));
+        downloadBytes(`${outBase()}.wanim`, writeWanim(rs, loaded.clip));
       } else {
       const resampled = resample(loaded.display, fps, trim.start, trim.end);
       if (format === "vrma") {
@@ -1793,7 +1840,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
           faceChk.checked && resampled.face ? augmentFaceForVrm(resampled.face) : undefined;
         const { writeVrma } = await import("./vrma/writeVrma.ts");
         const vrma = writeVrma(resampled, augFace);
-        downloadBytes(`${sanitizeFilename(loaded.name)}.vrma`, vrma);
+        downloadBytes(`${outBase()}.vrma`, vrma);
       } else {
         const names = remapNames(resampled.names, namesSel.value as NameScheme);
         const meshes: SkinnedMeshExport[] = [];
@@ -1816,12 +1863,12 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
           meshes.push(...bodyToSkinnedMeshExports(body.meshes, augFace));
         }
         const fbx = writeAnimationFbx(resampled, {
-          takeName: sanitizeFilename(loaded.name),
+          takeName: outBase(),
           names,
           tposeRest: restSel.value === "tpose",
           meshes,
         });
-        downloadBytes(`${sanitizeFilename(loaded.name)}.fbx`, fbx);
+        downloadBytes(`${outBase()}.fbx`, fbx);
       }
       }
     } catch (err) {
@@ -1895,6 +1942,10 @@ async function loadWanim(name: string, raw: ArrayBuffer) {
 }
 
 dropzone.addEventListener("click", () => fileInput.click());
+document.getElementById("openFileBtn")?.addEventListener("click", (e) => {
+  e.stopPropagation();
+  fileInput.click();
+});
 dropzone.addEventListener("keydown", (e) => {
   if (e.key === "Enter" || e.key === " ") fileInput.click();
 });

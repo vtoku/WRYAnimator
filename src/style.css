@@ -771,3 +771,43 @@ code {
   padding: 1rem;
   border-top: 1px solid var(--border);
 }
+
+/* Collapsible (i) explanations */
+.hint-box {
+  margin: 0.2rem 0 0.7rem;
+}
+
+.hint-box summary {
+  cursor: pointer;
+  color: var(--text-dim);
+  font-size: 0.75rem;
+  list-style: none;
+  user-select: none;
+}
+
+.hint-box summary::-webkit-details-marker {
+  display: none;
+}
+
+.hint-box summary:hover {
+  color: var(--text);
+}
+
+.hint-box[open] summary {
+  margin-bottom: 0.2rem;
+}
+
+.open-btn {
+  width: auto;
+  padding: 0.6rem 1.6rem;
+}
+
+.eb-name {
+  background: #232833;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.35rem 0.6rem;
+  font-size: 0.82rem;
+  width: 13rem;
+}

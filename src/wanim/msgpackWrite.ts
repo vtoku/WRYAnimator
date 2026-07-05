@@ -67,6 +67,27 @@ export class MsgpackWriter {
     this.u8(0xc0);
   }
 
+  bin(bytes: Uint8Array): void {
+    const n = bytes.length;
+    if (n < 0x100) { this.u8(0xc4); this.u8(n); }
+    else if (n < 0x10000) { this.u8(0xc5); this.ensure(2); this.view.setUint16(this.pos, n); this.pos += 2; }
+    else { this.u8(0xc6); this.ensure(4); this.view.setUint32(this.pos, n); this.pos += 4; }
+    this.ensure(n);
+    this.buf.set(bytes, this.pos);
+    this.pos += n;
+  }
+
+  ext(type: number, data: Uint8Array): void {
+    const n = data.length;
+    if (n < 0x100) { this.u8(0xc7); this.u8(n); }
+    else if (n < 0x10000) { this.u8(0xc8); this.ensure(2); this.view.setUint16(this.pos, n); this.pos += 2; }
+    else { this.u8(0xc9); this.ensure(4); this.view.setUint32(this.pos, n); this.pos += 4; }
+    this.u8(type & 0xff);
+    this.ensure(n);
+    this.buf.set(data, this.pos);
+    this.pos += n;
+  }
+
   toBytes(): Uint8Array {
     return this.buf.subarray(0, this.pos);
   }

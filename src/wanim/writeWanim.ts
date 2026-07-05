@@ -1,4 +1,5 @@
 import { MsgpackWriter } from "./msgpackWrite.ts";
+import { lz4CompressBlockLiteral } from "./lz4.ts";
 import type { WanimClip } from "./parse.ts";
 import type { ResampledClip } from "../convert/clip.ts";
 
@@ -13,10 +14,10 @@ import type { ResampledClip } from "../convert/clip.ts";
  *    identity root (zeros / identity quat) and let the hips carry everything,
  *    which Warudo reconstructs as root ∘ hipsLocal = the same world motion.
  *
- * The payload is emitted UNCOMPRESSED (a plain top-level msgpack array).
- * MessagePack-C#'s LZ4 deserialize only decompresses when it sees the
- * compression ext header, so an uncompressed payload round-trips fine, and our
- * own parser already handles that case.
+ * The payload is wrapped in MessagePack-C#'s LZ4BlockArray container (same
+ * as Warudo's own files) using literal-only LZ4 blocks — valid for any
+ * standard decoder, and container-identical so strict readers can't tell the
+ * difference.
  *
  * Fields 7-9 are unknown and empty in every recording observed, so they are
  * written as empties at the new frame count.
@@ -96,6 +97,28 @@ export function writeWanim(c: ResampledClip, template?: WanimClip): Uint8Array {
   w.arrayHeader(0);
   w.arrayHeader(0);
 
+  return wrapLz4BlockArray(w.toBytes());
+}
+
+/**
+ * Wrap a raw msgpack payload in MessagePack-C#'s LZ4BlockArray container —
+ * the same shape Warudo writes: [ext98(sizes as msgpack ints), bin, bin...].
+ * Blocks are literal-only LZ4 (valid for any standard decoder). Emitted so
+ * our files are container-identical to Warudo's own recordings.
+ */
+function wrapLz4BlockArray(payload: Uint8Array): Uint8Array {
+  const BLOCK = 1 << 20;
+  const blocks: Uint8Array[] = [];
+  const sizes = new MsgpackWriter();
+  for (let off = 0; off < payload.length; off += BLOCK) {
+    const chunk = payload.subarray(off, Math.min(off + BLOCK, payload.length));
+    sizes.uint(chunk.length);
+    blocks.push(lz4CompressBlockLiteral(chunk));
+  }
+  const w = new MsgpackWriter();
+  w.arrayHeader(blocks.length + 1);
+  w.ext(98, sizes.toBytes());
+  for (const b of blocks) w.bin(b);
   return w.toBytes();
 }
 

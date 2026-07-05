@@ -37,6 +37,8 @@ export interface Transport {
   getTrim(): { start: number; end: number };
   /** Restore a trim range (scene load). */
   setTrim(start: number, end: number): void;
+  /** Wire the Save…/Open… buttons (scene handling lives in the app). */
+  setSceneActions(cbs: { save(): void; open(): void }): void;
   /** Show rig-layer key markers on the timeline (replaces the previous set). */
   setKeys(markers: TransportKeyMarker[], cbs?: TransportKeyCallbacks): void;
   /** Mini dope sheet under the strip: per-effector key rows (empty = hidden). */
@@ -79,6 +81,8 @@ export function createTransport(preview: PreviewScene, duration: number): Transp
       <button class="t-btn t-setout" title="Set trim end to playhead">Out</button>
       <button class="t-btn t-reset" title="Clear trim">Reset</button>
       <button class="t-btn t-dope-toggle" hidden title="Show/hide per-part key rows">Keys ▾</button>
+      <button class="t-btn t-scene-open" title="Open a .wanim recording or a saved .scene.json">Open…</button>
+      <button class="t-btn t-scene-save" title="Save the whole session (recording + edits + settings) as a scene file">Save…</button>
     </div>
     <div class="t-dope" hidden>
       <div class="t-dope-rows"></div>
@@ -353,6 +357,10 @@ export function createTransport(preview: PreviewScene, duration: number): Transp
       trimStart = Math.max(0, Math.min(duration, start));
       trimEnd = Math.max(trimStart + 0.01, Math.min(duration, end));
       applyTrim();
+    },
+    setSceneActions: (cbs) => {
+      (el.querySelector(".t-scene-save") as HTMLButtonElement).onclick = () => cbs.save();
+      (el.querySelector(".t-scene-open") as HTMLButtonElement).onclick = () => cbs.open();
     },
     setKeys,
     setDope,

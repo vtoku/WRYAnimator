@@ -1,4 +1,25 @@
 /** Decompress a raw LZ4 block (the block format, not the LZ4 frame format). */
+/**
+ * Encode bytes as a VALID LZ4 block using literals only (one sequence, no
+ * matches). Slightly larger than the input, but every standard LZ4 decoder —
+ * including MessagePack-C#'s — accepts it, which lets the .wanim writer emit
+ * a true LZ4BlockArray container matching Warudo's own files.
+ */
+export function lz4CompressBlockLiteral(src: Uint8Array): Uint8Array {
+  const L = src.length;
+  const out = new Uint8Array(L + Math.ceil(L / 255) + 16);
+  let o = 0;
+  out[o++] = Math.min(L, 15) << 4;
+  if (L >= 15) {
+    let rem = L - 15;
+    while (rem >= 255) { out[o++] = 255; rem -= 255; }
+    out[o++] = rem;
+  }
+  out.set(src, o);
+  o += L;
+  return out.subarray(0, o);
+}
+
 export function lz4DecompressBlock(src: Uint8Array, dstLen: number): Uint8Array {
   const dst = new Uint8Array(dstLen);
   let s = 0;
