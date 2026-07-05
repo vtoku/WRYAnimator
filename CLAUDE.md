@@ -111,7 +111,14 @@ No unit-test framework yet — the three `npm run` scripts above are the regress
                           keyed override sections HOLD their pose, values interpolate on the layer's own curve —
                           easing to zero only OUTSIDE first/last key; a brief gap-dipping variant collapsed override
                           sections mid-span and was reverted) or "hold" (first/last key extends; bracket with
-                          neutral keys). Drags snap to the exact frame. keyEffectorTarget() = one-call solve+capture for tests/programmatic edits.
+                          neutral keys). Drags snap to the exact frame. keyEffectorTarget() = one-call solve+capture
+                          for tests/programmatic edits. AUDIT INVARIANTS (v0.26.2, all in rigCheck): keys +
+                          envelopes live in PLAYBACK time — every evaluation site normalizes via
+                          frameTime(clip,f)=times[f]−times[0] (recordings can start nonzero); capture solves on
+                          stackPoseThrough(layerIndex) so layers ABOVE the edited one are never absorbed into its
+                          keys (the drag display re-applies them on top); Neutral key covers the same bones a drag
+                          writes (whole IK chain); convertLayerMode() translates every key when the mode dropdown
+                          flips so the pose survives additive⇄override; paste refuses cross-mode targets.
                           PERF: bake = per-bone quat ops only (19-track full-pose layer over 12k frames ≈ 190 ms);
                           rig edits rebake IN PLACE over the edit's dirtyRange (bit-identical to full — proven),
                           repose with preview.seek, NEVER setClip; big rebakes run CHUNKED via bakeRangeAsync
