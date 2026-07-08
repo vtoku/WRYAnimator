@@ -51,8 +51,11 @@ export class CurveView {
   private model: CurveModel | null = null;
   private cbs: CurveCallbacks | null = null;
   private playhead = 0;
-  private vmin = -1;
-  private vmax = 1;
+  /** Independent value scale per group — cm and degrees don't share an axis. */
+  private scales: Record<"pos" | "rot", { min: number; max: number }> = {
+    pos: { min: -1, max: 1 },
+    rot: { min: -1, max: 1 },
+  };
   private drag: { ch: CurveChannel; key: CurveKey; startY: number; startValue: number } | null = null;
   private hover: { ch: CurveChannel; key: CurveKey } | null = null;
   private ro: ResizeObserver;
@@ -79,7 +82,7 @@ export class CurveView {
         this.cbs.onValueStart();
         const move = (ev: PointerEvent) => {
           if (!this.drag) return;
-          const dv = (this.drag.startY - ev.clientY) * this.valuePerPx();
+          const dv = (this.drag.startY - ev.clientY) * this.valuePerPx(this.drag.ch.group);
           this.drag.key.value = this.drag.startValue + dv;
           this.cbs!.onValue(this.drag.ch.group, this.drag.ch.axis, this.drag.key.time, this.drag.key.value);
           this.draw();
@@ -145,12 +148,14 @@ export class CurveView {
   private x(t: number): number {
     return (t / Math.max(1e-9, this.model?.duration ?? 1)) * this.width();
   }
-  private y(v: number): number {
+  private y(v: number, group: "pos" | "rot"): number {
+    const s = this.scales[group];
     const h = HEIGHT - PAD_TOP - PAD_BOTTOM;
-    return PAD_TOP + (1 - (v - this.vmin) / Math.max(1e-9, this.vmax - this.vmin)) * h;
+    return PAD_TOP + (1 - (v - s.min) / Math.max(1e-9, s.max - s.min)) * h;
   }
-  private valuePerPx(): number {
-    return (this.vmax - this.vmin) / Math.max(1, HEIGHT - PAD_TOP - PAD_BOTTOM);
+  private valuePerPx(group: "pos" | "rot"): number {
+    const s = this.scales[group];
+    return (s.max - s.min) / Math.max(1, HEIGHT - PAD_TOP - PAD_BOTTOM);
   }
   private timeAt(e: PointerEvent): number {
     const r = this.canvas.getBoundingClientRect();
@@ -164,7 +169,7 @@ export class CurveView {
     let best: { ch: CurveChannel; key: CurveKey; d: number } | null = null;
     for (const ch of this.model.channels) {
       for (const key of ch.keys) {
-        const d = Math.hypot(this.x(key.time) - px, this.y(key.value) - py);
+        const d = Math.hypot(this.x(key.time) - px, this.y(key.value, ch.group) - py);
         if (d < 9 && (!best || d < best.d)) best = { ch, key, d };
       }
     }
@@ -172,19 +177,21 @@ export class CurveView {
   }
 
   private fitScale() {
-    let lo = Infinity, hi = -Infinity;
-    for (const ch of this.model?.channels ?? []) {
-      for (const k of ch.keys) {
-        lo = Math.min(lo, k.value);
-        hi = Math.max(hi, k.value);
+    for (const group of ["pos", "rot"] as const) {
+      let lo = Infinity, hi = -Infinity;
+      for (const ch of this.model?.channels ?? []) {
+        if (ch.group !== group) continue;
+        for (const k of ch.keys) {
+          lo = Math.min(lo, k.value);
+          hi = Math.max(hi, k.value);
+        }
       }
+      if (!Number.isFinite(lo)) { lo = -1; hi = 1; }
+      lo = Math.min(lo, 0);
+      hi = Math.max(hi, 0);
+      const pad = Math.max(0.5, (hi - lo) * 0.2);
+      this.scales[group] = { min: lo - pad, max: hi + pad };
     }
-    if (!Number.isFinite(lo)) { lo = -1; hi = 1; }
-    lo = Math.min(lo, 0);
-    hi = Math.max(hi, 0);
-    const pad = Math.max(0.5, (hi - lo) * 0.2);
-    this.vmin = lo - pad;
-    this.vmax = hi + pad;
   }
 
   private ease(frac: number, e: CurveEase): number {
@@ -204,18 +211,23 @@ export class CurveView {
     g.clearRect(0, 0, w, HEIGHT);
     if (!this.model) return;
 
-    // Value grid: zero line + min/max labels.
-    g.strokeStyle = "rgba(255,255,255,0.16)";
-    g.lineWidth = 1;
-    g.beginPath();
-    g.moveTo(0, this.y(0));
-    g.lineTo(w, this.y(0));
-    g.stroke();
-    g.fillStyle = "rgba(255,255,255,0.45)";
+    // Value grid: one zero line per group in play (pos = dashed, rot = solid);
+    // the scales are independent, so the lines usually sit at different y.
     g.font = "10px system-ui, sans-serif";
-    g.fillText("0", 4, this.y(0) - 3);
-    g.fillText(this.vmax.toFixed(1), 4, PAD_TOP + 8);
-    g.fillText(this.vmin.toFixed(1), 4, HEIGHT - 4);
+    for (const group of ["pos", "rot"] as const) {
+      if (!this.model.channels.some((c) => c.group === group && c.keys.length)) continue;
+      const zy = this.y(0, group);
+      g.strokeStyle = "rgba(255,255,255,0.16)";
+      g.lineWidth = 1;
+      g.setLineDash(group === "pos" ? [4, 4] : []);
+      g.beginPath();
+      g.moveTo(0, zy);
+      g.lineTo(w, zy);
+      g.stroke();
+      g.setLineDash([]);
+      g.fillStyle = "rgba(255,255,255,0.45)";
+      g.fillText(group === "pos" ? "0 cm" : "0°", 4, zy - 3);
+    }
 
     // Channels.
     for (const ch of this.model.channels) {
@@ -224,25 +236,25 @@ export class CurveView {
       g.lineWidth = 1.4;
       g.beginPath();
       // Hold-extend to the edges, then eased segments between keys.
-      g.moveTo(0, this.y(ch.keys[0].value));
-      g.lineTo(this.x(ch.keys[0].time), this.y(ch.keys[0].value));
+      g.moveTo(0, this.y(ch.keys[0].value, ch.group));
+      g.lineTo(this.x(ch.keys[0].time), this.y(ch.keys[0].value, ch.group));
       for (let i = 0; i < ch.keys.length - 1; i++) {
         const a = ch.keys[i], b = ch.keys[i + 1];
         const steps = a.ease === "linear" ? 1 : 16;
         for (let s = 1; s <= steps; s++) {
           const frac = s / steps;
           const v = a.value + (b.value - a.value) * this.ease(a.ease === "step" && s === steps ? 1 : frac, a.ease);
-          g.lineTo(this.x(a.time + (b.time - a.time) * frac), this.y(v));
+          g.lineTo(this.x(a.time + (b.time - a.time) * frac), this.y(v, ch.group));
         }
       }
       const last = ch.keys[ch.keys.length - 1];
-      g.lineTo(w, this.y(last.value));
+      g.lineTo(w, this.y(last.value, ch.group));
       g.stroke();
 
       // Keys.
       for (const key of ch.keys) {
         const kx = this.x(key.time);
-        const ky = this.y(key.value);
+        const ky = this.y(key.value, ch.group);
         const hot = this.hover?.key === key || this.drag?.key === key;
         g.fillStyle = hot ? "#fff" : ch.color;
         g.save();

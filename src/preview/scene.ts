@@ -53,6 +53,15 @@ export class PreviewScene {
   private lines: THREE.LineSegments | null = null;
   private joints: THREE.Points | null = null;
 
+  // Ghost overlay: a second, grey stick figure playing a reference clip (the
+  // uncleaned recording) in lockstep — the "before" is visible WHILE editing.
+  // Independent of the main clip so recleans don't tear it down.
+  private ghostClip: ConvertedClip | null = null;
+  private ghostNodes: THREE.Bone[] = [];
+  private ghostRoot: THREE.Group | null = null;
+  private ghostLines: THREE.LineSegments | null = null;
+  private ghostLinks: Array<[number, number]> = [];
+
   private face: FaceOverlay | null = null;
   private headIndex = -1;
   private faceWeights: Float32Array | null = null;
@@ -338,8 +347,7 @@ export class PreviewScene {
   }
 
   /** Map a playback time (seconds from clip start) to a frame index + fraction. */
-  private locate(time: number): { i: number; frac: number } {
-    const clip = this.clip!;
+  private locate(clip: ConvertedClip, time: number): { i: number; frac: number } {
     const times = clip.times;
     const t = times[0] + Math.max(0, Math.min(clip.duration, time));
     let i = 0;
@@ -351,17 +359,15 @@ export class PreviewScene {
     return { i, frac };
   }
 
-  private sampleInto(time: number) {
-    const clip = this.clip;
-    if (!clip) return;
-    const { i, frac } = this.locate(time);
-
+  /** Sample a clip's local transforms at `time` into a bone-node array. */
+  private sampleClipInto(clip: ConvertedClip, nodes: THREE.Bone[], time: number) {
+    const { i, frac } = this.locate(clip, time);
     const qa = new THREE.Quaternion();
     const qb = new THREE.Quaternion();
-    for (let b = 0; b < this.boneNodes.length; b++) {
+    for (let b = 0; b < nodes.length; b++) {
       const pa = clip.localPos[b][i];
       const pb = clip.localPos[b][i + 1] ?? pa;
-      const node = this.boneNodes[b];
+      const node = nodes[b];
       node.position.set(
         pa[0] + (pb[0] - pa[0]) * frac,
         pa[1] + (pb[1] - pa[1]) * frac,
@@ -374,6 +380,11 @@ export class PreviewScene {
       qa.slerp(qb, frac);
       node.quaternion.copy(qa);
     }
+  }
+
+  private sampleInto(time: number) {
+    if (!this.clip) return;
+    this.sampleClipInto(this.clip, this.boneNodes, time);
   }
 
   /** Redraw the stick figure + rig handles from the bones' current world state. */
@@ -402,13 +413,14 @@ export class PreviewScene {
 
   private applyPose(time: number) {
     if (!this.boneRoot || !this.lines || !this.joints) return;
+    this.updateGhost(time); // the ghost tracks the playhead even mid-drag
     if (this.poseOverride) return; // live drag owns the pose right now
     this.sampleInto(time);
     this.redrawOverlays();
 
     // Drive the face blendshapes from the recorded weights at this time.
     if (this.faceWeights && this.clip?.face) {
-      const { i, frac } = this.locate(time);
+      const { i, frac } = this.locate(this.clip, time);
       const tracks = this.clip.face.tracks;
       for (let n = 0; n < tracks.length; n++) {
         const a = tracks[n][i];
@@ -435,6 +447,78 @@ export class PreviewScene {
         });
       }
     }
+  }
+
+  // ---- ghost overlay -------------------------------------------------------
+
+  /**
+   * Show/hide a grey reference skeleton playing `clip` at the same playhead
+   * (e.g. the uncleaned recording). Survives setClip — recleans re-point it.
+   */
+  setGhost(clip: ConvertedClip | null) {
+    this.clearGhost();
+    this.ghostClip = clip;
+    if (!clip) return;
+    const nodes: THREE.Bone[] = clip.names.map((name) => {
+      const o = new THREE.Bone();
+      o.name = name;
+      return o;
+    });
+    const root = new THREE.Group();
+    clip.parents.forEach((p, i) => {
+      if (p >= 0) nodes[p].add(nodes[i]);
+      else root.add(nodes[i]);
+    });
+    this.ghostNodes = nodes;
+    this.ghostRoot = root;
+    this.scene.add(root);
+
+    this.ghostLinks = [];
+    clip.parents.forEach((p, i) => {
+      if (p >= 0) this.ghostLinks.push([p, i]);
+    });
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute(
+      "position",
+      new THREE.Float32BufferAttribute(new Float32Array(this.ghostLinks.length * 6), 3),
+    );
+    this.ghostLines = new THREE.LineSegments(
+      geo,
+      new THREE.LineBasicMaterial({ color: 0x8a8f9a, transparent: true, opacity: 0.45 }),
+    );
+    this.ghostLines.frustumCulled = false;
+    this.scene.add(this.ghostLines);
+    this.updateGhost(this.time);
+  }
+
+  private updateGhost(time: number) {
+    if (!this.ghostClip || !this.ghostRoot || !this.ghostLines) return;
+    this.sampleClipInto(this.ghostClip, this.ghostNodes, time);
+    this.ghostRoot.updateMatrixWorld(true);
+    const pos = this.ghostLines.geometry.getAttribute("position") as THREE.BufferAttribute;
+    const wp = new THREE.Vector3();
+    this.ghostLinks.forEach(([a, b], k) => {
+      this.ghostNodes[a].getWorldPosition(wp);
+      pos.setXYZ(k * 2, wp.x, wp.y, wp.z);
+      this.ghostNodes[b].getWorldPosition(wp);
+      pos.setXYZ(k * 2 + 1, wp.x, wp.y, wp.z);
+    });
+    pos.needsUpdate = true;
+  }
+
+  private clearGhost() {
+    if (this.ghostRoot) {
+      this.scene.remove(this.ghostRoot);
+      this.ghostRoot = null;
+    }
+    if (this.ghostLines) {
+      this.scene.remove(this.ghostLines);
+      this.ghostLines.geometry.dispose();
+      (this.ghostLines.material as THREE.Material).dispose();
+      this.ghostLines = null;
+    }
+    this.ghostNodes = [];
+    this.ghostClip = null;
   }
 
   // ---- control rig -------------------------------------------------------
@@ -687,7 +771,7 @@ export class PreviewScene {
     this.rafId = requestAnimationFrame(this.animate);
     const dt = this.clock.getDelta();
     if (this.clip && this.playing) {
-      this.time += dt;
+      this.time += dt * this.rate;
       // Loop within the trim region (end inclusive).
       if (this.time >= this.trimEnd || this.time < this.trimStart) this.time = this.trimStart;
       this.applyPose(this.time);
@@ -698,8 +782,30 @@ export class PreviewScene {
   };
 
   // ---- playback controls -------------------------------------------------
-  setOnState(cb: (s: PlaybackState) => void) {
+  /** Review-speed multiplier — affects playback only, never the clip. */
+  private rate = 1;
+
+  setRate(r: number) {
+    this.rate = Math.max(0.05, Math.min(4, r));
+  }
+
+  getRate(): number {
+    return this.rate;
+  }
+
+  setOnState(cb: ((s: PlaybackState) => void) | null) {
     this.onState = cb;
+  }
+
+  /** Drop the clip and show the empty grid again (boot / "Load another"). */
+  clear() {
+    this.clearGhost();
+    this.clearClip();
+    this.onState = null; // the transport that owned the callback is gone
+    this.time = 0;
+    this.playing = false;
+    this.trimStart = 0;
+    this.trimEnd = 0;
   }
 
   private emitState() {
@@ -765,6 +871,7 @@ export class PreviewScene {
     this.ro.disconnect();
     this.gizmo?.dispose();
     this.gizmo = null;
+    this.clearGhost();
     this.clearClip();
     this.face?.group.parent?.remove(this.face.group);
     this.face?.dispose();

@@ -1,12 +1,12 @@
-# WANIM → FBX
+# WRYAnimator
 
-A browser tool that converts a Warudo `.wanim` animation recording into an FBX animation.
+A browser-based motion-capture editor for Warudo `.wanim` recordings: clean, edit, retarget, re-time, and export to FBX, VRMA, or wanim.
 
 https://wryanimator.com/
 
 ## What it does
 
-Reads a `.wanim` file recorded in [Warudo](https://warudo.app/) and exports an `.fbx` containing the recorded skeleton animation. Everything runs locally in your browser, so the file is never uploaded.
+Reads a `.wanim` file recorded in [Warudo](https://warudo.app/) and lets you work on the motion in the browser — preview it in 3D, clean it up (de-spike, smooth, fix feet/wrists), edit it with a MotionBuilder-style control rig and keyframe layers, retarget it onto a body, trim and time-warp it — then export to FBX, VRMA, or a re-saved wanim. Everything runs locally in your browser, so the file is never uploaded.
 
 ## How to use
 
@@ -27,13 +27,16 @@ The FBX is **binary FBX 7.5** (imports into MotionBuilder, Blender, Maya, Unity)
 
 Textures, spring/jiggle bones, and props are not exported. The recorded mesh isn't in the `.wanim` file, so the embedded face head is a generic stand-in driven by the captured blendshape weights.
 
-## Credits & trademarks
+## Credits
 
-Independent, unofficial tool. "Warudo" is a trademark of HakuyaLabs. Not affiliated with or endorsed by them. The preview face model is the "facecap" head by [Face Cap](https://www.bannaflak.com/face-cap) (Bannaflak), distributed with three.js; textures are stripped and it is used for on-screen reference only.
+Independent, unofficial tool. "Warudo" is a trademark of [HakuyaLabs](https://warudo.app/). Not affiliated with or endorsed by them.
 
-## Intended use
+- **Preview face** — the "facecap" head by [Face Cap](https://www.bannaflak.com/face-cap) (Bannaflak), distributed with three.js; textures are stripped and it is used for on-screen reference only.
+- **Bundled body** — Xbot (Mixamo) via three.js examples, and the "Suit" from Quaternius' Ultimate Modular Women pack (CC0, textures stripped). You can also drop in your own VRM/GLB.
+- **Logo font** — [Krona One](https://fonts.google.com/specimen/Krona+One) by Yvonne Schüttler, [SIL Open Font License 1.1](https://openfontlicense.org/); self-hosted (latin subset).
+- **3D + import/export** — [three.js](https://threejs.org/).
 
-This is for converting **your own** motion recordings. Please don't use it to rip animations that ship with Warudo or other paid assets. Make sure you actually own the rights to whatever you convert (for example, from Booth or the Unity Asset Store).
+**Intended use:** this is for editing **your own** motion recordings. Please don't use it to rip animations that ship with Warudo or other paid assets. Make sure you actually own the rights to whatever you convert (for example, from Booth or the Unity Asset Store).
 
 ## License
 

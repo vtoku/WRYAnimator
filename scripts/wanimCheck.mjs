@@ -52,16 +52,22 @@ if (sets0.length === 0) {
 }
 
 // Bones: local rotations through the convert pipeline of both files.
+// Compare at the EXACT source timestamp: slerp the re-imported 60fps clip to
+// t rather than snapping to the nearest frame — the ≤8.3ms snap reads as up
+// to ~2° of pure quantization during fast moves and hides real regressions.
+const { quatSlerp } = await import("../src/convert/quat.ts");
 const conv1 = convertCharacter(re, 0);
 let worstQ = 0;
 for (let i = 1; i < 8; i++) {
   const f0 = Math.floor((clip.times.length * i) / 8);
   const t = clip.times[f0] - clip.times[0];
-  const f1 = Math.min(conv1.times.length - 1, Math.round(t * 60));
+  const fa = Math.min(conv1.times.length - 1, Math.floor(t * 60));
+  const fb = Math.min(conv1.times.length - 1, fa + 1);
+  const frac = Math.max(0, Math.min(1, t * 60 - fa));
   for (const b of [0, 1, 3, 14, 20, 40, 54]) {
     const q0 = conv.localQuat[b][f0];
-    const q1 = conv1.localQuat[b][f1];
     if (Math.hypot(...q0) < 0.5) continue; // dead bone
+    const q1 = quatSlerp(conv1.localQuat[b][fa], conv1.localQuat[b][fb], frac);
     const dot = Math.abs(q0[0] * q1[0] + q0[1] * q1[1] + q0[2] * q1[2] + q0[3] * q1[3]);
     worstQ = Math.max(worstQ, (2 * Math.acos(Math.min(1, dot)) * 180) / Math.PI);
   }

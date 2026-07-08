@@ -30,6 +30,8 @@ export interface FeetStats {
   frames: number;
   /** Largest ankle correction applied, cm. */
   maxFixCm: number;
+  /** The adjusted frame indices — drives the timeline tick marks. */
+  fixedFrames?: number[];
 }
 
 // Contact detection tuning (meters, m/s, seconds).
@@ -194,5 +196,7 @@ export function fixFeet(c: ConvertedClip, localPos: Vec3[][], localQuat: Quat[][
     stats.spans = spanCount;
     stats.frames = adjusted.size;
     stats.maxFixCm = maxFix * 100;
+    // Keys are frame*2+side — decode and dedupe to plain frame indices.
+    stats.fixedFrames = [...new Set([...adjusted].map((k) => k >> 1))];
   }
 }

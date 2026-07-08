@@ -30,6 +30,72 @@ function speedAt(keys: WarpKey[], t: number): number {
   return a.speed + (b.speed - a.speed) * frac;
 }
 
+/**
+ * Cumulative OUTPUT time at each source frame: dt_out = dt_src / speed.
+ * Warp keys live in 0-based source PLAYBACK time; recorded timestamps can
+ * start nonzero, so midpoints are normalized before the speed lookup.
+ */
+function buildCum(times: number[], keys: WarpKey[]): number[] {
+  const t0 = times[0];
+  const cum = new Array<number>(times.length);
+  cum[0] = 0;
+  for (let f = 1; f < times.length; f++) {
+    const dt = times[f] - times[f - 1];
+    const mid = (times[f] + times[f - 1]) / 2 - t0;
+    cum[f] = cum[f - 1] + dt / Math.max(0.05, speedAt(keys, mid));
+  }
+  return cum;
+}
+
+/**
+ * Bidirectional mapping between SOURCE playback time and WARPED (output)
+ * playback time, both 0-based. This is the exact map applyTimeWarp resamples
+ * through — use it to place speed keys from the warped playhead and to remap
+ * key/range times when the warp changes.
+ */
+export function warpMaps(
+  times: number[],
+  warpKeys: WarpKey[],
+): { outOf(srcT: number): number; srcOf(outT: number): number; outDuration: number } {
+  const keys = [...warpKeys].sort((a, b) => a.time - b.time);
+  const n = times.length;
+  const t0 = times[0];
+  const srcDuration = n > 1 ? times[n - 1] - t0 : 0;
+  if (n < 2 || !anyWarp(keys)) {
+    const id = (t: number) => Math.max(0, Math.min(srcDuration, t));
+    return { outOf: id, srcOf: id, outDuration: srcDuration };
+  }
+  const cum = buildCum(times, keys);
+  const srcT = (f: number) => times[f] - t0;
+  const seg = (arr: number[] | ((f: number) => number), v: number): { lo: number; hi: number } => {
+    const at = typeof arr === "function" ? arr : (f: number) => arr[f];
+    let lo = 0, hi = n - 1;
+    while (hi - lo > 1) {
+      const mid = (lo + hi) >> 1;
+      if (at(mid) <= v) lo = mid;
+      else hi = mid;
+    }
+    return { lo, hi };
+  };
+  const outOf = (s: number): number => {
+    if (s <= 0) return 0;
+    if (s >= srcDuration) return cum[n - 1];
+    const { lo, hi } = seg(srcT, s);
+    const span = srcT(hi) - srcT(lo);
+    const frac = span > 1e-12 ? (s - srcT(lo)) / span : 0;
+    return cum[lo] + (cum[hi] - cum[lo]) * frac;
+  };
+  const srcOf = (o: number): number => {
+    if (o <= 0) return 0;
+    if (o >= cum[n - 1]) return srcDuration;
+    const { lo, hi } = seg(cum, o);
+    const span = cum[hi] - cum[lo];
+    const frac = span > 1e-12 ? (o - cum[lo]) / span : 0;
+    return srcT(lo) + (srcT(hi) - srcT(lo)) * frac;
+  };
+  return { outOf, srcOf, outDuration: cum[n - 1] };
+}
+
 /** Resample the clip through the speed ramp (copies; original untouched). */
 export function applyTimeWarp(clip: ConvertedClip, warpKeys: WarpKey[]): ConvertedClip {
   const keys = [...warpKeys].sort((a, b) => a.time - b.time);
@@ -37,14 +103,7 @@ export function applyTimeWarp(clip: ConvertedClip, warpKeys: WarpKey[]): Convert
   const srcFrames = clip.times.length;
   if (srcFrames < 2) return clip;
 
-  // Cumulative OUTPUT time at each source frame: dt_out = dt_src / speed.
-  const cum = new Array<number>(srcFrames);
-  cum[0] = 0;
-  for (let f = 1; f < srcFrames; f++) {
-    const dt = clip.times[f] - clip.times[f - 1];
-    const mid = (clip.times[f] + clip.times[f - 1]) / 2;
-    cum[f] = cum[f - 1] + dt / Math.max(0.05, speedAt(keys, mid));
-  }
+  const cum = buildCum(clip.times, keys);
   const outDuration = cum[srcFrames - 1];
   const avgFps = (srcFrames - 1) / Math.max(1e-6, clip.duration);
   const outFrames = Math.max(2, Math.round(outDuration * avgFps) + 1);

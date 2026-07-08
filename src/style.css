@@ -6,6 +6,7 @@
   --text: #e8eaee;
   --text-dim: #9aa1ad;
   --accent: #6ea8ff;
+  --logo-accent: #f5b301;
   --error: #ff7b72;
   font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
 }
@@ -41,35 +42,32 @@ body {
   border-bottom: 1px solid var(--border);
 }
 
+/* Self-hosted so the app makes no external font request (offline-friendly,
+   matches the "nothing leaves your browser" promise). Latin subset only. */
+@font-face {
+  font-family: "Krona One";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("/fonts/krona-one.woff2") format("woff2");
+}
+
+/* One font for the whole wordmark; WRY vs Animator is a colour change only —
+   no skew or background-clip, so no glyph ever gets cut off. */
 .logo {
   display: inline-flex;
   align-items: baseline;
-  font-weight: 700;
+  font-family: "Krona One", system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-weight: 400;
+  letter-spacing: 0;
   user-select: none;
 }
 
-/* Wild JoJo-style "WRY": condensed impact face, italic skew, gold gradient. */
 .logo-wry {
-  font-family: Impact, "Haettenschweiler", "Arial Narrow Bold", sans-serif;
-  font-weight: 900;
-  font-style: italic;
-  font-size: 1.18em;
-  letter-spacing: 0.02em;
-  transform: skewX(-7deg);
-  transform-origin: bottom left;
-  background: linear-gradient(180deg, #ffe7a0 0%, #ffc030 52%, #d97b0c 100%);
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
-  filter: drop-shadow(1px 1.5px 0 rgba(0, 0, 0, 0.5));
-  margin-right: 0.14em;
+  color: var(--logo-accent);
 }
 
-/* Clean, understated companion word. */
 .logo-anim {
-  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
-  font-weight: 600;
-  letter-spacing: 0.005em;
   color: var(--text);
 }
 
@@ -104,13 +102,30 @@ main:has(.loaded-state:not([hidden])) {
   align-items: stretch;
 }
 
-.empty-state {
+/* Empty-scene prompt: floats over the viewport grid (the app boots straight
+   into the editor, DCC style); pointer-events pass through outside the cards
+   so the camera still orbits behind it. */
+.viewport-empty {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 2rem;
-  width: 100%;
-  max-width: 34rem;
+  justify-content: center;
+  gap: 1.6rem;
+  pointer-events: none;
+}
+
+.viewport-empty .hero,
+.viewport-empty .dropzone,
+.viewport-empty .open-btn {
+  pointer-events: auto;
+}
+
+.viewport-empty .button.open-btn {
+  width: auto;
+  padding: 0.5rem 1.4rem;
 }
 
 .hero {
@@ -123,13 +138,13 @@ main:has(.loaded-state:not([hidden])) {
 }
 
 .dropzone {
-  width: 100%;
+  width: min(30rem, 85%);
   border: 2px dashed var(--border);
   border-radius: 12px;
   padding: 3rem 1.5rem;
   text-align: center;
   cursor: pointer;
-  background: var(--bg-raise);
+  background: rgba(21, 24, 30, 0.88);
   transition: border-color 0.15s, background 0.15s;
 }
 
@@ -153,6 +168,28 @@ main:has(.loaded-state:not([hidden])) {
 
 .error-text {
   color: var(--error);
+}
+
+/* Floating error toast (the editor is always on screen; click dismisses). */
+.app-error {
+  position: fixed;
+  left: 1rem;
+  bottom: 3.2rem;
+  z-index: 40;
+  max-width: min(40rem, 90vw);
+  margin: 0;
+  padding: 0.55rem 0.9rem;
+  background: #2a151a;
+  border: 1px solid #7a2f3a;
+  border-radius: 8px;
+  cursor: pointer;
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.45);
+}
+
+/* Toolbar hint in the empty editor. */
+.eb-hint {
+  color: var(--text-dim);
+  font-size: 0.85rem;
 }
 
 /* ---- editor suite: toolbar / viewport+dock / timeline -------------------- */

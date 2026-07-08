@@ -13,7 +13,7 @@ import {
 import { worldFromLocal, type FramePose } from "./convert/fk.ts";
 import { vsub, vadd, vlen, vnorm, quatFromTo } from "./convert/ik.ts";
 import { applyModifiers, defaultModifiers, applyReach, anyReach } from "./rig/modifiers.ts";
-import { applyTimeWarp, type WarpKey } from "./rig/timewarp.ts";
+import { applyTimeWarp, warpMaps, type WarpKey } from "./rig/timewarp.ts";
 import { quatMul, quatDot, quatNormalize, quatToEulerZYX, eulerZYXToQuat, RAD2DEG } from "./convert/quat.ts";
 import type { CurveEase } from "./ui/curves.ts";
 import type { Vec3, Quat } from "./wanim/parse.ts";
@@ -25,10 +25,10 @@ import { augmentFaceForVrm } from "./convert/vrmFaceMap.ts";
 import { sanitizeFilename, downloadBytes } from "./fbx/export.ts";
 import { PreviewScene } from "./preview/scene.ts";
 import { loadFaceMeshData } from "./preview/face.ts";
-import { createTransport, type Transport } from "./ui/transport.ts";
+import { createTransport, type Transport, type TransportKeyMarker } from "./ui/transport.ts";
+import { saveLastSession, loadLastSession, clearLastSession } from "./session.ts";
 
-const emptyState = document.getElementById("empty-state") as HTMLElement;
-const loadedState = document.getElementById("loaded-state") as HTMLElement;
+const emptyState = document.getElementById("empty-state") as HTMLElement; // drop-prompt overlay in the viewport
 const dropzone = document.getElementById("dropzone") as HTMLElement;
 const fileInput = document.getElementById("file-input") as HTMLInputElement;
 const errorEl = document.getElementById("empty-error") as HTMLElement;
@@ -48,23 +48,38 @@ let rigHotkeys: {
   mode(m: "translate" | "rotate"): void;
   toggleSpace(): void;
 } | null = null;
+/** Transport keys (Space, ←/→, Home/End), set alongside rigHotkeys per panel. */
+let transportHotkeys: {
+  toggle(): void;
+  step(frames: number): void;
+  home(): void;
+  end(): void;
+} | null = null;
 document.addEventListener("keydown", (e) => {
-  if (!rigHotkeys) return;
   const tgt = e.target as HTMLElement | null;
   const inField = !!tgt && (tgt.tagName === "INPUT" || tgt.tagName === "SELECT" || tgt.tagName === "TEXTAREA");
   if (e.ctrlKey || e.metaKey) {
+    // In a text field the browser's own editing shortcuts (incl. text undo)
+    // must win — hijacking Ctrl+Z there silently destroyed rig edits.
+    if (inField || !rigHotkeys) return;
     const k = e.key.toLowerCase();
     if (k === "z" && !e.shiftKey) { e.preventDefault(); rigHotkeys.undo(); }
     else if (k === "y" || (k === "z" && e.shiftKey)) { e.preventDefault(); rigHotkeys.redo(); }
-    else if (k === "c" && !inField) rigHotkeys.copy();
-    else if (k === "v" && !inField) rigHotkeys.paste();
+    else if (k === "c") rigHotkeys.copy();
+    else if (k === "v") rigHotkeys.paste();
   } else if (!inField) {
-    // Standard DCC manipulation keys: Q space, W move, E rotate.
+    // Standard DCC manipulation keys: Q space, W move, E rotate; standard
+    // transport keys: Space play/pause, ←/→ frame step (shift = ×10).
     const k = e.key.toLowerCase();
-    if (e.key === "Delete") rigHotkeys.del();
-    else if (k === "w") rigHotkeys.mode("translate");
-    else if (k === "e") rigHotkeys.mode("rotate");
-    else if (k === "q") rigHotkeys.toggleSpace();
+    if (e.key === "Delete") rigHotkeys?.del();
+    else if (k === "w") rigHotkeys?.mode("translate");
+    else if (k === "e") rigHotkeys?.mode("rotate");
+    else if (k === "q") rigHotkeys?.toggleSpace();
+    else if (e.key === " ") { e.preventDefault(); transportHotkeys?.toggle(); }
+    else if (e.key === "ArrowLeft") { e.preventDefault(); transportHotkeys?.step(e.shiftKey ? -10 : -1); }
+    else if (e.key === "ArrowRight") { e.preventDefault(); transportHotkeys?.step(e.shiftKey ? 10 : 1); }
+    else if (e.key === "Home") { e.preventDefault(); transportHotkeys?.home(); }
+    else if (e.key === "End") { e.preventDefault(); transportHotkeys?.end(); }
   }
 });
 
@@ -135,16 +150,49 @@ let loaded: {
   display: ConvertedClip;
 } | null = null;
 
+/** Error toast (the editor is always on screen now, so errors float). */
+let errorTimer = 0;
 function showError(message: string) {
   errorEl.textContent = message;
   errorEl.hidden = false;
+  clearTimeout(errorTimer);
+  errorTimer = window.setTimeout(() => { errorEl.hidden = true; }, 10000);
 }
+errorEl.addEventListener("click", () => { errorEl.hidden = true; });
 
 
 function fmtTime(seconds: number): string {
   const m = Math.floor(seconds / 60);
   const s = seconds - m * 60;
   return `${m}:${s.toFixed(2).padStart(5, "0")}`;
+}
+
+/**
+ * ZYX euler triples for a rot-key list, unwrapped for DISPLAY: each key picks
+ * the representation (canonical, or the (x+π, π−y, z+π) alternate, plus ±2π
+ * per-axis shifts) closest to the previous key, so equivalent rotations don't
+ * draw as ±180° curve jumps. eulerZYXToQuat is 2π-periodic and representation-
+ * blind, so editing an unwrapped value round-trips to the same rotation.
+ */
+function unwrapEulerKeys(keys: Array<{ q: Quat }>): Vec3[] {
+  const out: Vec3[] = [];
+  let prev: Vec3 | null = null;
+  for (const k of keys) {
+    let e = quatToEulerZYX(k.q);
+    if (prev) {
+      const p = prev;
+      const near = (v: number, ref: number) => v + 2 * Math.PI * Math.round((ref - v) / (2 * Math.PI));
+      const cand = (v: Vec3): Vec3 => [near(v[0], p[0]), near(v[1], p[1]), near(v[2], p[2])];
+      const alt: Vec3 = [e[0] + Math.PI, Math.PI - e[1], e[2] + Math.PI];
+      const c1 = cand(e);
+      const c2 = cand(alt);
+      const dist = (v: Vec3) => Math.abs(v[0] - p[0]) + Math.abs(v[1] - p[1]) + Math.abs(v[2] - p[2]);
+      e = dist(c2) < dist(c1) ? c2 : c1;
+    }
+    out.push(e);
+    prev = e;
+  }
+  return out;
 }
 
 function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
@@ -180,6 +228,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
       <button id="rigSpace" class="eb-btn" title="Gizmo axes: Local follows the bone, World uses the scene axes (Q toggles).">Local</button>
     </div>
     <button id="compare" class="eb-btn compare" title="Press and hold to see the recording without any cleaning or rig edits, so you can judge what changed.">Hold: original</button>
+    <button id="ghostBtn" class="eb-btn" title="Overlay the original (uncleaned) recording as a grey ghost skeleton, so you can see what the cleanup changed while you edit.">Ghost</button>
     <span class="eb-spacer"></span>
     <input id="outName" class="eb-name" type="text" spellcheck="false" title="Base name for exported files (e.g. myclip-clean → myclip-clean.fbx)" />
     <select id="format" aria-label="Export format" title="FBX for MotionBuilder/Maya/Blender; VRMA for Warudo/VSeeFace/Unity; WANIM back into Warudo.">
@@ -483,6 +532,52 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
 
   const cleanStatsEl = document.getElementById("cleanStats") as HTMLParagraphElement;
 
+  // ---- pipeline settings in undo ------------------------------------------
+  // Cleaning toggles/sliders (+ proportions + spine spread) change the motion
+  // just like rig edits do, so they ride in the same undo snapshots.
+  const pipelineSettings = () => ({
+    clean: cleanOpts(),
+    proportions: propSel.value,
+    distSpine: distSpineChk.checked,
+    distSpineAmt: distSpineAmt.value,
+  });
+  type PipelineSettings = ReturnType<typeof pipelineSettings>;
+  let prevPipelineJson = JSON.stringify(pipelineSettings());
+
+  function applyCleanUi(c: CleanOpts) {
+    fixFeetChk.checked = c.fixFeet ?? true;
+    limitWristsChk.checked = c.limitWrists ?? true;
+    lockWristsSel.value = c.lockWrists ?? "";
+    limitLowerArmsChk.checked = c.limitLowerArms ?? true;
+    lockLowerArmSel.value = c.lockLowerArmTwist ?? "";
+    despikeChk.checked = !!c.despike;
+    if (c.despikeDeg) { despikeDeg.value = String(c.despikeDeg); despikeVal.value = `${despikeDeg.value}°`; }
+    smoothChk.checked = !!c.smooth;
+    if (c.cutoffHz) { cutoff.value = String(c.cutoffHz); cutoffVal.value = `${cutoff.value} Hz`; }
+  }
+
+  function applyPipelineUi(p: PipelineSettings) {
+    applyCleanUi(p.clean);
+    propSel.value = p.proportions;
+    distSpineChk.checked = p.distSpine;
+    distSpineAmt.disabled = !p.distSpine;
+    distSpineAmt.value = p.distSpineAmt;
+    distSpineAmtVal.value = `${p.distSpineAmt}%`;
+    prevPipelineJson = JSON.stringify(pipelineSettings());
+  }
+
+  /**
+   * Undo entry for a pipeline-control change. The DOM has already flipped by
+   * the time `change` fires, so the snapshot swaps in the PRE-change settings
+   * tracked in prevPipelineJson.
+   */
+  function pushPipelineHistory() {
+    const snap = JSON.parse(rigSnapshot()) as Record<string, unknown>;
+    snap.pipeline = JSON.parse(prevPipelineJson);
+    pushHistorySnap(JSON.stringify(snap));
+    prevPipelineJson = JSON.stringify(pipelineSettings());
+  }
+
   /**
    * Build the display clip: cleaning (unless skipped — the compare button
    * shows the uncleaned motion), then proportions + spine distribution so
@@ -498,8 +593,26 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     const source = applyTimeWarp(loaded.converted, warpKeys);
     let display = withCleaning && anyFilter ? cleanClip(source, opts, stats) : source;
     if (withCleaning) for (const r of rangeSmooths) display = smoothRange(display, r);
-    // Report what the filters actually changed — proof they're applied.
+    // Report what the filters actually changed — proof they're applied — and
+    // collect the touched frames as timeline tick marks so they're findable.
+    // Consecutive corrected frames compress to ONE mark at the run start (a
+    // foot plant pins hundreds of frames — that's one event, not a smear).
     if (withCleaning) {
+      const t0 = source.times[0];
+      const marks: Array<{ time: number; color: string }> = [];
+      const runStarts = (frames: Iterable<number>): number[] => {
+        const s = new Set(frames);
+        return [...s].filter((f) => !s.has(f - 1)).sort((a, b) => a - b);
+      };
+      const ff = stats.fixedFrames;
+      if (ff) {
+        for (const f of runStarts(ff.limit)) marks.push({ time: source.times[f] - t0, color: "#b48cff" });
+        for (const f of runStarts(ff.despike)) marks.push({ time: source.times[f] - t0, color: "#ffb020" });
+      }
+      if (stats.feet?.fixedFrames) {
+        for (const f of runStarts(stats.feet.fixedFrames)) marks.push({ time: source.times[f] - t0, color: "#3fc1ff" });
+      }
+      cleanMarks = marks;
       if (!anyFilter) {
         cleanStatsEl.textContent = "";
       } else {
@@ -563,6 +676,14 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
   const warpKeys: WarpKey[] = []; // time-warp speed ramp (source-time keys)
   const rangeSmooths: RangeSmooth[] = []; // user-applied range smoothing passes
   let rawRefCache: { gen: number; clip: ConvertedClip } | null = null; // reach reference
+  let ghostOn = false; // grey uncleaned-skeleton overlay
+  let cleanMarks: Array<{ time: number; color: string }> = []; // filter tick marks
+  /**
+   * Trim/playhead to apply AFTER the next reclean. The transport is rebuilt
+   * (trim reset) whenever a warp changes the duration, so restores from scene
+   * files and warp-edit remaps must land after that rebuild, not before.
+   */
+  let pendingViewRestore: { trim?: { start: number; end: number }; time?: number; pause?: boolean } | null = null;
 
   async function reclean() {
     if (!loaded || !preview) return;
@@ -574,7 +695,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     // fixed at creation, so rebuild it (trim resets; keys re-attach below).
     if (transport && Math.abs(display.duration - transportDuration) > 0.01) {
       transport.dispose();
-      transport = createTransport(preview, display.duration);
+      transport = createTransport(preview, display.duration, display.times.length);
       timelineDock.appendChild(transport.element);
       transportDuration = display.duration;
       wireTransportScene(); // fresh bar needs its Save…/Open… buttons wired
@@ -585,9 +706,25 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
       preview.setClip(display, true); // same recording: keep camera + playback position
       if (trim) preview.setTrim(trim.start, trim.end); // keep the user's trim
     }
+    transport?.setMarks(cleanMarks);
+    // Deferred trim/playhead (scene load, warp remap) — after any rebuild.
+    if (pendingViewRestore) {
+      const pv = pendingViewRestore;
+      pendingViewRestore = null;
+      if (pv.trim) transport?.setTrim(pv.trim.start, pv.trim.end);
+      if (pv.time !== undefined) {
+        if (pv.pause) preview.pause();
+        preview.seek(pv.time);
+      }
+    }
     saveRigCache();
-    // Prebuild the uncleaned version so holding Compare swaps instantly.
-    void buildDisplay(false).then((b) => { if (gen === compareGen) compareBase = b; }).catch(() => {});
+    // Prebuild the uncleaned version so holding Compare swaps instantly (it
+    // also feeds the ghost overlay, which points at the stale clip until then).
+    void buildDisplay(false).then((b) => {
+      if (gen !== compareGen) return;
+      compareBase = b;
+      if (ghostOn) preview?.setGhost(b);
+    }).catch(() => {});
   }
 
   // Hold-to-compare: show the recording without cleaning while pressed. The
@@ -619,6 +756,22 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     compareBtn.addEventListener(ev, endCompare);
   }
 
+  // Ghost toggle: the uncleaned recording as a grey overlay skeleton, playing
+  // in lockstep — the "before" stays visible WHILE posing/cleaning.
+  const ghostBtn = document.getElementById("ghostBtn") as HTMLButtonElement;
+  ghostBtn.addEventListener("click", () => {
+    ghostOn = !ghostOn;
+    ghostBtn.classList.toggle("active", ghostOn);
+    if (!ghostOn) {
+      preview?.setGhost(null);
+      return;
+    }
+    void (async () => {
+      compareBase ??= await buildDisplay(false);
+      if (ghostOn) preview?.setGhost(compareBase);
+    })();
+  });
+
   // ---- control rig -------------------------------------------------------
   // (rigLayers/rigBaseClip are declared with the pipeline state above the
   // compare block; the closures in buildDisplay/export read them.)
@@ -641,7 +794,10 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
   const undoStack: string[] = [];
   const redoStack: string[] = [];
   const rigSnapshot = () =>
-    JSON.stringify({ layers: rigLayers, mods, counter: layerCounter, active: activeLayerIdx, warp: warpKeys, ranges: rangeSmooths });
+    JSON.stringify({
+      layers: rigLayers, mods, counter: layerCounter, active: activeLayerIdx,
+      warp: warpKeys, ranges: rangeSmooths, pipeline: pipelineSettings(),
+    });
   function updateUndoUi() {
     rigUndoBtn.disabled = !undoStack.length;
     rigRedoBtn.disabled = !redoStack.length;
@@ -662,15 +818,18 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
       active: number;
       warp?: WarpKey[];
       ranges?: RangeSmooth[];
+      pipeline?: PipelineSettings;
     };
     const pipelineChanged =
       JSON.stringify(mods) !== JSON.stringify(d.mods) ||
       JSON.stringify(warpKeys) !== JSON.stringify(d.warp ?? []) ||
-      JSON.stringify(rangeSmooths) !== JSON.stringify(d.ranges ?? []);
+      JSON.stringify(rangeSmooths) !== JSON.stringify(d.ranges ?? []) ||
+      (!!d.pipeline && JSON.stringify(d.pipeline) !== JSON.stringify(pipelineSettings()));
     rigLayers.splice(0, rigLayers.length, ...d.layers);
     Object.assign(mods, defaultModifiers(), d.mods);
     warpKeys.splice(0, warpKeys.length, ...(d.warp ?? []));
     rangeSmooths.splice(0, rangeSmooths.length, ...(d.ranges ?? []));
+    if (d.pipeline) applyPipelineUi(d.pipeline);
     layerCounter = d.counter;
     activeLayerIdx = Math.min(d.active, rigLayers.length - 1);
     syncAdjustUi();
@@ -778,6 +937,19 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     toggleSpace: () => setGizmoSpaceUi(preview?.getGizmoSpace() === "local" ? "world" : "local"),
   };
 
+  transportHotkeys = {
+    toggle: () => preview?.togglePlay(),
+    step: (n) => {
+      if (!preview || !loaded) return;
+      const clip = loaded.display;
+      const dt = clip.duration / Math.max(1, clip.times.length - 1);
+      preview.pause();
+      preview.seek(preview.getTime() + n * dt);
+    },
+    home: () => { preview?.pause(); preview?.seek(transport?.getTrim().start ?? 0); },
+    end: () => { preview?.pause(); preview?.seek(transport?.getTrim().end ?? 0); },
+  };
+
   /**
    * Rebake layers onto the (unchanged) base, IN PLACE in the display clip the
    * preview is already playing — no setClip, no body/face rebuild. `dirty`
@@ -832,7 +1004,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     // Timeline markers for the active layer (cleared when there is none).
     // Tracks are keyed by bone; each maps 1:1 to the effector that edits it.
     const trackEff = (tr: { bone: string }) => effectorForBone(tr.bone)?.id;
-    const markers = layer
+    const rawMarkers = layer
       ? layer.tracks.flatMap((tr) => {
           const eff = trackEff(tr);
           if (!eff) return [];
@@ -845,8 +1017,49 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
           }));
         })
       : [];
+    // Collapse co-timed keys ("Key pose" writes the whole rig at one frame)
+    // into a single white pose marker; click/drag acts on all of them.
+    const POSE = "__pose__";
+    const byTime = new Map<number, TransportKeyMarker[]>();
+    for (const m of rawMarkers) {
+      const q = Math.round(m.time * 240);
+      const arr = byTime.get(q);
+      if (arr) arr.push(m);
+      else byTime.set(q, [m]);
+    }
+    const markers: TransportKeyMarker[] = [];
+    for (const group of byTime.values()) {
+      if (group.length < 3) markers.push(...group);
+      else
+        markers.push({
+          time: group[0].time,
+          color: "#e8ecf4",
+          selected: group.some((m) => m.selected),
+          picked: group.some((m) => m.picked),
+          tag: POSE,
+        });
+    }
+    /** Every effector with a key at this exact time (pose-marker targets). */
+    const keysAtTime = (t: number): PickedKey[] =>
+      layer
+        ? layer.tracks.flatMap((tr) => {
+            const eff = trackEff(tr);
+            return eff && keyTimes(tr).some((kt) => Math.abs(kt - t) < 1e-3)
+              ? [{ effector: eff, time: t }]
+              : [];
+          })
+        : [];
     const keyCbs = {
       onClick: (m, ctrl) => {
+        if (m.tag === POSE) {
+          // Pose marker: (ctrl-)select every key at this time as one unit.
+          const at = keysAtTime(m.time);
+          const others = pickedKeys.filter((p) => Math.abs(p.time - m.time) > 1e-3);
+          const allPicked = at.every((p) => isPicked(p.effector, p.time));
+          pickedKeys = ctrl ? (allPicked ? others : [...others, ...at]) : at;
+          updateRigEditor();
+          return;
+        }
         const eff = m.tag as EffectorId;
         if (ctrl) {
           // Ctrl-click toggles the key in/out of the selection.
@@ -862,13 +1075,16 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
       onRetime: (m, newTime) => {
         const lay = rigLayers[activeLayerIdx];
         if (!lay || !rigBaseClip) return;
-        const eff = m.tag as EffectorId;
         pushHistory();
         // Dragging a key that's part of the selection slides the WHOLE
-        // selection by the same amount; each key's value is reconverted so
-        // the pose it produced travels with it.
-        const inGroup = isPicked(eff, m.time) && pickedKeys.length > 1;
-        const moves = inGroup ? pickedKeys.map((p) => ({ ...p })) : [{ effector: eff, time: m.time }];
+        // selection by the same amount; a pose marker slides every key at its
+        // time. Local key values travel correctly as-is.
+        const eff = m.tag as EffectorId;
+        const inGroup = m.tag !== POSE && isPicked(eff, m.time) && pickedKeys.length > 1;
+        const moves =
+          m.tag === POSE ? keysAtTime(m.time)
+          : inGroup ? pickedKeys.map((p) => ({ ...p }))
+          : [{ effector: eff, time: m.time }];
         const dt = newTime - m.time;
         // Move in an order that can't collide with not-yet-moved members.
         // Local-space key values travel correctly as-is.
@@ -890,8 +1106,9 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
         updateRigEditor();
       },
       onContext: (m, x, y) => {
-        if (!isPicked(m.tag as EffectorId, m.time)) {
-          pickedKeys = [{ effector: m.tag as EffectorId, time: m.time }];
+        const at = m.tag === POSE ? keysAtTime(m.time) : [{ effector: m.tag as EffectorId, time: m.time }];
+        if (!at.every((p) => isPicked(p.effector, p.time))) {
+          pickedKeys = at;
           updateRigEditor();
         }
         showCtxMenu(x, y, keyContextItems());
@@ -958,6 +1175,9 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     if (curveTrack && (curveTrack.posKeys.length || curveTrack.rotKeys.length)) {
       const def = effectorDef(selectedEffector!);
       const axisColor = ["#ff6b6b", "#7dda6b", "#6bb1ff"];
+      // Unwrapped display eulers: equivalent representations don't draw as
+      // ±180° jumps between keys (the underlying quats are untouched).
+      const rotEulers = unwrapEulerKeys(curveTrack.rotKeys);
       const channels = [
         ...(def.bone === "Hips" // position keys live on the hips track only
           ? [0, 1, 2].map((axis) => ({
@@ -973,7 +1193,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
           axis: axis as 0 | 1 | 2,
           label: `rot ${"XYZ"[axis]} (°)`,
           color: axisColor[axis],
-          keys: curveTrack.rotKeys.map((k) => ({ time: k.time, value: quatToEulerZYX(k.q)[axis] * RAD2DEG, ease: (k.ease ?? "linear") as CurveEase })),
+          keys: curveTrack.rotKeys.map((k, ki) => ({ time: k.time, value: rotEulers[ki][axis] * RAD2DEG, ease: (k.ease ?? "linear") as CurveEase })),
         })),
       ];
       transport?.setCurves(
@@ -988,11 +1208,14 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
               const k = tr.posKeys.find((kk) => Math.abs(kk.time - time) < 1e-3);
               if (k) k.v[axis] = value / 100;
             } else {
-              const k = tr.rotKeys.find((kk) => Math.abs(kk.time - time) < 1e-3);
-              if (k) {
-                const e = quatToEulerZYX(k.q);
+              const ki = tr.rotKeys.findIndex((kk) => Math.abs(kk.time - time) < 1e-3);
+              if (ki >= 0) {
+                // Edit against the DISPLAYED (unwrapped) triple — mixing the
+                // dragged axis into the canonical extraction would silently
+                // switch euler representations and warp the rotation.
+                const e = unwrapEulerKeys(tr.rotKeys)[ki];
                 e[axis] = value / RAD2DEG;
-                k.q = eulerZYXToQuat(e);
+                tr.rotKeys[ki].q = eulerZYXToQuat(e);
               }
             }
             rebakeRig(dirtyRange(lay, tr, time)); // live — the graph redraws itself
@@ -1272,7 +1495,13 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     const t = preview.getTime();
     const near = keyTimes(track).reduce<number | null>(
       (best, k) => (best === null || Math.abs(k - t) < Math.abs(best - t) ? k : best), null);
-    if (near === null || Math.abs(near - t) > 0.5) return; // nothing near the playhead
+    // Frame-accurate like a DCC: only delete a key AT the playhead — the old
+    // half-second grab silently ate keys the user wasn't looking at.
+    const frameDt = rigBaseClip ? rigBaseClip.duration / Math.max(1, rigBaseClip.times.length - 1) : 1 / 60;
+    if (near === null || Math.abs(near - t) > Math.max(frameDt * 1.5, 1 / 60)) {
+      rigSelEl.textContent = "No key at the playhead — step to it with ←/→ or click its diamond first.";
+      return;
+    }
     pushHistory();
     const dirty = dirtyRange(layer, track, near);
     deleteKeysAt(track, near, 1 / 120);
@@ -1417,6 +1646,40 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
 
   const warpChipsEl = document.getElementById("warpChips") as HTMLDivElement;
   const warpSpeedSel = document.getElementById("warpSpeed") as HTMLSelectElement;
+
+  /**
+   * Layer keys, range smooths, trim, and the playhead all live on the WARPED
+   * timeline. When the warp itself changes, translate every stored time
+   * old-warp → source → new-warp so corrections stay glued to the same
+   * motion instead of silently landing on different frames. Trim + playhead
+   * ride along via pendingViewRestore (applied after the transport rebuild).
+   */
+  function remapForWarpChange(oldWarp: WarpKey[], newWarp: WarpKey[]) {
+    if (!loaded) return;
+    const times = loaded.converted.times;
+    const oldM = warpMaps(times, oldWarp);
+    const newM = warpMaps(times, newWarp);
+    const re = (t: number) => newM.outOf(oldM.srcOf(t));
+    for (const layer of rigLayers) {
+      for (const tr of layer.tracks) {
+        for (const k of tr.posKeys) k.time = re(k.time);
+        for (const k of tr.rotKeys) k.time = re(k.time);
+        tr.posKeys.sort((a, b) => a.time - b.time);
+        tr.rotKeys.sort((a, b) => a.time - b.time);
+      }
+    }
+    for (const r of rangeSmooths) {
+      r.t0 = re(r.t0);
+      r.t1 = re(r.t1);
+    }
+    pickedKeys = pickedKeys.map((p) => ({ ...p, time: re(p.time) }));
+    const trim = transport?.getTrim();
+    pendingViewRestore = {
+      trim: trim ? { start: re(trim.start), end: re(trim.end) } : undefined,
+      time: re(preview?.getTime() ?? 0),
+    };
+  }
+
   function renderWarpChips() {
     warpChipsEl.innerHTML = "";
     for (const k of [...warpKeys].sort((a, b) => a.time - b.time)) {
@@ -1430,7 +1693,9 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
       del.title = "Remove this speed key";
       del.addEventListener("click", () => {
         pushHistory();
+        const oldWarp = warpKeys.map((kk) => ({ ...kk }));
         warpKeys.splice(warpKeys.indexOf(k), 1);
+        remapForWarpChange(oldWarp, warpKeys);
         renderWarpChips();
         void reclean();
       });
@@ -1441,14 +1706,16 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
   (document.getElementById("warpAdd") as HTMLButtonElement).addEventListener("click", () => {
     if (!preview || !loaded) return;
     pushHistory();
-    // Warp keys are in SOURCE time; map the current (warped) playhead back.
-    // Approximation: use the playhead fraction of the current duration.
-    const frac = transportDuration > 0 ? preview.getTime() / transportDuration : 0;
-    const srcT = frac * loaded.converted.duration;
+    // Warp keys are in SOURCE time: invert the exact warp map at the playhead
+    // (a linear fraction is wrong once any non-1× key exists — the map is
+    // nonlinear, and the key would land on the wrong motion).
+    const srcT = warpMaps(loaded.converted.times, warpKeys).srcOf(preview.getTime());
     const speed = Number(warpSpeedSel.value);
+    const oldWarp = warpKeys.map((k) => ({ ...k }));
     const near = warpKeys.find((k) => Math.abs(k.time - srcT) < 0.25);
     if (near) near.speed = speed;
     else warpKeys.push({ time: srcT, speed });
+    remapForWarpChange(oldWarp, warpKeys);
     renderWarpChips();
     void reclean();
   });
@@ -1515,9 +1782,11 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     const dirty = modInputs.some((m) => mods[m.key] !== 0) || mods.mirror || anyReach(mods) || warpKeys.length || rangeSmooths.length;
     if (!dirty) return;
     pushHistory();
+    const oldWarp = warpKeys.map((k) => ({ ...k }));
     Object.assign(mods, defaultModifiers());
     warpKeys.length = 0;
     rangeSmooths.length = 0;
+    remapForWarpChange(oldWarp, warpKeys); // layer keys back onto the unwarped timeline
     syncAdjustUi();
     void reclean();
   });
@@ -1526,14 +1795,16 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
   cutoffVal.value = `${cutoff.value} Hz`;
   despikeDeg.addEventListener("input", () => { despikeVal.value = `${despikeDeg.value}°`; });
   cutoff.addEventListener("input", () => { cutoffVal.value = `${cutoff.value} Hz`; });
-  for (const c of [despikeChk, smoothChk, limitWristsChk, limitLowerArmsChk, fixFeetChk, distSpineChk]) c.addEventListener("change", () => void reclean());
-  for (const r of [despikeDeg, cutoff, distSpineAmt]) r.addEventListener("change", () => void reclean());
+  // Pipeline controls change the motion, so they push undo like rig edits do.
+  const recleanWithHistory = () => { pushPipelineHistory(); void reclean(); };
+  for (const c of [despikeChk, smoothChk, limitWristsChk, limitLowerArmsChk, fixFeetChk, distSpineChk]) c.addEventListener("change", recleanWithHistory);
+  for (const r of [despikeDeg, cutoff, distSpineAmt]) r.addEventListener("change", recleanWithHistory);
   distSpineAmtVal.value = `${distSpineAmt.value}%`;
   distSpineAmt.addEventListener("input", () => { distSpineAmtVal.value = `${distSpineAmt.value}%`; });
   distSpineChk.addEventListener("change", () => { distSpineAmt.disabled = !distSpineChk.checked; });
-  propSel.addEventListener("change", () => void reclean());
-  lockWristsSel.addEventListener("change", () => void reclean());
-  lockLowerArmSel.addEventListener("change", () => void reclean());
+  propSel.addEventListener("change", recleanWithHistory);
+  lockWristsSel.addEventListener("change", recleanWithHistory);
+  lockLowerArmSel.addEventListener("change", recleanWithHistory);
 
   const bodyFile = document.getElementById("bodyfile") as HTMLInputElement;
   let lastBodyChoice = bodySel.value;
@@ -1660,6 +1931,14 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     }
   } catch { /* corrupt cache — start clean */ }
 
+  // Session auto-restore note (once): the boot reopened the last recording.
+  if (restoredSessionName) {
+    restoredSessionName = null;
+    rigCacheNote.textContent =
+      `Reopened your last session${rigCacheNote.textContent ? " — edits restored" : ""}. ` +
+      `"Load another file" (Info tab) closes it.`;
+  }
+
   (document.getElementById("rigSave") as HTMLButtonElement).addEventListener("click", () => {
     if (!loaded) return;
     const json = JSON.stringify(
@@ -1707,16 +1986,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
 
   function applyScene(s?: Record<string, unknown>) {
     if (!s) return;
-    const c = (s.clean ?? {}) as CleanOpts;
-    fixFeetChk.checked = c.fixFeet ?? true;
-    limitWristsChk.checked = c.limitWrists ?? true;
-    lockWristsSel.value = c.lockWrists ?? "";
-    limitLowerArmsChk.checked = c.limitLowerArms ?? true;
-    lockLowerArmSel.value = c.lockLowerArmTwist ?? "";
-    despikeChk.checked = !!c.despike;
-    if (c.despikeDeg) { despikeDeg.value = String(c.despikeDeg); despikeVal.value = `${despikeDeg.value}°`; }
-    smoothChk.checked = !!c.smooth;
-    if (c.cutoffHz) { cutoff.value = String(c.cutoffHz); cutoffVal.value = `${cutoff.value} Hz`; }
+    applyCleanUi((s.clean ?? {}) as CleanOpts);
     if (s.fps) fpsSel.value = String(s.fps);
     if (typeof s.names === "string") namesSel.value = s.names;
     if (typeof s.rest === "string") restSel.value = s.rest;
@@ -1730,12 +2000,13 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
       bodySel.value = s.body;
       preview?.setBodyMode(s.body === "none" ? "none" : "human");
     }
+    prevPipelineJson = JSON.stringify(pipelineSettings());
+    // Trim + playhead apply AFTER the coming reclean: a scene with a time
+    // warp rebuilds the transport (which resets trim), so restoring here
+    // would be clamped against the wrong duration and then thrown away.
     const trim = s.trim as { start: number; end: number } | undefined;
-    if (trim) transport?.setTrim(trim.start, trim.end);
-    if (typeof s.time === "number") {
-      preview?.pause();
-      preview?.seek(s.time);
-    }
+    const time = typeof s.time === "number" ? s.time : undefined;
+    if (trim || time !== undefined) pendingViewRestore = { trim, time, pause: true };
   }
 
   /** One button, whole work project: recording + edits + settings + assets. */
@@ -1880,14 +2151,53 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
   });
 
   resetBtn.addEventListener("click", () => {
-    loadedState.hidden = true;
-    emptyState.hidden = false;
     errorEl.hidden = true;
-    loaded = null;
+    showEmptyEditor();
+    // Explicitly closing the session — a reload shouldn't resurrect it.
+    void clearLastSession();
   });
 }
 
+/**
+ * The editor with no recording: viewport grid + drop prompt overlay,
+ * placeholder toolbar/dock with Open… entry points. Both the boot state and
+ * where "Load another file" returns to.
+ */
+function showEmptyEditor() {
+  loaded = null;
+  rigHotkeys = null;
+  transportHotkeys = null;
+  transport?.dispose();
+  transport = null;
+  preview?.clear();
+  emptyState.hidden = false;
+  editbar.innerHTML = `
+    <span class="eb-hint">No recording loaded</span>
+    <span class="eb-spacer"></span>
+    <button id="ebOpen" class="eb-btn">Open…</button>
+  `;
+  (document.getElementById("ebOpen") as HTMLButtonElement).addEventListener("click", () => fileInput.click());
+  dock.innerHTML = `
+    <div class="dock-body">
+      <div class="tab active">
+        <h2>Start</h2>
+        <p class="note">Open a <code>.wanim</code> recording or a saved
+          <code>.scene.json</code> — or drop one anywhere on the page.</p>
+        <button id="dockOpen" class="button primary">Open a file…</button>
+      </div>
+    </div>
+  `;
+  (document.getElementById("dockOpen") as HTMLButtonElement).addEventListener("click", () => fileInput.click());
+  timelineDock.innerHTML = "";
+}
+
+/** Set the moment the user opens anything — cancels the boot auto-restore. */
+let userOpenedFile = false;
+/** Name of the auto-reopened recording (buildPanel shows a note once). */
+let restoredSessionName: string | null = null;
+
 async function handleFile(file: File) {
+  userOpenedFile = true;
   errorEl.hidden = true;
   const lower = file.name.toLowerCase();
   if (lower.endsWith(".json")) {
@@ -1913,7 +2223,7 @@ async function handleFile(file: File) {
   await loadWanim(file.name, await file.arrayBuffer());
 }
 
-async function loadWanim(name: string, raw: ArrayBuffer) {
+async function loadWanim(name: string, raw: ArrayBuffer, fromRestore = false) {
   try {
     const clip = parseWanim(raw);
     if (clip.characters.length === 0) {
@@ -1924,18 +2234,20 @@ async function loadWanim(name: string, raw: ArrayBuffer) {
     loaded = { name, clip, converted, raw, display: converted };
 
     emptyState.hidden = true;
-    loadedState.hidden = false;
 
     if (!preview) preview = new PreviewScene(viewport);
     (window as unknown as { __preview?: PreviewScene }).__preview = preview; // test hook
     preview.setClip(converted);
 
     transport?.dispose();
-    transport = createTransport(preview, converted.duration);
+    transport = createTransport(preview, converted.duration, converted.times.length);
     transportDuration = converted.duration;
     timelineDock.appendChild(transport.element);
 
     buildPanel(name, clip, converted);
+    // Remember the recording so the next visit reopens it, DCC style (the
+    // edits already auto-save to localStorage keyed by this recording).
+    if (!fromRestore) void saveLastSession(name, raw);
   } catch (err) {
     showError(err instanceof Error ? err.message : String(err));
   }
@@ -1970,3 +2282,17 @@ document.addEventListener("drop", (e) => {
   const file = e.dataTransfer?.files?.[0];
   if (file) void handleFile(file);
 });
+
+// ---- boot: straight into the editor, DCC style -----------------------------
+// The viewport (grid) and chrome are on screen immediately; if a previous
+// session exists it reopens automatically — unless the user opens a file
+// first, which always wins.
+preview = new PreviewScene(viewport);
+(window as unknown as { __preview?: PreviewScene }).__preview = preview;
+showEmptyEditor();
+void (async () => {
+  const last = await loadLastSession();
+  if (!last || userOpenedFile || loaded) return;
+  restoredSessionName = last.name;
+  await loadWanim(last.name, last.bytes, true);
+})();

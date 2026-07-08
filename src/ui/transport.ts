@@ -32,6 +32,12 @@ export interface DopeRow {
   keys: TransportKeyMarker[];
 }
 
+/** A non-interactive tick on the timeline — where a cleaning filter acted. */
+export interface TransportMark {
+  time: number;
+  color: string;
+}
+
 export interface Transport {
   element: HTMLElement;
   getTrim(): { start: number; end: number };
@@ -41,6 +47,8 @@ export interface Transport {
   setSceneActions(cbs: { save(): void; open(): void }): void;
   /** Show rig-layer key markers on the timeline (replaces the previous set). */
   setKeys(markers: TransportKeyMarker[], cbs?: TransportKeyCallbacks): void;
+  /** Correction tick marks along the strip bottom (replaces the previous set). */
+  setMarks(marks: TransportMark[]): void;
   /** Mini dope sheet under the strip: per-effector key rows (empty = hidden). */
   setDope(rows: DopeRow[], cbs?: TransportKeyCallbacks): void;
   /** Curve editor under the strip (null = unavailable). */
@@ -58,8 +66,9 @@ function fmt(seconds: number): string {
 /**
  * Transport bar overlaid on the 3D viewport: play/pause, a click-to-seek
  * timeline with draggable in/out trim handles, and a live playhead.
+ * `frames` (when known) adds a frame counter to the readout.
  */
-export function createTransport(preview: PreviewScene, duration: number): Transport {
+export function createTransport(preview: PreviewScene, duration: number, frames = 0): Transport {
   let trimStart = 0;
   let trimEnd = duration;
   let scrubbing = false;
@@ -68,8 +77,15 @@ export function createTransport(preview: PreviewScene, duration: number): Transp
   el.className = "transport-overlay";
   el.innerHTML = `
     <div class="t-main">
-      <button class="t-btn t-play" aria-label="Play/pause">⏸</button>
+      <button class="t-btn t-play" aria-label="Play/pause" title="Play/pause (Space). ←/→ step a frame, shift for 10.">⏸</button>
+      <select class="t-rate" title="Playback speed (review only — doesn't change the clip)">
+        <option value="0.25">¼×</option>
+        <option value="0.5">½×</option>
+        <option value="1" selected>1×</option>
+        <option value="2">2×</option>
+      </select>
       <div class="t-timeline" role="slider" tabindex="0" aria-label="Timeline and trim">
+        <canvas class="t-marks"></canvas>
         <div class="t-region"></div>
         <div class="t-keys"></div>
         <div class="t-handle t-in" aria-label="Trim start"></div>
@@ -117,16 +133,22 @@ export function createTransport(preview: PreviewScene, duration: number): Transp
 
   let lastTime = 0;
   const currentTime = () => lastTime;
+  const frameOf = (t: number) => (duration > 0 ? Math.round((t / duration) * (frames - 1)) : 0);
   preview.setOnState((s: PlaybackState) => {
     lastTime = s.time;
     playBtn.textContent = s.playing ? "⏸" : "▶";
     playhead.style.left = `${pct(s.time)}%`;
     const len = trimEnd - trimStart;
-    timeText.textContent = `${fmt(s.time)} / ${fmt(duration)}  ·  trim ${fmt(len)}`;
+    const fr = frames > 1 ? `  ·  f ${frameOf(s.time)}/${frames - 1}` : "";
+    timeText.textContent = `${fmt(s.time)} / ${fmt(duration)}${fr}  ·  trim ${fmt(len)}`;
     curveView.setPlayhead(s.time);
   });
 
   playBtn.addEventListener("click", () => preview.togglePlay());
+
+  const rateSel = el.querySelector(".t-rate") as HTMLSelectElement;
+  rateSel.value = String(preview.getRate());
+  rateSel.addEventListener("change", () => preview.setRate(Number(rateSel.value)));
 
   const timeAt = (clientX: number): number => {
     const r = timeline.getBoundingClientRect();
@@ -207,6 +229,35 @@ export function createTransport(preview: PreviewScene, duration: number): Transp
   void scrubbing;
   renderTrim();
   applyTrim();
+
+  // ---- cleaning tick marks -------------------------------------------------
+  // Thin lines along the strip's lower half showing where filters acted; a
+  // canvas because there can be thousands. Non-interactive.
+  const marksCanvas = el.querySelector(".t-marks") as HTMLCanvasElement;
+  let marks: TransportMark[] = [];
+  function drawMarks() {
+    const r = timeline.getBoundingClientRect();
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    marksCanvas.width = Math.max(1, Math.round(r.width * dpr));
+    marksCanvas.height = Math.max(1, Math.round(r.height * dpr));
+    const g = marksCanvas.getContext("2d");
+    if (!g) return;
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    g.clearRect(0, 0, r.width, r.height);
+    if (!marks.length || duration <= 0) return;
+    g.globalAlpha = 0.55;
+    for (const m of marks) {
+      g.fillStyle = m.color;
+      g.fillRect((m.time / duration) * r.width, r.height * 0.6, 1, r.height * 0.4);
+    }
+    g.globalAlpha = 1;
+  }
+  function setMarks(next: TransportMark[]) {
+    marks = next;
+    drawMarks();
+  }
+  const marksRo = new ResizeObserver(drawMarks);
+  marksRo.observe(timeline);
 
   // ---- rig key markers ----------------------------------------------------
   const keysEl = el.querySelector(".t-keys") as HTMLElement;
@@ -363,12 +414,14 @@ export function createTransport(preview: PreviewScene, duration: number): Transp
       (el.querySelector(".t-scene-open") as HTMLButtonElement).onclick = () => cbs.open();
     },
     setKeys,
+    setMarks,
     setDope,
     setCurves,
     dispose: () => {
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
       dopeRo.disconnect();
+      marksRo.disconnect();
       curveView.dispose();
       el.remove();
     },

@@ -52,7 +52,9 @@ npm run build      # tsc --noEmit && vite build
 npm run preview    # serve built dist/ — ALWAYS test the Pages base path here, not just dev
 npm run smoke    -- <file.wanim> [out.fbx]   # parse → convert → resample → write FBX, brace/section sanity check
 npm run fbxcheck -- <file.fbx>               # load an emitted FBX back with three's FBXLoader, report bones+clip
+npm run faceFbxCheck -- [file.wanim]         # blendshape/morph FBX structural check (BlendShape/DeformPercent chain)
 npm run drive    -- [file.wanim]             # Playwright: drive the running dev server, screenshot, test download
+npm run bootcheck -- [file.wanim]            # Playwright: DCC boot + IndexedDB session-restore + reset lifecycle
 npm run cleanCheck -- [file.wanim]           # verify the cleaning filters (despike/butterworth/wrist/forearm/feet) on real data
 npm run vrmaCheck  -- [file.wanim] [out]     # VRMA exporter structural check (VRMC_vrm_animation layout)
 npm run wanimCheck -- [file.wanim]           # WANIM re-export round-trip: set name + channels + values + bones preserved
@@ -80,7 +82,7 @@ No unit-test framework yet — the three `npm run` scripts above are the regress
                           resample() → ResampledClip (fixed fps, linear pos / slerp rot) for export.
   → src/fbx/animationFbx.ts: binary FBX — LimbNode skeleton + AnimationStack/Layer, per-bone Lcl Rotation
                           curves + Hips Lcl Translation curve, skinned meshes, BindPose, TPose take. meters→cm, Y-up.
-  → src/convert/clean.ts: optional mocap cleaning — despike (pops/hand-flips via neighbour slerp), zero-phase Butterworth low-pass (filtfilt) on rotations + hips translation, twist/swing limits + locks for wrists AND forearms (twist about the bone axis toward the child joint), and feet-contact fixing (src/convert/feet.ts: floor estimated from data per foot — resting joint height varies per avatar, never assume y=0; contact = low AND slow with hysteresis; ankle pinned per plant via two-bone leg IK, recorded knee as pole, foot keeps recorded world rotation; runs LAST so smoothing can't reintroduce drift; writes leg-chain rotations only). Applied to the converted clip so it shows in preview AND export. The cleaning panel has a hold-to-compare button; preview.setClip(clip, keepView=true) keeps camera + playhead (also why filter toggles don't reset the view).
+  → src/convert/clean.ts: optional mocap cleaning — despike (pops/hand-flips via neighbour slerp on quats AND the same lone-outlier test on hips translation, POS_SPIKE_M), zero-phase Butterworth low-pass (filtfilt) on rotations + hips translation, twist/swing limits + locks for wrists AND forearms (twist about the bone axis toward the child joint), and feet-contact fixing (src/convert/feet.ts: floor estimated from data per foot — resting joint height varies per avatar, never assume y=0; contact = low AND slow with hysteresis; ankle pinned per plant via two-bone leg IK, recorded knee as pole, foot keeps recorded world rotation; runs LAST so smoothing can't reintroduce drift; writes leg-chain rotations only). Applied to the converted clip so it shows in preview AND export. CleanStats.fixedFrames + FeetStats.fixedFrames report WHICH frames each filter touched; main.ts compresses consecutive runs to run-start marks and draws them as colored ticks on the transport strip (amber despike / violet limits / cyan feet) so corrections are findable. smoothRange takes PLAYBACK (0-based) trim times and normalizes against times[0] internally — recordings can start nonzero (regression-checked in cleanCheck). Cleaning/pipeline control changes (clean panel + proportions + spine spread) ride in the SAME undo snapshots as rig edits (pipelineSettings in rigSnapshot; prevPipelineJson tracks the pre-change state because `change` fires after the DOM flips). The cleaning panel has a hold-to-compare button AND a Ghost toggle (grey uncleaned skeleton overlay via preview.setGhost — survives setClip; recleans re-point it from the compareBase prebuild); preview.setClip(clip, keepView=true) keeps camera + playhead (also why filter toggles don't reset the view).
   → src/rig/rig.ts + modifiers.ts + timewarp.ts: MotionBuilder-style control rig, baked AFTER
                           cleaning/proportions/spine. Modifiers = whole-clip slider corrections (hips height with
                           feet re-solved onto their original targets, knees/elbows in-out via rigid rotation of the
@@ -89,8 +91,16 @@ No unit-test framework yet — the three `npm run` scripts above are the regress
                           (x,−y,−z,w) + negate hips x; face untouched), and REACH (per-limb pull of hand/foot back
                           toward the UNCLEANED path via two-bone IK — ref clip = buildDisplay(false) cached per
                           reclean gen, run through the same modifiers so timelines/mirroring match)). TIME WARP
-                          (timewarp.ts) = speed-ramp keys in SOURCE time, applied FIRST in the pipeline (resamples
-                          onto a uniform grid; duration changes → reclean rebuilds the transport when it drifts).
+                          (timewarp.ts) = speed-ramp keys in SOURCE time (0-based playback — buildCum normalizes
+                          midpoints by times[0]), applied FIRST in the pipeline (resamples onto a uniform grid;
+                          duration changes → reclean rebuilds the transport when it drifts). warpMaps(times, keys)
+                          is THE bidirectional source⇄warped time map (same cum[] as applyTimeWarp, checked equal):
+                          warpAdd inverts the playhead through it (a linear fraction is WRONG once any non-1× key
+                          exists), and every warp edit calls remapForWarpChange (old→src→new) so layer keys, range
+                          smooths, picked keys, trim, and the playhead stay glued to the same motion. Trim/playhead
+                          restores that must survive a transport rebuild (scene load, warp remap) go through
+                          pendingViewRestore, consumed at the END of reclean — applying them before reclean gets
+                          them clamped against the wrong duration and thrown away.
                           RANGE SMOOTH (clean.ts smoothRange) = trim-range-only Butterworth with 0.25 s edge blends,
                           stacked after cleanClip. reduceKeys() = greedy key reducer (drops keys the sampled curve
                           wouldn't miss). All of warp/ranges/mods serialize into undo snapshots, the localStorage
@@ -141,15 +151,21 @@ No unit-test framework yet — the three `npm run` scripts above are the regress
                           via setPoseOverride; key lands at the playhead on release. Undo/redo =
                           JSON snapshots of layers+modifiers pushed BEFORE each mutation (buttons + Ctrl+Z/Y via a
                           module-level hotkey singleton so re-loading a file doesn't stack listeners).
-  → src/preview/scene.ts: Three.js Object3D bone hierarchy driven per-frame; LineSegments + Points stick figure. Supports trim looping (setTrim).
+  → src/preview/scene.ts: Three.js Object3D bone hierarchy driven per-frame; LineSegments + Points stick figure. Supports trim looping (setTrim), a review playback rate (setRate/getRate — multiplies dt, never touches the clip), and a GHOST overlay (setGhost(clip|null): a second grey bone hierarchy + LineSegments sampled at the same playhead in applyPose — deliberately NOT cleared by setClip/clearClip so recleans keep it; disposed only by setGhost(null)/dispose).
   → src/ui/curves.ts: canvas curve editor on the LAYER KEYS (not the dense baked motion) — selected
                           effector's pos deltas (cm) + rot deltas (ZYX euler °, quatToEulerZYX/eulerZYXToQuat
-                          round-trip) as per-axis curves. Keys drag VERTICALLY only (retime lives on the strips);
+                          round-trip) as per-axis curves. pos and rot have INDEPENDENT value scales (cm and degrees
+                          on one axis flatlined whichever was smaller; each group gets its own zero line — pos
+                          dashed, rot solid). Rot values are UNWRAPPED for display (main.ts unwrapEulerKeys: picks
+                          canonical vs the (x+π, π−y, z+π) alternate + ±2π shifts nearest the previous key, so
+                          equivalent rotations don't draw ±180° jumps); onValue edits reconstruct the DISPLAYED
+                          triple before writing an axis back — mixing a dragged axis into the canonical extraction
+                          silently switches representation and warps the rotation. Keys drag VERTICALLY only (retime lives on the strips);
                           right-click = ease linear/smooth/step (per-key `ease` on the segment LEAVING the key,
                           honored in samplePos/sampleRot) + delete. Value drags rebake live via the dirty-range
                           path; the graph redraws itself — the host must NOT rebuild the view mid-drag
                           (setModel refuses while dragging). Toggled with the dope sheet via the Keys/Curves button.
-  → src/ui/transport.ts: transport bar docked at the bottom of the editor suite — play/pause, click-to-seek timeline with draggable in/out trim handles, rig-key markers, and a mini DOPE SHEET (per-effector key rows for the active layer, shown only on the Rig tab; rows pixel-align to the strip by measuring against the rows element's own border box — its padding doesn't shift getBoundingClientRect). resample() takes trimStart/trimEnd to export only the trimmed range (rebased to t=0).
+  → src/ui/transport.ts: transport bar docked at the bottom of the editor suite — play/pause, a review-rate select (¼–2×, preview.setRate — playback only, never the clip), click-to-seek timeline with draggable in/out trim handles, frame counter in the readout (createTransport takes a frames count), a .t-marks canvas for the cleaning tick marks (setMarks; canvas because there can be thousands), rig-key markers (co-timed keys ≥3 collapse into ONE white pose marker — click picks all keys at that time, drag retimes them together; "Key pose" writes 19 stacked diamonds otherwise), and a mini DOPE SHEET (per-effector key rows for the active layer, shown only on the Rig tab; rows pixel-align to the strip by measuring against the rows element's own border box — its padding doesn't shift getBoundingClientRect). Transport hotkeys live in main.ts's module-level keydown (Space play/pause, ←/→ frame step, shift ×10, Home/End = trim ends; Ctrl+Z/Y/C/V NEVER fire inside text fields — the browser's own editing wins). "Delete key" only deletes within 1.5 frames of the playhead (the old 0.5 s grab silently ate keys off-screen). resample() takes trimStart/trimEnd to export only the trimmed range (rebased to t=0).
   → SCENE FILES (main.ts): "Save scene…" (Info tab + transport Save… button) bundles the ORIGINAL
                           .wanim bytes (base64) + rig state + cleaning/export settings + trim + playhead + the
                           CUSTOM VRM/GLB BODY (scene v2, userBodyBytes) into one `<name>.scene.json` (magic
@@ -166,7 +182,20 @@ No unit-test framework yet — the three `npm run` scripts above are the regress
                           (lz4CompressBlockLiteral — valid for any standard decoder). scripts/wanimDiff.mjs
                           compares payload FORMAT BYTES against an original recording (field 4 verified
                           byte-identical in structure: fixstr keys, float32 values, map16 frame maps).
-  → UI SHELL (index.html + main.ts buildPanel): editor suite — top #editbar toolbar (undo/redo, gizmo mode+space, hold-to-compare, format+Download), right #dock with tabs Clean/Rig/Export/Info, bottom #timeline-dock. buildPanel writes editbar.innerHTML + dock.innerHTML per file load (fresh nodes = no stacked listeners). Rig handles + dope sheet are GATED to the Rig tab (syncRigVisibility). Element IDs are unchanged from the single-drawer era — keep it that way, tests and wiring key off them.
+  → UI SHELL (index.html + main.ts buildPanel): editor suite — top #editbar toolbar (undo/redo, gizmo mode+space, hold-to-compare, Ghost, format+Download), right #dock with tabs Clean/Rig/Export/Info, bottom #timeline-dock. buildPanel writes editbar.innerHTML + dock.innerHTML per file load (fresh nodes = no stacked listeners). Rig handles + dope sheet are GATED to the Rig tab (syncRigVisibility). Element IDs are unchanged from the single-drawer era — keep it that way, tests and wiring key off them.
+  → DCC BOOT + SESSION RESTORE (main.ts bottom + src/session.ts): the app boots STRAIGHT INTO the
+                          editor — #loaded-state is never hidden; the old landing is #empty-state, now a
+                          .viewport-empty overlay floating over the 3D grid (drive scripts' waitForSelector
+                          on "#loaded-state:not([hidden])" passes immediately; they gate on "#dock .stats").
+                          showEmptyEditor() = the no-recording state (placeholder editbar/dock with Open…,
+                          preview.clear(), transport disposed) — boot AND "Load another file" land there.
+                          The last recording's raw bytes persist in IndexedDB (session.ts — localStorage is
+                          too small; the EDITS already live in localStorage keyed by recording, so restoring
+                          the bytes rehydrates everything through the normal cache path). Boot auto-reopens
+                          it unless the user opens a file first (userOpenedFile guard); loadWanim(…, fromRestore)
+                          skips re-saving; "Load another file" clears the stored session on purpose. Errors
+                          show in the #empty-error .app-error toast (click or 10 s to dismiss) — the landing
+                          that used to display them is gone. Lifecycle covered by scripts/bootCheck.mjs.
   → src/preview/face.ts:  ARKit face overlay — loads public/facecap-head.glb, seats it at the Head joint,
                           drives morph targets from the recorded blendshapes (also embedded in the FBX, skinned).
   → src/convert/body.ts + src/preview/body.ts: Ybot body retarget (weights remapped to our bones) for preview
@@ -174,6 +203,8 @@ No unit-test framework yet — the three `npm run` scripts above are the regress
 ```
 
 `src/convert/skeleton.ts` holds the Unity HumanBodyBones parent table; `src/convert/quat.ts` holds quat math + the quat→Euler-ZYX extraction. The parser is output-agnostic from the writer.
+
+Shared/support modules not in the pipeline diagram above: `src/convert/ik.ts` (vector helpers + the two-bone solver proven by the feet filter — shared by `feet.ts` and the control rig; keeps the mid joint's plane as pole and preserves the end bone's world rotation); `src/vrm/vrmHumanoid.ts` (ported from VRMxShogun — reads a GLB/VRM's JSON chunk, `sanitizeGlb` fixes bare NaN/Infinity tokens, and returns node-index→HumanBodyBones for the authoritative VRM bone mapping when a user supplies their own body); `src/convert/vrmFaceMap.ts` (synthesizes VRM 0.x preset / VRoid `Fcl_*` blendshape tracks from the recorded ARKit weights, for the VRMA/VRM face path); `src/fbx/export.ts` (`sanitizeFilename` + `downloadBytes` browser-download helper, format-agnostic).
 
 ## GitHub Pages deployment (same traps as VRMxShogun)
 

@@ -413,10 +413,15 @@ const f0 = 0;
   {
     const sm = smoothRange(c, { t0: 20, t1: 30, cutoffHz: 2 });
     const rh = boneI("RightHand");
-    const movedIn = dist(world(sm, nearestFrame(c, 25)).pos[rh], world(c, nearestFrame(c, 25)).pos[rh]);
+    // Max displacement across the range — a single instant is recording-
+    // dependent (the hand can sit on a smoothing zero-crossing right there).
+    let movedIn = 0;
+    for (let t = 21; t <= 29; t++) {
+      movedIn = Math.max(movedIn, dist(world(sm, nearestFrame(c, t)).pos[rh], world(c, nearestFrame(c, t)).pos[rh]));
+    }
     const movedOut = dist(world(sm, nearestFrame(c, 50)).pos[rh], world(c, nearestFrame(c, 50)).pos[rh]);
     check("range smooth: changes inside the range only",
-      movedIn > 0.002 && movedOut < 1e-12, `inside ${mm(movedIn)}mm, outside ${mm(movedOut)}mm`);
+      movedIn > 0.002 && movedOut < 1e-12, `inside(max) ${mm(movedIn)}mm, outside ${mm(movedOut)}mm`);
   }
   {
     const { applyModifiers: am, defaultModifiers: dm } = await import("../src/rig/modifiers.ts");

@@ -245,5 +245,83 @@ const check = (label, ok, detail) => {
   check("feet: non-leg bones untouched", touched === 0, `bones changed outside legs=${touched}`);
 }
 
+// --- 6. range smoothing works when timestamps don't start at zero ----------
+// Recordings can begin at a nonzero timestamp; smoothRange takes PLAYBACK
+// (0-based) times from the transport trim, so it must normalize internally.
+{
+  const { smoothRange } = await import("../src/convert/clean.ts");
+  const OFFSET = 5.0;
+  const shifted = { ...c, times: c.times.map((t) => t + OFFSET) };
+  const r = { t0: c.duration * 0.25, t1: c.duration * 0.75, cutoffHz: 3 };
+  const hand = c.names.indexOf("RightHand");
+  const findFrame = (clip2, t) => {
+    const base = clip2.times[0];
+    let f = 0;
+    while (f < clip2.times.length - 1 && clip2.times[f] - base < t) f++;
+    return f;
+  };
+  const f0 = findFrame(shifted, r.t0), f1 = findFrame(shifted, r.t1);
+  const outShifted = smoothRange(shifted, r);
+  const outZero = smoothRange({ ...c, times: c.times.map((t) => t - c.times[0]) }, r);
+  const changed = (a, b) => {
+    let sum = 0;
+    for (let f = f0; f <= f1; f++) sum += angle(a.localQuat[hand][f], b.localQuat[hand][f]);
+    return sum;
+  };
+  const dShifted = changed(shifted, outShifted);
+  const dZero = changed(c, outZero);
+  check("smoothRange: acts on nonzero-start recordings", dShifted > 1e-6, `in-range change=${dShifted.toFixed(3)}°`);
+  check(
+    "smoothRange: nonzero-start matches zero-start",
+    Math.abs(dShifted - dZero) < Math.max(1e-6, dZero * 1e-6),
+    `zero-start=${dZero.toFixed(3)}° shifted=${dShifted.toFixed(3)}°`,
+  );
+}
+
+// --- 7. despike removes an injected HIPS TRANSLATION pop -------------------
+{
+  const injected = structuredClone(c);
+  const f = Math.floor(frames / 3);
+  const orig = [...injected.localPos[0][f]];
+  injected.localPos[0][f] = [orig[0] + 0.25, orig[1] + 0.1, orig[2]]; // ~27cm pop
+  const stats = { despiked: 0, wristClamped: 0, forearmClamped: 0, smoothedMeanDeg: 0 };
+  const cleaned = cleanClip(injected, { despike: true }, stats);
+  const dist = Math.hypot(
+    cleaned.localPos[0][f][0] - orig[0],
+    cleaned.localPos[0][f][1] - orig[1],
+    cleaned.localPos[0][f][2] - orig[2],
+  );
+  check("despike: hips translation pop removed", dist < 0.03, `residual=${(dist * 100).toFixed(1)}cm, despiked=${stats.despiked}`);
+  check("despike: pop frame reported in fixedFrames", !!stats.fixedFrames?.despike.has(f), `despike marks=${stats.fixedFrames?.despike.size ?? 0}`);
+}
+
+// --- 8. warp maps: exact inverse, and nonzero-start invariance --------------
+{
+  const { warpMaps, applyTimeWarp } = await import("../src/rig/timewarp.ts");
+  const keys = [{ time: Math.min(1, c.duration * 0.2), speed: 0.5 }, { time: Math.min(3, c.duration * 0.6), speed: 2 }];
+  const m = warpMaps(c.times, keys);
+  let worst = 0;
+  for (let i = 0; i <= 20; i++) {
+    const s = (c.duration * i) / 20;
+    worst = Math.max(worst, Math.abs(m.srcOf(m.outOf(s)) - s));
+  }
+  check("warpMaps: outOf/srcOf round-trip", worst < 1e-6, `worst=${worst.toExponential(2)}s`);
+  const warped = applyTimeWarp(c, keys);
+  check(
+    "warpMaps: outDuration matches applyTimeWarp",
+    Math.abs(m.outDuration - warped.duration) < 1e-6,
+    `map=${m.outDuration.toFixed(4)}s clip=${warped.duration.toFixed(4)}s`,
+  );
+  // Nonzero-start recording: the same 0-based speed keys must produce the
+  // same warp (keys were compared against ABSOLUTE midpoints before the fix).
+  const shifted = { ...c, times: c.times.map((t) => t + 7) };
+  const warpedShifted = applyTimeWarp(shifted, keys);
+  check(
+    "timewarp: nonzero-start duration matches zero-start",
+    Math.abs(warpedShifted.duration - warped.duration) < 1e-6,
+    `zero=${warped.duration.toFixed(4)}s shifted=${warpedShifted.duration.toFixed(4)}s`,
+  );
+}
+
 if (failures) { console.error(`${failures} FAILURES`); process.exit(1); }
 console.log("OK");

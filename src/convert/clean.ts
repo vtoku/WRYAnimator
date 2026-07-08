@@ -56,6 +56,8 @@ export interface CleanStats {
   smoothedMeanDeg: number;
   /** What the feet fixer did (undefined = off). */
   feet?: FeetStats;
+  /** Frame indices each category touched — drives the timeline tick marks. */
+  fixedFrames?: { despike: Set<number>; limit: Set<number> };
 }
 
 const DEG2RAD = Math.PI / 180;
@@ -64,7 +66,7 @@ function angleBetween(a: Quat, b: Quat): number {
   return 2 * Math.acos(Math.min(1, Math.abs(quatDot(a, b))));
 }
 
-function despikeQuats(track: Quat[], thresholdRad: number): number {
+function despikeQuats(track: Quat[], thresholdRad: number, frames?: Set<number>): number {
   let fixed = 0;
   for (let i = 1; i < track.length - 1; i++) {
     const prev = track[i - 1];
@@ -76,6 +78,25 @@ function despikeQuats(track: Quat[], thresholdRad: number): number {
     // Lone outlier: far from both neighbours, but the neighbours are close.
     if (dPrev > thresholdRad && dNext > thresholdRad && dSpan < thresholdRad) {
       track[i] = quatSlerp(prev, next, 0.5);
+      frames?.add(i);
+      fixed++;
+    }
+  }
+  return fixed;
+}
+
+/** A one-frame hips position jump that snaps back — same test as the quats. */
+const POS_SPIKE_M = 0.05;
+
+function despikePos(track: Vec3[], thresholdM: number, frames?: Set<number>): number {
+  const d = (a: Vec3, b: Vec3) => Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+  let fixed = 0;
+  for (let i = 1; i < track.length - 1; i++) {
+    const prev = track[i - 1];
+    const next = track[i + 1];
+    if (d(prev, track[i]) > thresholdM && d(track[i], next) > thresholdM && d(prev, next) < thresholdM) {
+      track[i] = [(prev[0] + next[0]) / 2, (prev[1] + next[1]) / 2, (prev[2] + next[2]) / 2];
+      frames?.add(i);
       fixed++;
     }
   }
@@ -147,7 +168,7 @@ function quatMul(a: Quat, b: Quat): Quat {
 // Clamp each frame's local rotation by decomposing into twist about `axis` and
 // swing (the remainder), then limiting each to its max. twistMax = 0 hard-locks
 // the twist to zero (keeping swing); swingMax = NO_SWING_LIMIT leaves swing free.
-function limitTrack(track: Quat[], axis: Vec3, twistMax: number, swingMax: number): number {
+function limitTrack(track: Quat[], axis: Vec3, twistMax: number, swingMax: number, frames?: Set<number>): number {
   let clamped = 0;
   const [ax, ay, az] = axis;
   for (let f = 0; f < track.length; f++) {
@@ -174,6 +195,7 @@ function limitTrack(track: Quat[], axis: Vec3, twistMax: number, swingMax: numbe
     }
     const swing2 = swingOver ? quatSlerp([0, 0, 0, 1], swing, swingMax / swingAngle) : swing;
     track[f] = quatNormalize(quatMul(swing2, twist));
+    frames?.add(f);
     clamped++;
   }
   return clamped;
@@ -187,7 +209,7 @@ function boneAxis(c: ConvertedClip, childName: string, fallback: Vec3): Vec3 {
   return [off[0] / len, off[1] / len, off[2] / len];
 }
 
-function limitWrists(c: ConvertedClip, localQuat: Quat[][]): number {
+function limitWrists(c: ConvertedClip, localQuat: Quat[][], frames?: Set<number>): number {
   let clamped = 0;
   for (const side of ["Left", "Right"]) {
     const hand = c.names.indexOf(`${side}Hand`);
@@ -195,7 +217,7 @@ function limitWrists(c: ConvertedClip, localQuat: Quat[][]): number {
     // Bone axis = direction to the middle finger in the hand's local frame
     // (child bind offsets are already hand-local).
     const axis = boneAxis(c, `${side}MiddleProximal`, [side === "Left" ? 1 : -1, 0, 0]);
-    clamped += limitTrack(localQuat[hand], axis, WRIST_TWIST_MAX, WRIST_SWING_MAX);
+    clamped += limitTrack(localQuat[hand], axis, WRIST_TWIST_MAX, WRIST_SWING_MAX, frames);
   }
   return clamped;
 }
@@ -204,14 +226,14 @@ function limitWrists(c: ConvertedClip, localQuat: Quat[][]): number {
  * Limit forearm axial twist. `twistMax = 0` locks the twist to zero; swing
  * (elbow bend) is always left free. `sides` selects which forearms to touch.
  */
-function limitLowerArms(c: ConvertedClip, localQuat: Quat[][], twistMax: number, sides: readonly string[]): number {
+function limitLowerArms(c: ConvertedClip, localQuat: Quat[][], twistMax: number, sides: readonly string[], frames?: Set<number>): number {
   let clamped = 0;
   for (const side of sides) {
     const fore = c.names.indexOf(`${side}LowerArm`);
     if (fore < 0) continue;
     // Bone axis = direction to the hand (elbow→wrist) in the forearm's frame.
     const axis = boneAxis(c, `${side}Hand`, [side === "Left" ? 1 : -1, 0, 0]);
-    clamped += limitTrack(localQuat[fore], axis, twistMax, NO_SWING_LIMIT);
+    clamped += limitTrack(localQuat[fore], axis, twistMax, NO_SWING_LIMIT, frames);
   }
   return clamped;
 }
@@ -226,9 +248,12 @@ export interface RangeSmooth { t0: number; t1: number; cutoffHz: number; }
  */
 export function smoothRange(c: ConvertedClip, r: RangeSmooth): ConvertedClip {
   const frames = c.times.length;
-  const f0 = c.times.findIndex((t) => t >= r.t0 - 0.35);
+  // r.t0/r.t1 are PLAYBACK time (0-based, from the transport trim); recorded
+  // timestamps can start nonzero, so normalize — same invariant as rig keys.
+  const off = c.times[0];
+  const f0 = c.times.findIndex((t) => t - off >= r.t0 - 0.35);
   let f1 = frames - 1;
-  while (f1 > 0 && c.times[f1] > r.t1 + 0.35) f1--;
+  while (f1 > 0 && c.times[f1] - off > r.t1 + 0.35) f1--;
   if (f0 < 0 || f1 - f0 < 8) return c;
 
   const localQuat = c.localQuat.map((t) => t.map((q) => [...q] as Quat));
@@ -256,7 +281,7 @@ export function smoothRange(c: ConvertedClip, r: RangeSmooth): ConvertedClip {
       for (let i = 0; i < n; i++) x[i] = track[f0 + i][comp];
       const y = filtfilt(x, q);
       for (let i = 0; i < n; i++) {
-        const w = weight(c.times[f0 + i]);
+        const w = weight(c.times[f0 + i] - off);
         track[f0 + i][comp] = x[i] + (y[i] - x[i]) * w;
       }
     }
@@ -268,7 +293,7 @@ export function smoothRange(c: ConvertedClip, r: RangeSmooth): ConvertedClip {
     for (let i = 0; i < n; i++) x[i] = hips[f0 + i][comp];
     const y = filtfilt(x, q);
     for (let i = 0; i < n; i++) {
-      const w = weight(c.times[f0 + i]);
+      const w = weight(c.times[f0 + i] - off);
       hips[f0 + i][comp] = x[i] + (y[i] - x[i]) * w;
     }
   }
@@ -283,6 +308,10 @@ export function cleanClip(c: ConvertedClip, opts: CleanOpts, stats?: CleanStats)
   const localQuat = c.localQuat.map((t) => t.map((q) => [...q] as Quat));
   const localPos = c.localPos.map((t) => t.map((p) => [...p] as Vec3));
 
+  // Collect which frames each category touched, for the timeline tick marks.
+  const marks = stats ? { despike: new Set<number>(), limit: new Set<number>() } : undefined;
+  if (stats) stats.fixedFrames = marks;
+
   if (opts.lockWrists) {
     for (const side of ["Left", "Right"] as const) {
       if (opts.lockWrists !== "both" && opts.lockWrists !== side.toLowerCase()) continue;
@@ -293,16 +322,16 @@ export function cleanClip(c: ConvertedClip, opts: CleanOpts, stats?: CleanStats)
   }
 
   if (opts.limitWrists) {
-    const n = limitWrists(c, localQuat);
+    const n = limitWrists(c, localQuat, marks?.limit);
     if (stats) stats.wristClamped = n;
   }
 
   if (opts.limitLowerArms || opts.lockLowerArmTwist) {
     let n = 0;
-    if (opts.limitLowerArms) n += limitLowerArms(c, localQuat, FOREARM_TWIST_MAX, ["Left", "Right"]);
+    if (opts.limitLowerArms) n += limitLowerArms(c, localQuat, FOREARM_TWIST_MAX, ["Left", "Right"], marks?.limit);
     if (opts.lockLowerArmTwist) {
       const sides = opts.lockLowerArmTwist === "both" ? ["Left", "Right"] : [opts.lockLowerArmTwist === "left" ? "Left" : "Right"];
-      n += limitLowerArms(c, localQuat, 0, sides);
+      n += limitLowerArms(c, localQuat, 0, sides, marks?.limit);
     }
     if (stats) stats.forearmClamped = n;
   }
@@ -310,7 +339,9 @@ export function cleanClip(c: ConvertedClip, opts: CleanOpts, stats?: CleanStats)
   if (opts.despike) {
     const thr = (opts.despikeDeg ?? 35) * DEG2RAD;
     let n = 0;
-    for (const t of localQuat) n += despikeQuats(t, thr);
+    for (const t of localQuat) n += despikeQuats(t, thr, marks?.despike);
+    // Hips translation (root motion) pops too — same lone-outlier test.
+    n += despikePos(localPos[0], POS_SPIKE_M, marks?.despike);
     if (stats) stats.despiked = n;
   }
 
