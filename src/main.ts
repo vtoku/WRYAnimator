@@ -253,7 +253,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     <h4 class="group">Feet</h4>
     <label class="field">
       <span>Pin planted feet</span>
-      <input id="fixFeet" type="checkbox" checked title="Stops feet sliding while they're planted and keeps them from dipping under the floor. Legs are adjusted; nothing else moves." />
+      <input id="fixFeet" type="checkbox" title="Stops feet sliding while they're planted and keeps them from dipping under the floor. Legs are adjusted; nothing else moves." />
     </label>
 
     <h4 class="group">Arms &amp; hands</h4>
@@ -545,7 +545,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
   let prevPipelineJson = JSON.stringify(pipelineSettings());
 
   function applyCleanUi(c: CleanOpts) {
-    fixFeetChk.checked = c.fixFeet ?? true;
+    fixFeetChk.checked = c.fixFeet ?? false; // fallback = the default (off)
     limitWristsChk.checked = c.limitWrists ?? true;
     lockWristsSel.value = c.lockWrists ?? "";
     limitLowerArmsChk.checked = c.limitLowerArms ?? true;
