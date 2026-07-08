@@ -84,7 +84,7 @@ export function createTransport(preview: PreviewScene, duration: number, frames 
         <button class="t-btn t-ico t-scene-save" title="Save the whole session (recording + edits + settings) as a scene file">${ICONS.save}<span>Save scene</span></button>
       </span>
       <button class="t-btn t-ico t-play" aria-label="Play/pause" title="Play/pause (Space). ←/→ step a frame, shift for 10.">${ICONS.pause}</button>
-      <select class="t-rate" title="Playback speed (review only — doesn't change the clip)">
+      <select class="t-rate" title="Playback speed (review only, doesn't change the clip)">
         <option value="0.25">¼×</option>
         <option value="0.5">½×</option>
         <option value="1" selected>1×</option>
@@ -277,7 +277,7 @@ export function createTransport(preview: PreviewScene, duration: number, frames 
     dot.className = "t-key" + (m.selected ? " sel" : "") + (m.picked ? " picked" : "");
     dot.style.left = `${pct(m.time)}%`;
     dot.style.background = m.color;
-    dot.title = `${m.tag} key @ ${fmt(m.time)} — click to jump, drag to retime, right-click for options`;
+    dot.title = `${m.tag} key @ ${fmt(m.time)}: click to jump, drag to retime, right-click for options`;
     dot.addEventListener("contextmenu", (e) => {
       e.preventDefault();
       e.stopPropagation();

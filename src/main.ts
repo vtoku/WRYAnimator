@@ -258,7 +258,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     <h4 class="group">Arms &amp; hands</h4>
     <label class="field">
       <span>Limit wrists (human range)</span>
-      <input id="limitWrists" type="checkbox" checked title="Caps wrist twist at ±90° and bend at 85°, the anatomical range. Only frames past those limits change." />
+      <input id="limitWrists" type="checkbox" title="Caps wrist twist at ±90° and bend at 85°, the anatomical range. Only frames past those limits change." />
     </label>
     <label class="field">
       <span>Lock wrist (bad tracking)</span>
@@ -271,7 +271,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     </label>
     <label class="field">
       <span>Limit forearm twist (human range)</span>
-      <input id="limitLowerArms" type="checkbox" checked title="Caps forearm rotation at ±90°, the anatomical range. Elbow bend is untouched." />
+      <input id="limitLowerArms" type="checkbox" title="Caps forearm rotation at ±90°, the anatomical range. Elbow bend is untouched." />
     </label>
     <label class="field">
       <span>Lock forearm twist</span>
@@ -359,7 +359,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     </label>
     <label class="field">
       <span>Mirror left/right</span>
-      <input id="modMirror" type="checkbox" title="Swaps left and right across the whole clip — pose and travel. Face stays as recorded." />
+      <input id="modMirror" type="checkbox" title="Swaps left and right across the whole clip (pose and travel). Face stays as recorded." />
     </label>
 
     <h4 class="group">Reach (pull to raw path)</h4>
@@ -383,8 +383,8 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     </label>
 
     <h4 class="group">Time warp</h4>
-    <details class="hint-box"><summary>ⓘ how this works</summary><p class="hint">Speed keys ramp playback speed across the clip — slow-mo a
-      section, rush another. The clip's length changes; trim resets when it does.</p></details>
+    <details class="hint-box"><summary>ⓘ how this works</summary><p class="hint">Speed keys ramp playback speed across the clip: slow-mo one
+      section, rush another. The clip's length changes, so trim resets when it does.</p></details>
     <div class="rig-row">
       <select id="warpSpeed" title="Speed at the new key">
         <option value="0.25">0.25×</option>
@@ -471,7 +471,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     </dl>
     <button id="sceneSave" class="button ghost" title="Bundles the recording plus every edit and setting into one .scene.json. Drop it on the app later to pick up exactly where you left off.">Save scene…</button>
     <details class="hint-box"><summary>ⓘ how this works</summary><p class="hint">A scene file contains the recording, your layers, modifiers,
-      cleaning and export settings, and the trim — one file reopens the whole
+      cleaning and export settings, and the trim. One file reopens the whole
       session. A custom VRM body is embedded too, so the file is the whole project.</p></details>
     <button id="reset" class="button ghost">Load another file</button>
     </div>
@@ -545,9 +545,9 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
 
   function applyCleanUi(c: CleanOpts) {
     fixFeetChk.checked = c.fixFeet ?? false; // fallback = the default (off)
-    limitWristsChk.checked = c.limitWrists ?? true;
+    limitWristsChk.checked = c.limitWrists ?? false; // fallback = default (off)
     lockWristsSel.value = c.lockWrists ?? "";
-    limitLowerArmsChk.checked = c.limitLowerArms ?? true;
+    limitLowerArmsChk.checked = c.limitLowerArms ?? false;
     lockLowerArmSel.value = c.lockLowerArmTwist ?? "";
     despikeChk.checked = !!c.despike;
     if (c.despikeDeg) { despikeDeg.value = String(c.despikeDeg); despikeVal.value = `${despikeDeg.value}°`; }
@@ -890,7 +890,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     // Additive deltas and override values are different quantities — pasting
     // across modes would scramble the pose.
     if (keyClipboard[0].mode && keyClipboard[0].mode !== layer.mode) {
-      showError(`These keys were copied from an ${keyClipboard[0].mode} layer — paste them onto an ${keyClipboard[0].mode} layer (this one is ${layer.mode}).`);
+      showError(`These keys were copied from an ${keyClipboard[0].mode} layer. Paste them onto an ${keyClipboard[0].mode} layer (this one is ${layer.mode}).`);
       return;
     }
     const t0 = preview.getTime();
@@ -1358,7 +1358,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
       });
 
       const extent = document.createElement("select");
-      extent.title = "Fade: keys ease in/out around the keyed range — one key is a local correction. Hold: the first/last key extends across the whole clip, MoBu style.";
+      extent.title = "Fade: keys ease in/out around the keyed range, so one key is a local correction. Hold: the first/last key extends across the whole clip, MoBu style.";
       for (const x of ["fade", "hold"] as const) {
         const o = document.createElement("option");
         o.value = x;
@@ -1501,7 +1501,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     // half-second grab silently ate keys the user wasn't looking at.
     const frameDt = rigBaseClip ? rigBaseClip.duration / Math.max(1, rigBaseClip.times.length - 1) : 1 / 60;
     if (near === null || Math.abs(near - t) > Math.max(frameDt * 1.5, 1 / 60)) {
-      rigSelEl.textContent = "No key at the playhead — step to it with ←/→ or click its diamond first.";
+      rigSelEl.textContent = "No key at the playhead. Step to it with ←/→ or click its diamond first.";
       return;
     }
     pushHistory();
@@ -1747,7 +1747,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     const trim = transport?.getTrim();
     if (!trim || !loaded) return;
     if (trim.end - trim.start > loaded.display.duration - 0.05) {
-      showError("Set the timeline trim handles around the section first — this smooths only that range.");
+      showError("Set the timeline trim handles around the section first. This smooths only that range.");
       return;
     }
     pushHistory();
@@ -1937,7 +1937,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
   if (restoredSessionName) {
     restoredSessionName = null;
     rigCacheNote.textContent =
-      `Reopened your last session${rigCacheNote.textContent ? " — edits restored" : ""}. ` +
+      `Reopened your last session${rigCacheNote.textContent ? ", edits restored" : ""}. ` +
       `"Load another file" (Info tab) closes it.`;
   }
 
@@ -2189,7 +2189,7 @@ function showEmptyEditor() {
       <div class="tab active">
         <h2>Start</h2>
         <p class="note">Open a <code>.wanim</code> recording or a saved
-          <code>.scene.json</code> — or drop one anywhere on the page.</p>
+          <code>.scene.json</code>, or just drop one anywhere on the page.</p>
         <button id="dockOpen" class="button primary">Open a file…</button>
       </div>
     </div>
