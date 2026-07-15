@@ -37,12 +37,14 @@ import { buildMenuBar, type MenuDef, type MenuItem } from "./ui/menu.ts";
 import { keyFor, SHORTCUTS } from "./ui/shortcuts.ts";
 import { openShortcuts, openAbout, openPreferences as openPreferencesDialog } from "./ui/dialogs.ts";
 import { getPref, applyAppearance } from "./ui/prefs.ts";
+import { initLayout, setDockCollapsed, setLayoutSizes } from "./ui/layout.ts";
 
 const emptyState = document.getElementById("empty-state") as HTMLElement; // dim prompt over the viewport grid
 const menubarEl = document.getElementById("menubar") as HTMLElement;
 const fileInput = document.getElementById("file-input") as HTMLInputElement;
 const errorEl = document.getElementById("empty-error") as HTMLElement;
 const viewport = document.getElementById("viewport") as HTMLElement;
+const editMain = document.querySelector(".edit-main") as HTMLElement;
 const editbar = document.getElementById("editbar") as HTMLElement;
 const dock = document.getElementById("dock") as HTMLElement;
 const timelineDock = document.getElementById("timeline-dock") as HTMLElement;
@@ -163,9 +165,25 @@ function openRecordingPicker() { fileInput.accept = ".wanim"; fileInput.click();
 function openScenePicker() { fileInput.accept = ".json,application/json"; fileInput.click(); }
 
 const openPreferences = openPreferencesDialog;
+// View menu layout presets: set both splitter sizes + the dock/panel state.
+function applyLayoutPreset(preset: "default" | "cleanup" | "rig") {
+  if (preset === "default") {
+    setDockCollapsed(dock, false);
+    setLayoutSizes(dock, 352, 0);
+    transport?.setPanelView("keys");
+  } else if (preset === "cleanup") {
+    setDockCollapsed(dock, true);        // dock as a thin tab strip
+    setLayoutSizes(dock, 352, 280);      // taller timeline dock, curves open
+    transport?.setPanelView("curves");
+  } else {
+    setDockCollapsed(dock, false);       // rig: dock open on Rig, dope open
+    setLayoutSizes(dock, 380, 160);
+    menuActions?.setDockTab("rig");
+    transport?.setPanelView("keys");
+  }
+}
 // Reassigned by later feature modules (kept as `let` so the menu, which reads
 // them lazily each open, always sees the live implementation).
-let applyLayoutPreset: (p: "default" | "cleanup" | "rig") => void = () => {};
 let recentSupported: () => boolean = () => false;
 let recentSubmenu: () => MenuItem[] = () => [];
 
@@ -221,6 +239,7 @@ const menuDefs: MenuDef[] = [
       { label: "Frame character", enabled: hasClip, action: () => preview?.frameCharacter() },
       { label: "Toggle grid", checked: () => !!preview?.isGridVisible(), action: () => preview?.toggleGrid() },
       { separator: true },
+      { label: "Collapse dock", checked: () => getPref("dockCollapsed"), action: () => setDockCollapsed(dock, !getPref("dockCollapsed")) },
       { label: "Layout: Default", action: () => applyLayoutPreset("default") },
       { label: "Layout: Cleanup", action: () => applyLayoutPreset("cleanup") },
       { label: "Layout: Rig", action: () => applyLayoutPreset("rig") },
@@ -235,6 +254,7 @@ const menuDefs: MenuDef[] = [
   },
 ];
 applyAppearance(); // UI scale + hint visibility from saved prefs
+initLayout(dock, editMain, timelineDock); // splitters + persisted sizes + collapse
 buildMenuBar(menubarEl, menuDefs);
 // Test hook: bootcheck asserts every table entry shows in the Help overlay.
 (window as unknown as { __shortcuts?: typeof SHORTCUTS }).__shortcuts = SHORTCUTS;

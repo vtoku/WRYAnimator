@@ -361,12 +361,55 @@ main:has(.loaded-state:not([hidden])) {
 }
 
 .dock {
-  width: 22rem;
+  position: relative;
+  width: var(--dock-width, 22rem);
   display: flex;
   flex-direction: column;
   background: var(--bg-raise);
   border-left: 1px solid var(--border);
   min-height: 0;
+}
+
+/* Left-edge grip: drag to resize the dock width (layout.ts hot-zone). */
+.dock::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 6px;
+  margin-left: -3px;
+  cursor: col-resize;
+  z-index: 6;
+}
+
+.dock::before:hover {
+  background: linear-gradient(90deg, transparent, rgba(245, 179, 1, 0.35));
+}
+
+/* Collapsed dock: a thin vertical tab strip; click a tab to reopen. */
+.dock.collapsed {
+  width: 2.6rem;
+}
+
+.dock.collapsed .dock-body {
+  display: none;
+}
+
+.dock.collapsed .dock-tabs {
+  flex-direction: column;
+}
+
+.dock.collapsed .dock-tab {
+  writing-mode: vertical-rl;
+  padding: 0.7rem 0.35rem;
+  border-bottom: none;
+  border-left: 2px solid transparent;
+}
+
+.dock.collapsed .dock-tab.active {
+  border-left-color: var(--accent);
+  border-bottom-color: transparent;
 }
 
 .dock-tabs {
@@ -418,9 +461,28 @@ main:has(.loaded-state:not([hidden])) {
 }
 
 .timeline-dock {
+  position: relative;
   min-width: 0;
+  min-height: var(--timeline-height, 0);
   border-top: 1px solid var(--border);
   background: var(--bg-raise);
+}
+
+/* Top-edge grip: drag to resize the timeline dock height (layout.ts hot-zone). */
+.timeline-dock::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 6px;
+  margin-top: -3px;
+  cursor: row-resize;
+  z-index: 6;
+}
+
+.timeline-dock::before:hover {
+  background: linear-gradient(180deg, rgba(245, 179, 1, 0.35), transparent);
 }
 
 @media (max-width: 720px) {
