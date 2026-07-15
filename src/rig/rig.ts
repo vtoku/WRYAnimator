@@ -24,13 +24,18 @@ import { worldFromLocal, type FramePose } from "../convert/fk.ts";
 // writes keys on the three chain bones — i.e. on the upper-arm, forearm, and
 // hand effectors' tracks, which is exactly how MoBu control-rig keys land.
 
+// Known effector ids are listed for autocomplete; finger effectors are
+// generated per-hand (see FINGER_EFFECTORS) so the type stays open with the
+// `(string & {})` widening — any bone-derived id is a valid effector.
 export type EffectorId =
   | "root"
   | "hips" | "leftHand" | "rightHand" | "leftFoot" | "rightFoot" | "head"
   | "spine" | "chest" | "neck"
   | "leftShoulder" | "rightShoulder"
   | "leftUpperArm" | "rightUpperArm" | "leftLowerArm" | "rightLowerArm"
-  | "leftUpperLeg" | "rightUpperLeg" | "leftLowerLeg" | "rightLowerLeg";
+  | "leftUpperLeg" | "rightUpperLeg" | "leftLowerLeg" | "rightLowerLeg"
+  | "leftToes" | "rightToes"
+  | (string & {});
 
 export interface EffectorDef {
   id: EffectorId;
@@ -74,6 +79,9 @@ export const EFFECTORS: EffectorDef[] = [
   { id: "rightUpperLeg", label: "Right thigh", bone: "RightUpperLeg", tip: ["RightLowerLeg"], canMove: false, canRotate: true },
   { id: "leftLowerLeg", label: "Left shin", bone: "LeftLowerLeg", tip: ["LeftFoot"], canMove: false, canRotate: true },
   { id: "rightLowerLeg", label: "Right shin", bone: "RightLowerLeg", tip: ["RightFoot"], canMove: false, canRotate: true },
+  // Toes: FK rotate-only leaves (no tip child in the 55-bone array).
+  { id: "leftToes", label: "Left toes", bone: "LeftToes", canMove: false, canRotate: true },
+  { id: "rightToes", label: "Right toes", bone: "RightToes", canMove: false, canRotate: true },
 ];
 
 export const effectorDef = (id: EffectorId): EffectorDef => EFFECTORS.find((e) => e.id === id)!;
