@@ -33,6 +33,12 @@ export interface RigCallbacks {
   onDragStart(effector: EffectorId): boolean;
   onDragMove(pos: Vec3, rot: Quat): void;
   onDragEnd(): void;
+  /** Pole-vector (knee/elbow) drag on a limb's end effector. */
+  onPoleStart(effector: EffectorId): boolean;
+  onPoleMove(effector: EffectorId, pos: Vec3): void;
+  onPoleEnd(): void;
+  /** Right-click on a handle (screen coords) — the app pops a context menu. */
+  onContext?(effector: EffectorId, x: number, y: number): void;
 }
 
 /**
@@ -83,6 +89,9 @@ export class PreviewScene {
   // ---- control rig -------------------------------------------------------
   private rigEnabled = false;
   private rigHandles = new Map<EffectorId, THREE.Mesh>();
+  /** Pole-vector handles keyed by the limb's end effector. */
+  private poleHandles = new Map<EffectorId, THREE.Mesh>();
+  private poleDrag: { effector: EffectorId; plane: THREE.Plane; startX: number; startY: number; active: boolean } | null = null;
   private rigSelected: EffectorId | null = null;
   private rigHovered: EffectorId | null = null;
   private gizmo: TransformControls | null = null;
@@ -144,19 +153,38 @@ export class PreviewScene {
     // the click selects/drags instead of tumbling the camera.
     this.renderer.domElement.addEventListener("pointermove", (ev) => {
       if (this.gizmoDragging) return;
+      if (this.poleDrag) { this.movePoleDrag(ev); return; }
       if (this.directDrag) { this.moveDirectDrag(ev); return; }
       const hover = this.pickHandle(ev);
+      const overPole = !hover && !!this.pickPole(ev);
       if (hover !== this.rigHovered) {
         this.rigHovered = hover;
         this.restyleHandles();
       }
       const overGizmo = !!(this.gizmo && (this.gizmo as unknown as { axis: string | null }).axis);
-      this.controls.enabled = !hover && !overGizmo;
+      this.controls.enabled = !hover && !overPole && !overGizmo;
     });
     this.renderer.domElement.addEventListener("pointerdown", (ev) => {
       if (ev.button !== 0 || this.gizmoDragging) return;
       const hit = this.pickHandle(ev);
-      if (!hit) return;
+      if (!hit) {
+        // Pole-vector handle: arm a plane drag that swings the bend plane.
+        const pole = this.pickPole(ev);
+        if (pole) {
+          const w = this.polePosition(pole);
+          if (w) {
+            const n = new THREE.Vector3();
+            this.camera.getWorldDirection(n);
+            this.poleDrag = {
+              effector: pole,
+              plane: new THREE.Plane().setFromNormalAndCoplanarPoint(n, new THREE.Vector3(...w)),
+              startX: ev.clientX, startY: ev.clientY, active: false,
+            };
+            this.controls.enabled = false;
+          }
+        }
+        return;
+      }
       // The gizmo keeps clicks on its own parts — but only for the effector
       // it's attached to. A DIFFERENT handle under the gizmo wins, otherwise
       // parts near the current selection are unreachable.
@@ -179,7 +207,22 @@ export class PreviewScene {
       };
       this.controls.enabled = false;
     });
+    this.renderer.domElement.addEventListener("contextmenu", (ev) => {
+      const hit = this.pickHandle(ev);
+      if (hit && this.rigCbs?.onContext) {
+        ev.preventDefault();
+        this.selectEffector(hit);
+        this.rigCbs.onContext(hit, ev.clientX, ev.clientY);
+      }
+    });
     window.addEventListener("pointerup", () => {
+      if (this.poleDrag) {
+        const wasActive = this.poleDrag.active;
+        this.poleDrag = null;
+        this.restyleHandles();
+        if (wasActive) this.rigCbs?.onPoleEnd();
+        return;
+      }
       if (!this.directDrag) return;
       const wasActive = this.directDrag.active;
       this.directDrag = null;
@@ -686,9 +729,18 @@ export class PreviewScene {
 
   /** Effectors currently pinned (world-held) — styled solid so state reads. */
   private rigPinned = new Set<EffectorId>();
+  /** End effectors whose limb is pure FK (blend 0) — their handle hides. */
+  private rigFkOnly = new Set<EffectorId>();
 
   setPinned(ids: Iterable<EffectorId>) {
     this.rigPinned = new Set(ids);
+    this.restyleHandles();
+  }
+
+  /** Hide the IK end-effector handles for limbs at IK/FK blend 0. */
+  setFkOnlyLimbs(ids: Iterable<EffectorId>) {
+    this.rigFkOnly = new Set(ids);
+    if (this.rigSelected && this.rigFkOnly.has(this.rigSelected)) this.selectEffector(null);
     this.restyleHandles();
   }
 
@@ -697,6 +749,8 @@ export class PreviewScene {
     const dragging = this.gizmoDragging || !!this.directDrag?.active;
     for (const [id, mesh] of this.rigHandles) {
       const mat = mesh.material as THREE.MeshBasicMaterial;
+      if (this.rigFkOnly.has(id)) { mesh.visible = false; continue; } // FK-only: no handle
+      mesh.visible = true;
       const movable = EFFECTORS.find((e) => e.id === id)?.canMove;
       const sel = id === this.rigSelected;
       const hov = id === this.rigHovered;
@@ -817,6 +871,19 @@ export class PreviewScene {
       this.scene.add(mesh);
       this.rigHandles.set(def.id, mesh);
     }
+    // Pole-vector handles for the four IK limbs (knees/elbows).
+    for (const def of EFFECTORS) {
+      if (!def.chain) continue;
+      if ([def.chain.root, def.chain.mid, def.bone].some((b) => this.clip!.names.indexOf(b) < 0)) continue;
+      const mesh = new THREE.Mesh(
+        new THREE.TetrahedronGeometry(0.02),
+        new THREE.MeshBasicMaterial({ color: 0xffe066, transparent: true, opacity: 0.25, depthTest: false }),
+      );
+      mesh.renderOrder = 10;
+      mesh.userData.pole = def.id;
+      this.scene.add(mesh);
+      this.poleHandles.set(def.id, mesh);
+    }
     if (!this.gizmo) {
       this.scene.add(this.gizmoProxy);
       this.gizmo = new TransformControls(this.camera, this.renderer.domElement);
@@ -859,12 +926,13 @@ export class PreviewScene {
   }
 
   private detachRig() {
-    for (const mesh of this.rigHandles.values()) {
+    for (const mesh of [...this.rigHandles.values(), ...this.poleHandles.values()]) {
       this.scene.remove(mesh);
       mesh.geometry.dispose();
       (mesh.material as THREE.Material).dispose();
     }
     this.rigHandles.clear();
+    this.poleHandles.clear();
     this.gizmo?.detach();
   }
 
@@ -879,6 +947,13 @@ export class PreviewScene {
       node.getWorldPosition(wp);
       if (id === "root") wp.y = 0; // the trajectory ring stays on the floor
       mesh.position.copy(wp);
+    }
+    for (const [id, mesh] of this.poleHandles) {
+      // No pole handle for a pure-FK limb (nothing to bend).
+      mesh.visible = !this.rigFkOnly.has(id) && !(this.poleDrag && this.poleDrag.active && this.poleDrag.effector !== id);
+      if (!mesh.visible) continue;
+      const p = this.polePosition(id);
+      if (p) mesh.position.set(p[0], p[1], p[2]);
     }
     if (!this.gizmoDragging) this.syncProxy();
   }
@@ -899,8 +974,64 @@ export class PreviewScene {
       -((ev.clientY - rect.top) / rect.height) * 2 + 1,
     );
     this.raycaster.setFromCamera(this.pointerNdc, this.camera);
-    const hits = this.raycaster.intersectObjects([...this.rigHandles.values()], false);
+    const pickable = [...this.rigHandles.values()].filter((m) => m.visible);
+    const hits = this.raycaster.intersectObjects(pickable, false);
     return hits.length ? (hits[0].object.userData.effector as EffectorId) : null;
+  }
+
+  // ---- pole-vector handles -----------------------------------------------
+
+  /** World position of a limb's pole handle in the CURRENTLY displayed pose. */
+  private polePosition(effector: EffectorId): Vec3 | null {
+    const def = EFFECTORS.find((e) => e.id === effector);
+    if (!def?.chain || !this.clip) return null;
+    const ri = this.clip.names.indexOf(def.chain.root);
+    const mi = this.clip.names.indexOf(def.chain.mid);
+    const ei = this.clip.names.indexOf(def.bone);
+    const rn = this.boneNodes[ri], mn = this.boneNodes[mi], en = this.boneNodes[ei];
+    if (!rn || !mn || !en) return null;
+    const rp = new THREE.Vector3(), mp = new THREE.Vector3(), ep = new THREE.Vector3();
+    rn.getWorldPosition(rp); mn.getWorldPosition(mp); en.getWorldPosition(ep);
+    const limbLen = rp.distanceTo(mp) + mp.distanceTo(ep);
+    const dir = mp.clone().sub(rp.clone().add(ep).multiplyScalar(0.5));
+    if (dir.length() < 1e-4) return [mp.x, mp.y, mp.z];
+    dir.normalize().multiplyScalar(limbLen * 0.4);
+    const p = mp.add(dir);
+    return [p.x, p.y, p.z];
+  }
+
+  private pickPole(ev: PointerEvent): EffectorId | null {
+    if (!this.poleHandles.size) return null;
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    this.pointerNdc.set(
+      ((ev.clientX - rect.left) / rect.width) * 2 - 1,
+      -((ev.clientY - rect.top) / rect.height) * 2 + 1,
+    );
+    this.raycaster.setFromCamera(this.pointerNdc, this.camera);
+    const pickable = [...this.poleHandles.values()].filter((m) => m.visible);
+    const hits = this.raycaster.intersectObjects(pickable, false);
+    return hits.length ? (hits[0].object.userData.pole as EffectorId) : null;
+  }
+
+  private movePoleDrag(ev: PointerEvent) {
+    const pd = this.poleDrag;
+    if (!pd || !this.rigCbs) return;
+    if (!pd.active) {
+      if (Math.hypot(ev.clientX - pd.startX, ev.clientY - pd.startY) < 5) return;
+      if (!this.rigCbs.onPoleStart(pd.effector)) { this.poleDrag = null; return; }
+      pd.active = true;
+      this.pause();
+      this.restyleHandles();
+    }
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    this.pointerNdc.set(
+      ((ev.clientX - rect.left) / rect.width) * 2 - 1,
+      -((ev.clientY - rect.top) / rect.height) * 2 + 1,
+    );
+    this.raycaster.setFromCamera(this.pointerNdc, this.camera);
+    const p = new THREE.Vector3();
+    if (!this.raycaster.ray.intersectPlane(pd.plane, p)) return;
+    this.rigCbs.onPoleMove(pd.effector, [p.x, p.y, p.z]);
   }
 
   private frameCamera() {

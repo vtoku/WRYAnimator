@@ -128,6 +128,22 @@ export const effectorDef = (id: EffectorId): EffectorDef => EFFECTORS.find((e) =
 export const effectorForBone = (bone: string): EffectorDef | undefined =>
   EFFECTORS.find((e) => e.bone === bone);
 
+export type IkfkLimb = "leftArm" | "rightArm" | "leftLeg" | "rightLeg";
+
+/** Per-limb IK/FK blend (1 = pure IK, 0 = pure FK). */
+export type IkfkBlend = Record<IkfkLimb, number>;
+
+export const defaultIkfkBlend = (): IkfkBlend => ({ leftArm: 1, rightArm: 1, leftLeg: 1, rightLeg: 1 });
+
+/** The IK/FK limb an end-effector belongs to (null = not a blendable limb). */
+export function limbForEffector(id: EffectorId): IkfkLimb | null {
+  if (id === "leftHand") return "leftArm";
+  if (id === "rightHand") return "rightArm";
+  if (id === "leftFoot") return "leftLeg";
+  if (id === "rightFoot") return "rightLeg";
+  return null;
+}
+
 /** Handle/marker color: orange hips, green center column, blue left, pink right. */
 export function effectorColor(id: EffectorId): string {
   if (id === "root") return "#f5b301";
@@ -825,18 +841,135 @@ export function keyEffectorTarget(
   f: number,
   target: EffectorTarget,
   pinIds: EffectorId[] = [],
+  ikfkBlend = 1,
 ): TimeRange | null {
   const pose = stackPoseThrough(clip, layers, layerIndex, f);
+  const preQuat = pose.quat.map((q) => [...q] as Quat); // pre-solve FK locals
   const pins = capturePinTargets(pose, clip.names, clip.parents, pinIds);
-  const bones = solveEffectorOnPose(pose, clip.names, clip.parents, effector, target, pins);
+  let bones = solveEffectorOnPose(pose, clip.names, clip.parents, effector, target, pins);
   if (!bones.length) return null;
   if (target.rot && (effector === "leftHand" || effector === "rightHand")) {
     const extra = distributeWristTwist(clip, pose, effector);
     if (extra && !bones.includes(extra)) bones.push(extra);
   }
+  bones = blendChainToFK(clip, pose, preQuat, effector, bones, ikfkBlend, !!target.rot);
+  if (!bones.length) return null;
   // Root rotates about the ground pivot, so it moves the hips POSITION too.
   const withHipsPos = effector === "root" || (effector === "hips" && !!target.pos);
   return captureBoneKeys(clip, layers, layerIndex, bones, pose, f, frameTime(clip, f), withHipsPos);
+}
+
+/**
+ * Blend an IK effector's solved chain locals back toward the pre-solve FK
+ * locals by `blend` (1 = pure IK, 0 = pure FK). MoBu's per-limb IK/FK blend:
+ * root/mid always blend; the end bone blends too unless the drag set an
+ * explicit rotation (then the hand keeps its chosen orientation). Returns the
+ * bones still worth keying — at blend 0 the reverted chain drops out, so a
+ * blend-0 reach writes no chain-root/mid keys. Non-chain edits pass through.
+ */
+export function blendChainToFK(
+  clip: ConvertedClip,
+  pose: FramePose,
+  preQuat: Quat[],
+  effector: EffectorId,
+  bones: string[],
+  blend: number,
+  hadRot: boolean,
+): string[] {
+  const def = effectorDef(effector);
+  if (!def.chain || blend >= 1) return bones;
+  const chain = new Set([def.chain.root, def.chain.mid, ...(hadRot ? [] : [def.bone])]);
+  for (const bn of chain) {
+    const b = clip.names.indexOf(bn);
+    if (b >= 0) pose.quat[b] = quatSlerp(preQuat[b], pose.quat[b], blend);
+  }
+  // Drop bones the blend reverted to their FK value (no meaningful key).
+  return bones.filter((bn) => {
+    const b = clip.names.indexOf(bn);
+    if (b < 0) return false;
+    const d = Math.abs(pose.quat[b][0] * preQuat[b][0] + pose.quat[b][1] * preQuat[b][1] + pose.quat[b][2] * preQuat[b][2] + pose.quat[b][3] * preQuat[b][3]);
+    return 2 * Math.acos(Math.min(1, d)) > 1e-5;
+  });
+}
+
+// ---- pole vectors (knee/elbow direction handles) --------------------------------
+
+/**
+ * World position of a limb's pole handle in `pose`: out past the mid joint
+ * along the current bend direction, a fraction of the limb length away. Returns
+ * null when the chain is missing.
+ */
+export function poleWorld(clip: ConvertedClip, pose: FramePose, effector: EffectorId): Vec3 | null {
+  const def = effectorDef(effector);
+  if (!def.chain) return null;
+  const world = worldFromLocal(clip.parents, pose);
+  const root = clip.names.indexOf(def.chain.root);
+  const mid = clip.names.indexOf(def.chain.mid);
+  const end = clip.names.indexOf(def.bone);
+  if (root < 0 || mid < 0 || end < 0) return null;
+  const midP = world.pos[mid];
+  const limbLen = vlen(vsub(midP, world.pos[root])) + vlen(vsub(world.pos[end], midP));
+  const chord: Vec3 = [(world.pos[root][0] + world.pos[end][0]) / 2, (world.pos[root][1] + world.pos[end][1]) / 2, (world.pos[root][2] + world.pos[end][2]) / 2];
+  const dir = vsub(midP, chord);
+  const len = vlen(dir);
+  if (len < 1e-4) {
+    const fwd = quatRotate(world.rot[root], [0, 0, effector.endsWith("Foot") ? 1 : -1]);
+    return vadd(midP, vscale(vnorm(fwd), limbLen * 0.4));
+  }
+  return vadd(midP, vscale(vscale(dir, 1 / len), limbLen * 0.4));
+}
+
+/**
+ * Solve a limb's bend plane toward `poleTarget`, keeping the end joint's world
+ * position AND rotation fixed. Writes the three chain locals into `pose`;
+ * returns the written bones. Same 3-bone write path as an IK drag.
+ */
+export function solvePoleOnPose(
+  pose: FramePose,
+  names: string[],
+  parents: number[],
+  effector: EffectorId,
+  poleTarget: Vec3,
+): string[] {
+  const def = effectorDef(effector);
+  if (!def.chain) return [];
+  const root = names.indexOf(def.chain.root);
+  const mid = names.indexOf(def.chain.mid);
+  const end = names.indexOf(def.bone);
+  if (root < 0 || mid < 0 || end < 0) return [];
+  const world = worldFromLocal(parents, pose);
+  const fallback = quatRotate(world.rot[root], [0, 0, effector.endsWith("Foot") ? 1 : -1]);
+  const r = solveTwoBone(
+    {
+      parentRot: world.rot[parents[root]],
+      rootP: world.pos[root], midP: world.pos[mid], endP: world.pos[end],
+      rootR: world.rot[root], midR: world.rot[mid], endR: world.rot[end],
+    },
+    world.pos[end], // keep the end joint exactly where it is
+    vnorm(fallback),
+    poleTarget,
+  );
+  if (!r) return [];
+  pose.quat[root] = r.rootLocal;
+  pose.quat[mid] = r.midLocal;
+  pose.quat[end] = r.endLocal;
+  return [def.chain.root, def.chain.mid, def.bone];
+}
+
+/** One-call pole-vector capture (tests + programmatic edits). */
+export function keyPoleTarget(
+  clip: ConvertedClip,
+  layers: RigLayer[],
+  layerIndex: number,
+  effector: EffectorId,
+  f: number,
+  poleTarget: Vec3,
+): TimeRange | null {
+  if (!layers[layerIndex]) return null;
+  const pose = stackPoseThrough(clip, layers, layerIndex, f);
+  const bones = solvePoleOnPose(pose, clip.names, clip.parents, effector, poleTarget);
+  if (!bones.length) return null;
+  return captureBoneKeys(clip, layers, layerIndex, bones, pose, f, frameTime(clip, f));
 }
 
 /**

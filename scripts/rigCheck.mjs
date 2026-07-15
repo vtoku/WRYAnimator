@@ -567,5 +567,58 @@ const f0 = 0;
   }
 }
 
+// ---- IK/FK blend + pole vectors -------------------------------------------------
+{
+  const { keyPoleTarget, poleWorld } = await import("../src/rig/rig.ts");
+
+  // Blend 0: a hand reach writes NO chain root/mid keys (pure FK).
+  {
+    const layer = makeLayer("blend0");
+    layer.extent = "hold";
+    const layers = [layer];
+    const target = [...world(c, fKey).pos[hand]];
+    target[0] += 0.06; target[1] += 0.04;
+    keyEffectorTarget(c, layers, 0, "rightHand", fKey, { pos: target }, [], 0);
+    const rootMid = layer.tracks.filter((t) => t.bone === "RightUpperArm" || t.bone === "RightLowerArm" && t.rotKeys.length);
+    check("IK/FK blend 0: reach writes no chain root/mid keys",
+      rootMid.length === 0, `chain-root/mid tracks written = ${rootMid.length}`);
+  }
+  // Blend 1: reach writes the full chain and lands (baseline sanity).
+  {
+    const layer = makeLayer("blend1");
+    layer.extent = "hold";
+    const layers = [layer];
+    const target = [...world(c, fKey).pos[hand]];
+    target[0] += 0.05; target[1] += 0.03;
+    keyEffectorTarget(c, layers, 0, "rightHand", fKey, { pos: target }, [], 1);
+    const baked = applyRigLayers(c, layers);
+    const err = dist(world(baked, fKey).pos[hand], target);
+    const bones = layer.tracks.map((t) => t.bone).sort().join(",");
+    check("IK/FK blend 1: reach lands and keys the whole chain",
+      err < 0.002 && bones === "RightHand,RightLowerArm,RightUpperArm", `err ${mm(err)}mm, [${bones}]`);
+  }
+  // Pole vector at blend 1: bend plane swings, end joint stays put.
+  {
+    const layer = makeLayer("pole");
+    layer.extent = "hold";
+    const layers = [layer];
+    const p0 = poleWorld(c, poseAtFrame(c, fKey), "rightHand");
+    const endBefore = world(c, fKey).pos[hand];
+    // Shove the pole handle well sideways so the bend plane clearly swings.
+    const poleTarget = [p0[0] + 0.3, p0[1], p0[2] + 0.15];
+    keyPoleTarget(c, layers, 0, "rightHand", fKey, poleTarget);
+    const baked = applyRigLayers(c, layers);
+    const endAfter = world(baked, fKey).pos[hand];
+    const endDrift = dist(endBefore, endAfter);
+    const bones = layer.tracks.map((t) => t.bone).sort().join(",");
+    // The mid joint should have actually moved (plane changed).
+    const midBefore = world(c, fKey).pos[boneI("RightLowerArm")];
+    const midAfter = world(baked, fKey).pos[boneI("RightLowerArm")];
+    check("pole vector: end joint stays within 1 mm, elbow swings, chain keyed",
+      endDrift < 0.001 && bones === "RightHand,RightLowerArm,RightUpperArm" && dist(midBefore, midAfter) > 0.005,
+      `end drift ${mm(endDrift)}mm, elbow moved ${mm(dist(midBefore, midAfter))}mm`);
+  }
+}
+
 if (failures) { console.error(`${failures} FAILURES`); process.exit(1); }
 console.log("OK");

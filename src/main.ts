@@ -10,7 +10,8 @@ import {
   bakeRange, bakeRangeAsync, dirtyRange, unionRange, fkDragRef, setKeyEase, reduceKeys,
   stackPoseThrough, belowStackPose, clonePose, solveEffectorOnPose, captureBoneKeys, applyLayersToPose, convertLayerMode,
   capturePinTargets, distributeWristTwist,
-  type RigLayer, type EffectorId, type TimeRange, type EffectorTarget, type PinTarget,
+  defaultIkfkBlend, limbForEffector, blendChainToFK, solvePoleOnPose,
+  type RigLayer, type EffectorId, type TimeRange, type EffectorTarget, type PinTarget, type IkfkBlend,
 } from "./rig/rig.ts";
 import { keyHandPose, applyHandPose, hasHandFingers, type HandSide, type HandPoseAmounts } from "./rig/hands.ts";
 import { worldFromLocal, type FramePose } from "./convert/fk.ts";
@@ -497,6 +498,11 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
       </div>
     </div>
 
+    <div id="ikfkBlend" hidden>
+      <h4 class="group">IK / FK blend <span class="hint-i" title="Per limb: 100% = dragging the hand/foot bends the limb to reach (IK). 0% = the end handle hides and only the segment handles pose the limb (FK). In between, a drag blends the solved reach toward the current pose. The yellow pole handles by each knee/elbow swing the bend plane.">ⓘ</span></h4>
+      <div id="ikfkSliders"></div>
+    </div>
+
     <div id="handPose" hidden>
       <h4 class="group">Hand pose <span class="hint-i" title="Stamp a finger pose onto the active layer at the playhead. Curl closes the fingers, Spread fans them, Thumb curls the thumb. Each slider nudges from the current pose and snaps back to 0 — the keys land on the finger bones like any drag, so they retime, copy, and mirror.">ⓘ</span></h4>
       <div id="handPoseSides"></div>
@@ -862,6 +868,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
   // and limbs whose positional drags swing FK instead of solving IK.
   const pinnedEffectors = new Set<EffectorId>();
   const fkLimbs = new Set<EffectorId>();
+  const ikfk = defaultIkfkBlend(); // per-limb IK/FK blend (1 = IK, 0 = FK)
   let ghostOn = false; // grey uncleaned-skeleton overlay
   let cleanMarks: Array<{ time: number; color: string }> = []; // filter tick marks
   let sceneMarkers: Marker[] = []; // user timeline markers (scene state)
@@ -1206,6 +1213,58 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
       preview.seek(preview.getTime()); // repose from the updated arrays
       saveRigCache();
     });
+  }
+
+  // ---- IK/FK blend ---------------------------------------------------------
+  /** End effectors whose limb is pure FK (blend 0) — their handle hides. */
+  function fkOnlyEffectors(): EffectorId[] {
+    const out: EffectorId[] = [];
+    if (ikfk.leftArm <= 0) out.push("leftHand");
+    if (ikfk.rightArm <= 0) out.push("rightHand");
+    if (ikfk.leftLeg <= 0) out.push("leftFoot");
+    if (ikfk.rightLeg <= 0) out.push("rightFoot");
+    return out;
+  }
+  const ikfkSliders: Array<{ el: HTMLInputElement; out: HTMLOutputElement; key: keyof IkfkBlend }> = [];
+  function syncIkfkUi() {
+    for (const s of ikfkSliders) { s.el.value = String(Math.round(ikfk[s.key] * 100)); s.out.value = `${s.el.value}%`; }
+    preview?.setFkOnlyLimbs(fkOnlyEffectors());
+  }
+  function buildIkfk() {
+    const wrap = document.getElementById("ikfkBlend") as HTMLDivElement;
+    const list = document.getElementById("ikfkSliders") as HTMLDivElement;
+    list.innerHTML = "";
+    ikfkSliders.length = 0;
+    const names = (rigBaseClip ?? converted).names;
+    const limbs = ([
+      { key: "leftArm", label: "L arm", root: "LeftUpperArm" },
+      { key: "rightArm", label: "R arm", root: "RightUpperArm" },
+      { key: "leftLeg", label: "L leg", root: "LeftUpperLeg" },
+      { key: "rightLeg", label: "R leg", root: "RightUpperLeg" },
+    ] as Array<{ key: keyof IkfkBlend; label: string; root: string }>).filter((l) => names.includes(l.root));
+    wrap.hidden = limbs.length === 0;
+    for (const limb of limbs) {
+      const label = document.createElement("label");
+      label.className = "field sub";
+      const span = document.createElement("span");
+      const out = document.createElement("output");
+      out.value = `${Math.round(ikfk[limb.key] * 100)}%`;
+      span.append(`${limb.label} `, out);
+      const input = document.createElement("input");
+      input.type = "range";
+      input.min = "0"; input.max = "100"; input.step = "5";
+      input.value = String(Math.round(ikfk[limb.key] * 100));
+      input.title = "100% IK (reach) … 0% FK (segment handles only)";
+      input.addEventListener("input", () => {
+        ikfk[limb.key] = Number(input.value) / 100;
+        out.value = `${input.value}%`;
+        preview?.setFkOnlyLimbs(fkOnlyEffectors());
+      });
+      input.addEventListener("change", () => saveRigCache());
+      label.append(span, input);
+      list.appendChild(label);
+      ikfkSliders.push({ el: input, out, key: limb.key });
+    }
   }
 
   // ---- hand pose stamps ----------------------------------------------------
@@ -1834,6 +1893,10 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     bones: string[];
     movedPos: boolean;
   } | null = null;
+  let poleCtx: {
+    effector: EffectorId; f: number; t: number;
+    startPose: FramePose; solved: FramePose | null; bones: string[];
+  } | null = null;
   preview?.setRigCallbacks({
     onSelect: (e) => {
       selectedEffector = e;
@@ -1925,8 +1988,16 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
         const extra = distributeWristTwist(rigBaseClip, solved, solveAs);
         if (extra && !bones.includes(extra)) bones.push(extra);
       }
+      // Per-limb IK/FK blend: pull the solved chain back toward the pre-drag
+      // FK pose (only in true IK mode, not the rigid FK-limb swing).
+      let outBones = bones;
+      const limb = solveAs === dragCtx.effector ? limbForEffector(dragCtx.effector) : null;
+      if (limb && ikfk[limb] < 1) {
+        outBones = blendChainToFK(rigBaseClip, solved, dragCtx.startPose.quat, dragCtx.effector, bones, ikfk[limb], !!target.rot);
+      }
       dragCtx.solved = solved;
-      dragCtx.bones = bones;
+      dragCtx.bones = outBones;
+      if (!outBones.length) { preview?.setPoseOverride(null); return; }
       // Display = solved + the layers ABOVE the active one, so the live view
       // matches what the bake will produce with the full stack.
       const display = clonePose(solved);
@@ -1949,11 +2020,71 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
       rebakeRig(dirty ?? undefined);
       updateRigEditor();
     },
+    onPoleStart: (e) => {
+      if (!loaded || !rigBaseClip || activeLayerIdx < 0) return false;
+      const layer = rigLayers[activeLayerIdx];
+      if (!layer.enabled) return false;
+      const f = nearestFrame(rigBaseClip, preview!.getTime());
+      const t = rigBaseClip.times[f] - rigBaseClip.times[0];
+      preview!.seek(t);
+      poleCtx = { effector: e, f, t, startPose: stackPoseThrough(rigBaseClip, rigLayers, activeLayerIdx, f), solved: null, bones: [] };
+      return true;
+    },
+    onPoleMove: (e, pos) => {
+      if (!poleCtx || !rigBaseClip || !rigLayers[activeLayerIdx]) return;
+      const solved = clonePose(poleCtx.startPose);
+      const bones = solvePoleOnPose(solved, rigBaseClip.names, rigBaseClip.parents, e, pos);
+      if (!bones.length) return;
+      poleCtx.solved = solved;
+      poleCtx.bones = bones;
+      const display = clonePose(solved);
+      applyLayersToPose(display, rigBaseClip.names, rigBaseClip.parents, rigLayers.slice(activeLayerIdx + 1), poleCtx.t);
+      preview?.setPoseOverride(display);
+    },
+    onPoleEnd: () => {
+      if (!poleCtx) return;
+      const ctx = poleCtx;
+      poleCtx = null;
+      preview?.setPoseOverride(null);
+      const layer = rigLayers[activeLayerIdx];
+      if (!layer || !ctx.solved || !ctx.bones.length || !rigBaseClip) return;
+      pushHistory();
+      const dirty = captureBoneKeys(rigBaseClip, rigLayers, activeLayerIdx, ctx.bones, ctx.solved, ctx.f, ctx.t);
+      rebakeRig(dirty ?? undefined);
+      updateRigEditor();
+    },
+    onContext: (e, x, y) => {
+      selectedEffector = e;
+      const def = effectorDef(e);
+      const items: Array<{ label: string; action?: () => void; disabled?: boolean }> = [];
+      if (def.chain) {
+        const pinned = pinnedEffectors.has(e);
+        items.push({
+          label: pinned ? "Unpin from world" : "Pin to world",
+          action: () => {
+            if (pinned) pinnedEffectors.delete(e); else pinnedEffectors.add(e);
+            preview?.setPinned(pinnedEffectors); saveRigCache(); updateRigEditor();
+          },
+        });
+        const limb = limbForEffector(e);
+        if (limb) {
+          const isFk = ikfk[limb] <= 0;
+          items.push({
+            label: isFk ? "Set limb to IK (100%)" : "Set limb to FK (0%)",
+            action: () => { ikfk[limb] = isFk ? 1 : 0; syncIkfkUi(); saveRigCache(); },
+          });
+        }
+      }
+      if (items.length) showCtxMenu(x, y, items);
+      updateRigEditor();
+    },
   });
 
   renderRigLayers();
   buildHandPose();
+  buildIkfk();
   preview?.setPinned(pinnedEffectors);
+  preview?.setFkOnlyLimbs(fkOnlyEffectors());
 
   // ---- modifiers -----------------------------------------------------------
   const modInputs = [
@@ -2422,7 +2553,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
           rigCacheKey,
           JSON.stringify({
             v: 3, layers: rigLayers, mods, counter: layerCounter, warp: warpKeys, ranges: rangeSmooths,
-            cleanOps, feetPlants: feetPlantRemoved, pins: [...pinnedEffectors], fk: [...fkLimbs],
+            cleanOps, feetPlants: feetPlantRemoved, pins: [...pinnedEffectors], fk: [...fkLimbs], ikfk: { ...ikfk },
             settings: sceneSettings(),
           }),
         );
@@ -2443,12 +2574,15 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     feetPlants?: PlantSpan[];
     pins?: EffectorId[];
     fk?: EffectorId[];
+    ikfk?: Partial<IkfkBlend>;
   }) {
     pinnedEffectors.clear();
     for (const p of d.pins ?? []) pinnedEffectors.add(p);
     fkLimbs.clear();
     for (const p of d.fk ?? []) fkLimbs.add(p);
+    Object.assign(ikfk, defaultIkfkBlend(), d.ikfk ?? {}); // older files default to IK
     preview?.setPinned(pinnedEffectors);
+    preview?.setFkOnlyLimbs(fkOnlyEffectors());
     // v3 moved keys from effector-space to bone-local tracks; older layer
     // keys can't be converted meaningfully — drop them (mods/warp/ranges keep).
     const layers = Array.isArray(d.layers)
@@ -2472,6 +2606,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     activeLayerIdx = rigLayers.length - 1;
     pickedKeys = [];
     syncAdjustUi();
+    syncIkfkUi();
     renderFilters();
     renderRigLayers();
   }
@@ -2511,7 +2646,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
   (document.getElementById("rigSave") as HTMLButtonElement).addEventListener("click", () => {
     if (!loaded) return;
     const json = JSON.stringify(
-      { v: 3, layers: rigLayers, mods, counter: layerCounter, warp: warpKeys, ranges: rangeSmooths, cleanOps, feetPlants: feetPlantRemoved, pins: [...pinnedEffectors], fk: [...fkLimbs] },
+      { v: 3, layers: rigLayers, mods, counter: layerCounter, warp: warpKeys, ranges: rangeSmooths, cleanOps, feetPlants: feetPlantRemoved, pins: [...pinnedEffectors], fk: [...fkLimbs], ikfk: { ...ikfk } },
       null,
       1,
     );
@@ -2591,7 +2726,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
       v: 3,
       name: loaded.name,
       settings: sceneSettings(),
-      rig: { v: 3, layers: rigLayers, mods, counter: layerCounter, warp: warpKeys, ranges: rangeSmooths, cleanOps, feetPlants: feetPlantRemoved, pins: [...pinnedEffectors], fk: [...fkLimbs] },
+      rig: { v: 3, layers: rigLayers, mods, counter: layerCounter, warp: warpKeys, ranges: rangeSmooths, cleanOps, feetPlants: feetPlantRemoved, pins: [...pinnedEffectors], fk: [...fkLimbs], ikfk: { ...ikfk } },
       wanim: bytesToBase64(new Uint8Array(loaded.raw)),
       // Embed the custom body so the project is fully self-contained.
       body: userBodyBytes

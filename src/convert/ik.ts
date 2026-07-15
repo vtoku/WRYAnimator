@@ -58,7 +58,7 @@ export interface TwoBoneResult {
  * `poleFallback` orients the mid joint when root→target passes through the
  * original mid (straight chain) — pass the chain's natural bend direction.
  */
-export function solveTwoBone(w: ChainWorld, target: Vec3, poleFallback: Vec3): TwoBoneResult | null {
+export function solveTwoBone(w: ChainWorld, target: Vec3, poleFallback: Vec3, poleTarget?: Vec3): TwoBoneResult | null {
   const L1 = vlen(vsub(w.midP, w.rootP));
   const L2 = vlen(vsub(w.endP, w.midP));
   if (L1 < 1e-6 || L2 < 1e-6) return null;
@@ -70,8 +70,10 @@ export function solveTwoBone(w: ChainWorld, target: Vec3, poleFallback: Vec3): T
   d = Math.min(Math.max(d, Math.abs(L1 - L2) * 1.0001 + 1e-6), (L1 + L2) * 0.9999);
   const reach = vadd(w.rootP, vscale(dir, d)); // actual (reach-clamped) end target
 
-  // Pole = original mid direction, projected perpendicular to root→target.
-  const kd = vsub(w.midP, w.rootP);
+  // Pole direction: an explicit poleTarget (pole-vector handle) points the mid
+  // joint toward it; otherwise keep the original mid direction. Both projected
+  // perpendicular to root→target so bone lengths are preserved.
+  const kd = poleTarget ? vsub(poleTarget, w.rootP) : vsub(w.midP, w.rootP);
   let pole = vsub(kd, vscale(dir, vdot(kd, dir)));
   const pl = vlen(pole);
   pole = pl > 1e-6 ? vscale(pole, 1 / pl) : vnorm(poleFallback);
