@@ -517,7 +517,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     </div>
 
     <div id="handPose" hidden>
-      <h4 class="group">Hand pose <span class="hint-i" title="Stamp a finger pose onto the active layer at the playhead. Curl closes the fingers, Spread fans them, Thumb curls the thumb. Each slider nudges from the current pose and snaps back to 0 — the keys land on the finger bones like any drag, so they retime, copy, and mirror.">ⓘ</span></h4>
+      <h4 class="group">Hand pose <span class="hint-i" title="Stamp a finger pose onto the active layer at the playhead. Curl closes the fingers, Spread fans them, Thumb curls the thumb. Each slider nudges from the current pose and snaps back to 0. The keys land on the finger bones like any drag, so they retime, copy, and mirror.">ⓘ</span></h4>
       <div id="handPoseSides"></div>
     </div>
 
