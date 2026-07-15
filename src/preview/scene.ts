@@ -47,6 +47,7 @@ export class PreviewScene {
   private camera: THREE.PerspectiveCamera;
   private controls: OrbitControls;
   private clock = new THREE.Clock();
+  private grid: THREE.GridHelper | null = null;
 
   private clip: ConvertedClip | null = null;
   private boneNodes: THREE.Bone[] = [];
@@ -138,7 +139,8 @@ export class PreviewScene {
       new THREE.HemisphereLight(0xffffff, 0x40404c, 0.55),
       new THREE.AmbientLight(0xffffff, 0.15),
     );
-    this.scene.add(new THREE.GridHelper(10, 20, 0x2a2f3a, 0x1b1f27));
+    this.grid = new THREE.GridHelper(10, 20, 0x2a2f3a, 0x1b1f27);
+    this.scene.add(this.grid);
 
     // Rig picking: hovering a handle (or the gizmo) parks OrbitControls so
     // the click selects/drags instead of tumbling the camera.
@@ -900,6 +902,32 @@ export class PreviewScene {
     this.raycaster.setFromCamera(this.pointerNdc, this.camera);
     const hits = this.raycaster.intersectObjects([...this.rigHandles.values()], false);
     return hits.length ? (hits[0].object.userData.effector as EffectorId) : null;
+  }
+
+  /** View menu: recenter on the character if loaded, else the default stance. */
+  resetCamera() {
+    if (this.boneRoot) { this.frameCamera(); return; }
+    this.camera.position.set(0, 1.2, 3);
+    this.camera.near = 0.01;
+    this.camera.far = 1000;
+    this.camera.updateProjectionMatrix();
+    this.controls.target.set(0, 1.0, 0);
+    this.controls.update();
+  }
+
+  /** View menu: fit the camera to the loaded character. */
+  frameCharacter() {
+    this.frameCamera();
+  }
+
+  /** View menu: show/hide the floor grid. Returns the new visibility. */
+  toggleGrid(): boolean {
+    if (this.grid) this.grid.visible = !this.grid.visible;
+    return this.isGridVisible();
+  }
+
+  isGridVisible(): boolean {
+    return !!this.grid?.visible;
   }
 
   private frameCamera() {
