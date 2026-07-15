@@ -1,11 +1,15 @@
-// DCC-boot probe: editor visible immediately, session auto-restore on reload,
-// "Load another file" returns to the empty editor and forgets the session.
+// DCC-boot probe: the editor is on screen immediately with the menu bar, no
+// landing/dropzone, and a DISABLED transport; loading a file enables it and
+// hides the dim prompt; the session auto-restores on reload; "Load another
+// file" returns to the empty editor and forgets the session. Also asserts the
+// Help shortcuts overlay lists every entry of the shared SHORTCUTS table.
 // Usage: node scripts/bootCheck.mjs [file.wanim]   (dev server must be running)
 import { chromium } from "playwright";
 import { readFileSync } from "node:fs";
 
 const URL = process.env.APP_URL ?? "http://localhost:5173/";
-const WANIM = process.argv[2] ?? "C:\\Users\\chaes\\Downloads\\BlackSheep-2-2026-05-24-19-05-57.wanim";
+const WANIM = process.argv[2] ?? process.env.WANIM_SAMPLE ??
+  `${process.env.USERPROFILE ?? ""}\\Downloads\\2026-03-18-03-37-56.wanim`;
 
 const browser = await chromium.launch();
 const ctx = await browser.newContext({ viewport: { width: 1280, height: 800 } }); // one context = persistent IndexedDB
@@ -14,23 +18,40 @@ const errors = [];
 page.on("console", (m) => { if (m.type() === "error") errors.push(m.text()); });
 page.on("pageerror", (e) => errors.push(String(e)));
 
-// 1. Boot: editor chrome + viewport canvas + drop overlay, all with NO file.
+// 1. Boot: editor chrome + canvas + dim prompt, menu bar, NO dropzone, and a
+//    disabled transport — all with no file loaded.
 await page.goto(URL, { waitUntil: "networkidle" });
 const bootEditor = await page.$eval("#loaded-state", (el) => !el.hidden);
 const bootCanvas = !!(await page.$("#viewport canvas"));
-const bootOverlay = await page.$eval("#empty-state", (el) => !el.hidden);
-const bootOpenBtn = !!(await page.$("#ebOpen"));
-console.log("boot: editor", bootEditor, "· canvas", bootCanvas, "· overlay", bootOverlay, "· toolbar Open", bootOpenBtn);
+const bootPrompt = await page.$eval("#empty-state", (el) => !el.hidden);
+const menuLabels = await page.$$eval("#menubar .menu-btn", (b) => b.map((x) => x.textContent));
+const bootMenus = ["File", "Edit", "View", "Help"].every((l) => menuLabels.includes(l));
+const noDropzone = !(await page.$("#dropzone"));
+const transportDisabledEmpty = await page.$eval(".transport-overlay .t-play", (b) => b.disabled).catch(() => false);
+console.log("boot: editor", bootEditor, "· canvas", bootCanvas, "· prompt", bootPrompt,
+  "· menus", bootMenus, "· no dropzone", noDropzone, "· transport disabled", transportDisabledEmpty);
 
-// 2. Load a file through the overlay's input — overlay hides, editor populates.
+// 1b. Help > Keyboard shortcuts overlay lists every shared-table entry.
+await page.click("#menubar .menu-btn:nth-child(4)");
+await page.waitForSelector(".menu-panel");
+await page.click(".menu-panel .menu-item"); // first Help item = Keyboard shortcuts
+await page.waitForSelector(".shortcuts-body");
+const overlayKeys = await page.$$eval(".shortcuts-body kbd", (k) => k.map((x) => x.textContent));
+const tableKeys = await page.evaluate(() => (window.__shortcuts ?? []).map((s) => s.keys));
+const missingKeys = tableKeys.filter((k) => !overlayKeys.includes(k));
+console.log("shortcuts overlay: table entries", tableKeys.length, "· missing", JSON.stringify(missingKeys));
+await page.keyboard.press("Escape");
+
+// 2. Load a file through the input — prompt hides, transport enables, dock fills.
 await page.setInputFiles("#file-input", {
   name: WANIM.split(/[\\/]/).pop(),
   mimeType: "application/octet-stream",
   buffer: readFileSync(WANIM),
 });
 await page.waitForSelector("#dock .stats", { timeout: 20000, state: "attached" });
-const overlayGone = await page.$eval("#empty-state", (el) => el.hidden);
-console.log("after load: overlay hidden", overlayGone);
+const promptGone = await page.$eval("#empty-state", (el) => el.hidden);
+const transportEnabled = await page.$eval(".transport-overlay .t-play", (b) => !b.disabled).catch(() => false);
+console.log("after load: prompt hidden", promptGone, "· transport enabled", transportEnabled);
 await page.waitForTimeout(2500); // let saveLastSession + reclean settle
 
 // 3. Reload: the session must reopen WITHOUT any file input.
@@ -44,8 +65,8 @@ console.log("restore: stats visible · name", JSON.stringify(restoredName), "· 
 await page.click('.dock-tab[data-tab="info"]');
 await page.click("#reset");
 await page.waitForTimeout(1200);
-const overlayBack = await page.$eval("#empty-state", (el) => !el.hidden);
-console.log("reset: overlay back", overlayBack);
+const promptBack = await page.$eval("#empty-state", (el) => !el.hidden);
+console.log("reset: prompt back", promptBack);
 await page.reload({ waitUntil: "networkidle" });
 await page.waitForTimeout(2500);
 const staysEmpty = await page.$eval("#empty-state", (el) => !el.hidden);
@@ -54,6 +75,7 @@ console.log("reload after reset: stays empty", staysEmpty);
 await page.screenshot({ path: "scripts/boot-shot.png" });
 console.log("errors:", errors.length ? errors : "none");
 await browser.close();
-const ok = bootEditor && bootCanvas && bootOverlay && bootOpenBtn && overlayGone && restoredName && overlayBack && staysEmpty && !errors.length;
+const ok = bootEditor && bootCanvas && bootPrompt && bootMenus && noDropzone && transportDisabledEmpty
+  && missingKeys.length === 0 && promptGone && transportEnabled && restoredName && promptBack && staysEmpty && !errors.length;
 console.log(ok ? "OK" : "PROBE FAILED");
 process.exit(ok ? 0 : 1);

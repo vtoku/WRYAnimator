@@ -62,8 +62,12 @@ export interface Transport {
   onMarkersChange(fn: (markers: Marker[]) => void): void;
   /** Whether snap-to-key magnet is on (key drags read this). */
   isMagnet(): boolean;
-  /** Wire the Load/Save buttons (scene handling lives in the app). */
-  setSceneActions(cbs: { save(): void; openWanim(): void; openScene(): void }): void;
+  /** Set the snap-to-key magnet (prefs default on load). */
+  setMagnet(on: boolean): void;
+  /** Cycle the under-strip panel: keys -> curves -> hidden (View menu). */
+  cyclePanel(): void;
+  /** Force a specific under-strip panel (layout presets). */
+  setPanelView(v: "keys" | "curves" | "none"): void;
   /** Show rig-layer key markers on the timeline (replaces the previous set). */
   setKeys(markers: TransportKeyMarker[], cbs?: TransportKeyCallbacks): void;
   /** Correction tick marks along the strip bottom (replaces the previous set). */
@@ -109,11 +113,6 @@ export function createTransport(preview: PreviewScene, duration: number, frames 
   el.className = "transport-overlay";
   el.innerHTML = `
     <div class="t-main">
-      <span class="t-file">
-        <button class="t-btn t-ico t-load-wanim" title="Load a .wanim recording">${ICONS.load}<span>Load .wanim</span></button>
-        <button class="t-btn t-ico t-load-scene" title="Load a saved .scene.json session">${ICONS.load}<span>Load scene</span></button>
-        <button class="t-btn t-ico t-scene-save" title="Save the whole session (recording + edits + settings) as a scene file">${ICONS.save}<span>Save scene</span></button>
-      </span>
       <button class="t-btn t-ico t-play" aria-label="Play/pause" title="Play/pause (Space). ←/→ step a frame, shift for 10.">${ICONS.pause}</button>
       <select class="t-rate" title="Playback speed (review only, doesn't change the clip)">
         <option value="0.25">¼×</option>
@@ -572,7 +571,7 @@ export function createTransport(preview: PreviewScene, duration: number, frames 
     dopeToggle.hidden = dopeCount === 0 && !curveAvailable;
     dopeToggle.textContent = view === "keys" ? "Keys ▾" : view === "curves" ? "Curves ▾" : "Panels ▸";
   };
-  dopeToggle.addEventListener("click", () => {
+  function cyclePanel() {
     const order: Array<typeof view> = ["keys", "curves", "none"];
     for (let i = 1; i <= order.length; i++) {
       const next = order[(order.indexOf(view) + i) % order.length];
@@ -583,7 +582,13 @@ export function createTransport(preview: PreviewScene, duration: number, frames 
     }
     syncDopeVisibility();
     alignDope();
-  });
+  }
+  function setPanelView(v: "keys" | "curves" | "none") {
+    view = v;
+    syncDopeVisibility();
+    alignDope();
+  }
+  dopeToggle.addEventListener("click", cyclePanel);
 
   function setDope(rows: DopeRow[], cbs?: TransportKeyCallbacks) {
     dopeCount = rows.length;
@@ -631,11 +636,9 @@ export function createTransport(preview: PreviewScene, duration: number, frames 
     setMarkers: (m) => { markers = m.slice().sort((a, b) => a.time - b.time); drawMarks(); },
     onMarkersChange: (fn) => { markersCb = fn; },
     isMagnet: () => magnet,
-    setSceneActions: (cbs) => {
-      (el.querySelector(".t-scene-save") as HTMLButtonElement).onclick = () => cbs.save();
-      (el.querySelector(".t-load-wanim") as HTMLButtonElement).onclick = () => cbs.openWanim();
-      (el.querySelector(".t-load-scene") as HTMLButtonElement).onclick = () => cbs.openScene();
-    },
+    setMagnet: (on) => { magnet = on; magnetBtn.classList.toggle("active", on); },
+    cyclePanel,
+    setPanelView,
     setKeys,
     setMarks,
     setRanges,

@@ -36,12 +36,19 @@ import { createTransport, type Transport, type TransportKeyMarker } from "./ui/t
 import type { Marker } from "./ui/timemap.ts";
 import { saveLastSession, loadLastSession, clearLastSession } from "./session.ts";
 import { ICONS } from "./ui/icons.ts";
+import { buildMenuBar, type MenuDef, type MenuItem } from "./ui/menu.ts";
+import { keyFor, SHORTCUTS } from "./ui/shortcuts.ts";
+import { openShortcuts, openAbout, openPreferences as openPreferencesDialog } from "./ui/dialogs.ts";
+import { getPref, applyAppearance } from "./ui/prefs.ts";
+import { initLayout, setDockCollapsed, setLayoutSizes } from "./ui/layout.ts";
+import * as recent from "./ui/recent.ts";
 
-const emptyState = document.getElementById("empty-state") as HTMLElement; // drop-prompt overlay in the viewport
-const dropzone = document.getElementById("dropzone") as HTMLElement;
+const emptyState = document.getElementById("empty-state") as HTMLElement; // dim prompt over the viewport grid
+const menubarEl = document.getElementById("menubar") as HTMLElement;
 const fileInput = document.getElementById("file-input") as HTMLInputElement;
 const errorEl = document.getElementById("empty-error") as HTMLElement;
 const viewport = document.getElementById("viewport") as HTMLElement;
+const editMain = document.querySelector(".edit-main") as HTMLElement;
 const editbar = document.getElementById("editbar") as HTMLElement;
 const dock = document.getElementById("dock") as HTMLElement;
 const timelineDock = document.getElementById("timeline-dock") as HTMLElement;
@@ -68,6 +75,11 @@ document.addEventListener("keydown", (e) => {
   const tgt = e.target as HTMLElement | null;
   const inField = !!tgt && (tgt.tagName === "INPUT" || tgt.tagName === "SELECT" || tgt.tagName === "TEXTAREA");
   if (e.ctrlKey || e.metaKey) {
+    // Ctrl+O / Ctrl+S are app-global (no text-editing meaning) — intercept
+    // them even in a field and with no clip loaded.
+    const kk = e.key.toLowerCase();
+    if (kk === "o" && !e.shiftKey) { e.preventDefault(); openRecordingPicker(); return; }
+    if (kk === "s" && !e.shiftKey) { e.preventDefault(); menuActions?.saveScene(); return; }
     // In a text field the browser's own editing shortcuts (incl. text undo)
     // must win — hijacking Ctrl+Z there silently destroyed rig edits.
     if (inField || !rigHotkeys) return;
@@ -125,6 +137,158 @@ function showCtxMenu(x: number, y: number, items: Array<{ label: string; action?
 }
 let transport: Transport | null = null;
 let transportDuration = 0; // scale the transport was built with (warp changes it)
+
+// ---- menu bar ---------------------------------------------------------------
+// The File/Edit/View/Help actions live inside the per-recording buildPanel
+// closure, so buildPanel registers them here and showEmptyEditor clears them.
+// Clip-dependent menu items dim while `menuActions` is null (no recording).
+interface MenuActions {
+  saveScene(): void;
+  saveSceneAs(): void;
+  export(fmt: "fbx" | "vrma" | "wanim" | "shogun"): void;
+  openBody(): void;
+  undo(): void;
+  redo(): void;
+  copy(): void;
+  paste(): void;
+  del(): void;
+  keyPose(): void;
+  resetModifiers(): void;
+  setDockTab(t: "clean" | "rig" | "export" | "info"): void;
+  cyclePanels(): void;
+  toggleGhost(): void;
+  ghostOn(): boolean;
+  toggleCompareLock(): void;
+  compareLocked(): boolean;
+}
+let menuActions: MenuActions | null = null;
+
+const APP_VERSION = document.querySelector(".version")?.textContent?.trim() ?? "";
+
+async function openRecordingPicker() {
+  if (recent.supported()) {
+    const picked = await recent.pickOpen("recording");
+    if (picked) { recent.setSaveHandle(null); await handleFile(picked.file); }
+    return;
+  }
+  fileInput.accept = ".wanim"; fileInput.click();
+}
+async function openScenePicker() {
+  if (recent.supported()) {
+    const picked = await recent.pickOpen("scene");
+    if (picked) { recent.setSaveHandle(picked.handle); await handleFile(picked.file); }
+    return;
+  }
+  fileInput.accept = ".json,application/json"; fileInput.click();
+}
+
+const openPreferences = openPreferencesDialog;
+// View menu layout presets: set both splitter sizes + the dock/panel state.
+function applyLayoutPreset(preset: "default" | "cleanup" | "rig") {
+  if (preset === "default") {
+    setDockCollapsed(dock, false);
+    setLayoutSizes(dock, 352, 0);
+    transport?.setPanelView("keys");
+  } else if (preset === "cleanup") {
+    setDockCollapsed(dock, true);        // dock as a thin tab strip
+    setLayoutSizes(dock, 352, 280);      // taller timeline dock, curves open
+    transport?.setPanelView("curves");
+  } else {
+    setDockCollapsed(dock, false);       // rig: dock open on Rig, dope open
+    setLayoutSizes(dock, 380, 160);
+    menuActions?.setDockTab("rig");
+    transport?.setPanelView("keys");
+  }
+}
+// File > Recent: real reopenable handles via the File System Access API;
+// hidden entirely when unavailable (a dropped/<input> file cannot be reopened).
+const recentSupported = () => recent.supported();
+const recentSubmenu = (): MenuItem[] => {
+  const entries = recent.getRecent();
+  if (!entries.length) return [{ label: "No recent files", enabled: () => false }];
+  return entries.map((e) => ({
+    label: `${e.name}`,
+    action: () => void (async () => {
+      const file = await recent.openRecent(e);
+      if (!file) { showError(`Couldn't reopen ${e.name} (permission denied or file moved).`); return; }
+      recent.setSaveHandle(e.kind === "scene" ? e.handle : null);
+      await handleFile(file);
+    })(),
+  }));
+};
+
+const hasClip = () => !!menuActions;
+
+const menuDefs: MenuDef[] = [
+  {
+    label: "File",
+    items: () => [
+      { label: "Open recording...", hotkey: keyFor("open"), action: openRecordingPicker },
+      { label: "Open scene...", action: openScenePicker },
+      { label: "Open body (VRM/GLB)...", enabled: hasClip, action: () => menuActions?.openBody() },
+      { label: "Recent", submenu: recentSubmenu, hidden: () => !recentSupported() },
+      { separator: true },
+      { label: "Save scene", hotkey: keyFor("save"), enabled: hasClip, action: () => menuActions?.saveScene() },
+      { label: "Save scene as...", enabled: hasClip, action: () => menuActions?.saveSceneAs() },
+      { separator: true },
+      { label: "Export FBX", enabled: hasClip, action: () => menuActions?.export("fbx") },
+      { label: "Export VRMA", enabled: hasClip, action: () => menuActions?.export("vrma") },
+      { label: "Export WANIM", enabled: hasClip, action: () => menuActions?.export("wanim") },
+      { label: "Export Shogun target rig", enabled: hasClip, action: () => menuActions?.export("shogun") },
+    ],
+  },
+  {
+    label: "Edit",
+    items: () => [
+      { label: "Undo", hotkey: keyFor("undo"), enabled: hasClip, action: () => menuActions?.undo() },
+      { label: "Redo", hotkey: keyFor("redo"), enabled: hasClip, action: () => menuActions?.redo() },
+      { separator: true },
+      { label: "Copy keys", hotkey: keyFor("copy"), enabled: hasClip, action: () => menuActions?.copy() },
+      { label: "Paste keys", hotkey: keyFor("paste"), enabled: hasClip, action: () => menuActions?.paste() },
+      { label: "Delete keys", hotkey: keyFor("delete"), enabled: hasClip, action: () => menuActions?.del() },
+      { separator: true },
+      { label: "Key pose", enabled: hasClip, action: () => menuActions?.keyPose() },
+      { label: "Reset modifiers", enabled: hasClip, action: () => menuActions?.resetModifiers() },
+      { separator: true },
+      { label: "Preferences...", action: () => openPreferences() },
+    ],
+  },
+  {
+    label: "View",
+    items: () => [
+      { label: "Clean panel", enabled: hasClip, action: () => menuActions?.setDockTab("clean") },
+      { label: "Rig panel", enabled: hasClip, action: () => menuActions?.setDockTab("rig") },
+      { label: "Export panel", enabled: hasClip, action: () => menuActions?.setDockTab("export") },
+      { label: "Info panel", enabled: hasClip, action: () => menuActions?.setDockTab("info") },
+      { separator: true },
+      { label: "Cycle keys / curves / hidden", enabled: hasClip, action: () => menuActions?.cyclePanels() },
+      { label: "Ghost overlay", checked: () => !!menuActions?.ghostOn(), enabled: hasClip, action: () => menuActions?.toggleGhost() },
+      { label: "Lock hold-to-compare", checked: () => !!menuActions?.compareLocked(), enabled: hasClip, action: () => menuActions?.toggleCompareLock() },
+      { separator: true },
+      { label: "Reset camera", action: () => preview?.resetCamera() },
+      { label: "Frame character", enabled: hasClip, action: () => preview?.frameCharacter() },
+      { label: "Toggle grid", checked: () => !!preview?.isGridVisible(), action: () => preview?.toggleGrid() },
+      { separator: true },
+      { label: "Collapse dock", checked: () => getPref("dockCollapsed"), action: () => setDockCollapsed(dock, !getPref("dockCollapsed")) },
+      { label: "Layout: Default", action: () => applyLayoutPreset("default") },
+      { label: "Layout: Cleanup", action: () => applyLayoutPreset("cleanup") },
+      { label: "Layout: Rig", action: () => applyLayoutPreset("rig") },
+    ],
+  },
+  {
+    label: "Help",
+    items: () => [
+      { label: "Keyboard shortcuts", action: openShortcuts },
+      { label: "About", action: () => openAbout(APP_VERSION) },
+    ],
+  },
+];
+applyAppearance(); // UI scale + hint visibility from saved prefs
+initLayout(dock, editMain, timelineDock); // splitters + persisted sizes + collapse
+void recent.initRecent(); // load the File > Recent list (if the API is available)
+buildMenuBar(menubarEl, menuDefs);
+// Test hook: bootcheck asserts every table entry shows in the Help overlay.
+(window as unknown as { __shortcuts?: typeof SHORTCUTS }).__shortcuts = SHORTCUTS;
 
 // ---- scene files ------------------------------------------------------------
 // A scene bundles the RECORDING plus every edit and setting into one JSON, so
@@ -709,6 +873,20 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
   const limitLowerArmsChk = document.getElementById("limitLowerArms") as HTMLInputElement;
   const lockLowerArmSel = document.getElementById("lockLowerArmTwist") as HTMLSelectElement;
   const fixFeetChk = document.getElementById("fixFeet") as HTMLInputElement;
+
+  // Preference defaults for a NEW session: these seed the baseline before the
+  // per-recording cache / scene restore (which runs later and overrides them),
+  // so an already-edited recording never gets retroactively reset.
+  fpsSel.value = String(getPref("exportFps"));
+  namesSel.value = getPref("nameScheme");
+  restSel.value = getPref("restPose");
+  despikeChk.checked = getPref("cleanDespike");
+  smoothChk.checked = getPref("cleanSmooth");
+  limitWristsChk.checked = getPref("cleanLimitWrists");
+  limitLowerArmsChk.checked = getPref("cleanLimitForearm");
+  fixFeetChk.checked = getPref("cleanFixFeet");
+  transport?.setMagnet(getPref("snapMagnet"));
+
   // Declared here (not with the rest of the edit state) so cleanOpts, which is
   // called synchronously while seeding prevPipelineJson, can reference it.
   const feetPlantRemoved: PlantSpan[] = []; // user-removed foot plants (scene state)
@@ -945,6 +1123,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
   // camera, playhead, and trim all carry over, so differences pop visually.
   const compareBtn = document.getElementById("compare") as HTMLButtonElement;
   let comparing = false;
+  let compareLocked = false; // View menu: keep the uncleaned view up without holding
   const showClip = (clip: ConvertedClip) => {
     if (!preview) return;
     const trim = transport?.getTrim();
@@ -952,7 +1131,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     if (trim) preview.setTrim(trim.start, trim.end);
   };
   compareBtn.addEventListener("pointerdown", () => {
-    if (!loaded || !preview || comparing) return;
+    if (!loaded || !preview || comparing || compareLocked) return;
     void (async () => {
       compareBase ??= await buildDisplay(false);
       comparing = true;
@@ -962,6 +1141,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     })();
   });
   const endCompare = () => {
+    if (compareLocked) return; // held release must not cancel the menu lock
     if (!comparing || !loaded?.display) return;
     comparing = false;
     compareBtn.classList.remove("active");
@@ -970,6 +1150,27 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
   };
   for (const ev of ["pointerup", "pointerleave", "pointercancel"] as const) {
     compareBtn.addEventListener(ev, endCompare);
+  }
+
+  // Menu "Lock hold-to-compare": keep the uncleaned view up without holding.
+  function toggleCompareLock() {
+    if (!loaded || !preview) return;
+    compareLocked = !compareLocked;
+    compareBtn.classList.toggle("locked", compareLocked);
+    if (compareLocked) {
+      void (async () => {
+        compareBase ??= await buildDisplay(false);
+        if (!compareLocked) return;
+        comparing = true;
+        showClip(compareBase);
+        transport?.curveView.setCompare(true);
+      })();
+    } else {
+      comparing = false;
+      compareBtn.classList.remove("active");
+      if (loaded?.display) showClip(loaded.display);
+      transport?.curveView.setCompare(false);
+    }
   }
 
   // Ghost toggle: the uncleaned recording as a grey overlay skeleton, playing
@@ -1879,7 +2080,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
   rigSpaceBtn.addEventListener("click", () => {
     setGizmoSpaceUi(preview?.getGizmoSpace() === "local" ? "world" : "local");
   });
-  setGizmoSpaceUi("local"); // bone-aligned rings by default — world axes rarely match a limb
+  setGizmoSpaceUi(getPref("gizmoSpace")); // default from prefs (bone-aligned unless overridden)
 
   rigNeutralBtn.addEventListener("click", () => {
     const layer = rigLayers[activeLayerIdx];
@@ -1919,7 +2120,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     captureBoneKeys(rigBaseClip, rigLayers, activeLayerIdx, bones, pose, f, t, bones.includes("Hips"));
   }
 
-  (document.getElementById("rigKeyAll") as HTMLButtonElement).addEventListener("click", () => {
+  function doKeyPose() {
     const layer = rigLayers[activeLayerIdx];
     if (!layer || !rigBaseClip || !preview) return;
     const t = preview.getTime();
@@ -1927,7 +2128,8 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     keyPoseByMode(nearestFrame(rigBaseClip, t), t);
     rebakeRig();
     updateRigEditor();
-  });
+  }
+  (document.getElementById("rigKeyAll") as HTMLButtonElement).addEventListener("click", doKeyPose);
 
   rigDelKeyBtn.addEventListener("click", () => {
     const layer = rigLayers[activeLayerIdx];
@@ -2501,7 +2703,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     renderRangeChips();
   }
 
-  (document.getElementById("modReset") as HTMLButtonElement).addEventListener("click", () => {
+  function doResetModifiers() {
     const dirty = modInputs.some((m) => mods[m.key] !== 0) || mods.mirror || anyReach(mods) || warpKeys.length || rangeSmooths.length;
     if (!dirty) return;
     pushHistory();
@@ -2512,7 +2714,8 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     remapForWarpChange(oldWarp, warpKeys); // layer keys back onto the unwarped timeline
     syncAdjustUi();
     void reclean();
-  });
+  }
+  (document.getElementById("modReset") as HTMLButtonElement).addEventListener("click", doResetModifiers);
 
   despikeVal.value = `${despikeDeg.value}°`;
   cutoffVal.value = `${cutoff.value} Hz`;
@@ -2619,6 +2822,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
   const rigCacheNote = document.getElementById("rigCacheNote") as HTMLParagraphElement;
 
   function saveRigCache() {
+    if (!getPref("autosave")) return; // preference: don't persist edits
     try {
       const dirty =
         rigLayers.length ||
@@ -2798,7 +3002,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
   }
 
   /** One button, whole work project: recording + edits + settings + assets. */
-  function saveScene() {
+  function saveScene(baseName?: string, forcePicker = false) {
     if (!loaded) return;
     const scene: SceneFile = {
       magic: "wanimscene",
@@ -2812,17 +3016,26 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
         ? { name: userBodyBytes.name, data: bytesToBase64(new Uint8Array(userBodyBytes.data)) }
         : undefined,
     };
-    downloadBytes(`${sanitizeFilename(loaded.name)}.scene.json`, new TextEncoder().encode(JSON.stringify(scene)));
+    const base = sanitizeFilename(baseName || loaded.name) || "scene";
+    const bytes = new TextEncoder().encode(JSON.stringify(scene));
+    // Handle-aware save: re-saves to the held handle (Ctrl+S), prompts when
+    // there's none, or downloads when the FS Access API is unavailable.
+    void recent.saveScene(`${base}.scene.json`, bytes, forcePicker);
   }
-  (document.getElementById("sceneSave") as HTMLButtonElement).addEventListener("click", saveScene);
+  function saveSceneAs() {
+    if (!loaded) return;
+    // Force a fresh save-file picker (or, unsupported, a plain download with a
+    // prompted name).
+    if (recent.supported()) { saveScene(undefined, true); return; }
+    const name = prompt("Save scene as (file name):", sanitizeFilename(loaded.name));
+    if (name === null) return;
+    saveScene(name);
+  }
+  (document.getElementById("sceneSave") as HTMLButtonElement).addEventListener("click", () => saveScene());
 
   function wireTransportScene() {
-    transport?.setSceneActions({
-      save: saveScene,
-      // Filter the shared input per button; the change handler resets it.
-      openWanim: () => { fileInput.accept = ".wanim"; fileInput.click(); },
-      openScene: () => { fileInput.accept = ".json,application/json"; fileInput.click(); },
-    });
+    // Load/Save now live in the File menu; the transport just keeps markers +
+    // channels wired (this runs again after a warp-duration transport rebuild).
     transport?.setMarkers(sceneMarkers);
     transport?.onMarkersChange((m) => { sceneMarkers = m; saveRigCache(); });
     wireChannels();
@@ -2899,9 +3112,9 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
   outNameEl.value = `${sanitizeFilename(name)}_cleaned`;
   /** Export base name — the user names the output so "which one is cleaned" stays obvious. */
   const outBase = () => sanitizeFilename(outNameEl.value.trim()) || `${sanitizeFilename(loaded?.name ?? "export")}_cleaned`;
-  downloadBtn.addEventListener("click", async () => {
+  async function doExport(format: string) {
     if (!loaded) return;
-    const format = formatSel.value;
+    if (format === "shogun") { shogunDlBtn.click(); return; }
     downloadBtn.disabled = true;
     downloadBtn.textContent = "Generating…";
     await new Promise((r) => setTimeout(r, 16));
@@ -2977,7 +3190,29 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
       downloadBtn.disabled = false;
       downloadBtn.textContent = "Download";
     }
-  });
+  }
+  downloadBtn.addEventListener("click", () => { void doExport(formatSel.value); });
+
+  // Expose this panel's actions to the (persistent) menu bar.
+  menuActions = {
+    saveScene: () => saveScene(),
+    saveSceneAs,
+    export: (fmt) => { void doExport(fmt); },
+    openBody: () => bodyFile.click(),
+    undo: rigUndo,
+    redo: rigRedo,
+    copy: copyPicked,
+    paste: pastePicked,
+    del: deletePicked,
+    keyPose: doKeyPose,
+    resetModifiers: doResetModifiers,
+    setDockTab: (t) => setTab(t),
+    cyclePanels: () => transport?.cyclePanel(),
+    toggleGhost: () => ghostBtn.click(),
+    ghostOn: () => ghostOn,
+    toggleCompareLock,
+    compareLocked: () => compareLocked,
+  };
 
   resetBtn.addEventListener("click", () => {
     errorEl.hidden = true;
@@ -2988,36 +3223,54 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
 }
 
 /**
- * The editor with no recording: viewport grid + drop prompt overlay,
- * placeholder toolbar/dock with Open… entry points. Both the boot state and
- * where "Load another file" returns to.
+ * The editor with no recording (boot state and where "Load another file"
+ * returns): the viewport grid is orbitable behind a single dim prompt line,
+ * the dock shows its four tabs each with an empty note, and the transport is a
+ * disabled placeholder. Everything is opened from the File menu / Ctrl+O / a
+ * drop, so there's no button here.
  */
 function showEmptyEditor() {
   loaded = null;
   rigHotkeys = null;
   transportHotkeys = null;
+  menuActions = null;
   transport?.dispose();
   transport = null;
   preview?.clear();
   emptyState.hidden = false;
-  editbar.innerHTML = `
-    <span class="eb-hint">No recording loaded</span>
-    <span class="eb-spacer"></span>
-    <button id="ebOpen" class="eb-btn">Open…</button>
-  `;
-  (document.getElementById("ebOpen") as HTMLButtonElement).addEventListener("click", () => fileInput.click());
+  editbar.innerHTML = `<span class="eb-hint">No recording loaded — open one from File, or press Ctrl+O</span>`;
+  const emptyTabs: [string, string, string][] = [
+    ["clean", "Clean", "Open a recording to clean up its motion."],
+    ["rig", "Rig", "Open a recording to pose and layer edits."],
+    ["export", "Export", "Open a recording to export FBX, VRMA, or wanim."],
+    ["info", "Info", "Open a <code>.wanim</code> recording or a saved <code>.scene.json</code>."],
+  ];
   dock.innerHTML = `
+    <nav class="dock-tabs" role="tablist">
+      ${emptyTabs.map(([id, label], i) => `<button class="dock-tab${i === 0 ? " active" : ""}" data-tab="${id}">${label}</button>`).join("")}
+    </nav>
     <div class="dock-body">
-      <div class="tab active">
-        <h2>Start</h2>
-        <p class="note">Open a <code>.wanim</code> recording or a saved
-          <code>.scene.json</code>, or just drop one anywhere on the page.</p>
-        <button id="dockOpen" class="button primary">Open a file…</button>
+      ${emptyTabs.map(([id, , note], i) => `<div class="tab${i === 0 ? " active" : ""}" id="tab-${id}"><p class="note">${note}</p></div>`).join("")}
+    </div>
+  `;
+  const emptyTabBtns = Array.from(dock.querySelectorAll<HTMLButtonElement>(".dock-tab"));
+  for (const b of emptyTabBtns) {
+    b.addEventListener("click", () => {
+      for (const x of emptyTabBtns) x.classList.toggle("active", x === b);
+      for (const el of dock.querySelectorAll(".tab")) el.classList.toggle("active", el.id === `tab-${b.dataset.tab}`);
+    });
+  }
+  // Disabled placeholder transport so the timeline dock reads as "present but
+  // inert" until a clip loads (createTransport replaces it on load).
+  timelineDock.innerHTML = `
+    <div class="transport-overlay disabled" aria-disabled="true">
+      <div class="t-main">
+        <button class="t-btn t-play" disabled aria-label="Play/pause">${ICONS.play}</button>
+        <div class="t-timeline" aria-disabled="true"></div>
+        <span class="t-time">0:00.00 / 0:00.00</span>
       </div>
     </div>
   `;
-  (document.getElementById("dockOpen") as HTMLButtonElement).addEventListener("click", () => fileInput.click());
-  timelineDock.innerHTML = "";
 }
 
 /** Set the moment the user opens anything — cancels the boot auto-restore. */
@@ -3026,6 +3279,12 @@ let userOpenedFile = false;
 let restoredSessionName: string | null = null;
 
 async function handleFile(file: File) {
+  // Preference: confirm before dropping the current session for a new file
+  // (edits stay cached per recording, so nothing is truly lost).
+  if (loaded && getPref("confirmReplace") &&
+      !window.confirm("Open a different file? Your edits stay saved for the current recording.")) {
+    return;
+  }
   userOpenedFile = true;
   errorEl.hidden = true;
   const lower = file.name.toLowerCase();
@@ -3066,9 +3325,11 @@ async function loadWanim(name: string, raw: ArrayBuffer, fromRestore = false) {
 
     if (!preview) preview = new PreviewScene(viewport);
     (window as unknown as { __preview?: PreviewScene }).__preview = preview; // test hook
+    preview.setRate(getPref("playbackRate")); // review speed default from prefs
     preview.setClip(converted);
 
     transport?.dispose();
+    timelineDock.innerHTML = ""; // drop the disabled empty-state placeholder
     transport = createTransport(preview, converted.duration, converted.times.length);
     transportDuration = converted.duration;
     timelineDock.appendChild(transport.element);
@@ -3082,17 +3343,9 @@ async function loadWanim(name: string, raw: ArrayBuffer, fromRestore = false) {
   }
 }
 
-dropzone.addEventListener("click", () => fileInput.click());
-document.getElementById("openFileBtn")?.addEventListener("click", (e) => {
-  e.stopPropagation();
-  fileInput.click();
-});
-dropzone.addEventListener("keydown", (e) => {
-  if (e.key === "Enter" || e.key === " ") fileInput.click();
-});
 fileInput.addEventListener("change", () => {
   const file = fileInput.files?.[0];
-  if (file) void handleFile(file);
+  if (file) { recent.setSaveHandle(null); void handleFile(file); } // no reopenable handle
   fileInput.value = "";
   fileInput.accept = ".wanim,.json"; // undo any per-button filter
 });
@@ -3100,20 +3353,21 @@ fileInput.addEventListener("cancel", () => {
   fileInput.accept = ".wanim,.json";
 });
 
+// Whole-page drag-drop (the dim empty line brightens while a file hovers).
 for (const evt of ["dragover", "dragenter"] as const) {
   document.addEventListener(evt, (e) => {
     e.preventDefault();
-    dropzone.classList.add("dragging");
+    emptyState.classList.add("dragging");
   });
 }
 for (const evt of ["dragleave", "dragend"] as const) {
-  document.addEventListener(evt, () => dropzone.classList.remove("dragging"));
+  document.addEventListener(evt, () => emptyState.classList.remove("dragging"));
 }
 document.addEventListener("drop", (e) => {
   e.preventDefault();
-  dropzone.classList.remove("dragging");
+  emptyState.classList.remove("dragging");
   const file = e.dataTransfer?.files?.[0];
-  if (file) void handleFile(file);
+  if (file) { recent.setSaveHandle(null); void handleFile(file); } // dropped = no reopenable handle
 });
 
 // ---- boot: straight into the editor, DCC style -----------------------------

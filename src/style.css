@@ -41,10 +41,90 @@ body {
 
 .topbar {
   display: flex;
-  justify-content: space-between;
   align-items: center;
-  padding: 0.8rem 1.2rem;
+  gap: 1rem;
+  padding: 0.45rem 1.2rem;
   border-bottom: 1px solid var(--border);
+}
+
+.topbar-right {
+  margin-left: auto;
+}
+
+/* ---- menu bar (File / Edit / View / Help) -------------------------------- */
+.menubar {
+  display: flex;
+  align-items: center;
+  gap: 0.1rem;
+}
+
+.menu-btn {
+  background: none;
+  border: none;
+  color: var(--text);
+  font: inherit;
+  font-size: 0.86rem;
+  padding: 0.3rem 0.7rem;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.menu-btn:hover,
+.menu-btn[aria-expanded="true"] {
+  background: var(--bg-raise);
+}
+
+.menu-panel {
+  position: fixed;
+  z-index: 200;
+  min-width: 15rem;
+  background: #1c212b;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.3rem;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+  display: flex;
+  flex-direction: column;
+}
+
+.menu-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1.5rem;
+  background: none;
+  border: none;
+  color: var(--text);
+  text-align: left;
+  padding: 0.4rem 0.65rem;
+  border-radius: 5px;
+  cursor: pointer;
+  font-size: 0.85rem;
+  white-space: nowrap;
+}
+
+.menu-item:hover:not(:disabled),
+.menu-item:focus-visible {
+  background: #2a3140;
+  outline: none;
+}
+
+.menu-item:disabled {
+  color: var(--text-dim);
+  opacity: 0.5;
+  cursor: default;
+}
+
+.menu-item .mi-key {
+  color: var(--text-dim);
+  font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.menu-sep {
+  height: 1px;
+  background: var(--border);
+  margin: 0.25rem 0.3rem;
 }
 
 /* Self-hosted so the app makes no external font request (offline-friendly,
@@ -107,68 +187,46 @@ main:has(.loaded-state:not([hidden])) {
   align-items: stretch;
 }
 
-/* Empty-scene prompt: floats over the viewport grid (the app boots straight
-   into the editor, DCC style); pointer-events pass through outside the cards
-   so the camera still orbits behind it. */
+/* Empty-scene prompt: one dim line floating over the orbitable viewport grid
+   (the app boots straight into the editor, DCC style). pointer-events pass
+   through so the camera orbits behind it; it fades out once a clip loads. */
 .viewport-empty {
   position: absolute;
   inset: 0;
   z-index: 5;
   display: flex;
-  flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 1.6rem;
+  pointer-events: none;
+  transition: opacity 0.4s ease;
+}
+
+.empty-line {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: 0.95rem;
+  letter-spacing: 0.01em;
+  padding: 0.5rem 1rem;
+  border-radius: 8px;
+  transition: color 0.15s, box-shadow 0.15s;
+}
+
+.viewport-empty.dragging .empty-line {
+  color: var(--text);
+  box-shadow: 0 0 0 1px var(--accent) inset;
+}
+
+/* Disabled placeholder transport (empty state) — inert until a clip loads. */
+.transport-overlay.disabled {
+  opacity: 0.5;
   pointer-events: none;
 }
 
-.viewport-empty .hero,
-.viewport-empty .dropzone,
-.viewport-empty .open-btn {
-  pointer-events: auto;
-}
-
-.viewport-empty .button.open-btn {
-  width: auto;
-  padding: 0.5rem 1.4rem;
-}
-
-.hero {
-  text-align: center;
-}
-
-.hero-sub {
-  color: var(--text-dim);
-  margin-top: 0.6rem;
-}
-
-.dropzone {
-  width: min(30rem, 85%);
-  border: 2px dashed var(--border);
-  border-radius: 12px;
-  padding: 3rem 1.5rem;
-  text-align: center;
-  cursor: pointer;
-  background: rgba(21, 24, 30, 0.88);
-  transition: border-color 0.15s, background 0.15s;
-}
-
-.dropzone:hover,
-.dropzone:focus-visible,
-.dropzone.dragging {
-  border-color: var(--accent);
-  outline: none;
-}
-
-.dropzone-title {
-  margin: 0 0 0.4rem;
-  font-weight: 600;
-}
-
-.dropzone-sub {
-  margin: 0;
-  color: var(--text-dim);
-  font-size: 0.9rem;
+.transport-overlay.disabled .t-timeline {
+  flex: 1;
+  height: 22px;
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 4px;
 }
 
 .error-text {
@@ -303,12 +361,55 @@ main:has(.loaded-state:not([hidden])) {
 }
 
 .dock {
-  width: 22rem;
+  position: relative;
+  width: var(--dock-width, 22rem);
   display: flex;
   flex-direction: column;
   background: var(--bg-raise);
   border-left: 1px solid var(--border);
   min-height: 0;
+}
+
+/* Left-edge grip: drag to resize the dock width (layout.ts hot-zone). */
+.dock::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 6px;
+  margin-left: -3px;
+  cursor: col-resize;
+  z-index: 6;
+}
+
+.dock::before:hover {
+  background: linear-gradient(90deg, transparent, rgba(245, 179, 1, 0.35));
+}
+
+/* Collapsed dock: a thin vertical tab strip; click a tab to reopen. */
+.dock.collapsed {
+  width: 2.6rem;
+}
+
+.dock.collapsed .dock-body {
+  display: none;
+}
+
+.dock.collapsed .dock-tabs {
+  flex-direction: column;
+}
+
+.dock.collapsed .dock-tab {
+  writing-mode: vertical-rl;
+  padding: 0.7rem 0.35rem;
+  border-bottom: none;
+  border-left: 2px solid transparent;
+}
+
+.dock.collapsed .dock-tab.active {
+  border-left-color: var(--accent);
+  border-bottom-color: transparent;
 }
 
 .dock-tabs {
@@ -360,9 +461,28 @@ main:has(.loaded-state:not([hidden])) {
 }
 
 .timeline-dock {
+  position: relative;
   min-width: 0;
+  min-height: var(--timeline-height, 0);
   border-top: 1px solid var(--border);
   background: var(--bg-raise);
+}
+
+/* Top-edge grip: drag to resize the timeline dock height (layout.ts hot-zone). */
+.timeline-dock::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 6px;
+  margin-top: -3px;
+  cursor: row-resize;
+  z-index: 6;
+}
+
+.timeline-dock::before:hover {
+  background: linear-gradient(180deg, rgba(245, 179, 1, 0.35), transparent);
 }
 
 @media (max-width: 720px) {
@@ -1084,6 +1204,11 @@ code {
   opacity: 1;
 }
 
+/* Preferences: master switch for the (i) hint tooltips. */
+.hide-hints .hint-i {
+  display: none;
+}
+
 .open-btn {
   width: auto;
   padding: 0.6rem 1.6rem;
@@ -1125,3 +1250,153 @@ code {
 .picker-finger-row { display: flex; align-items: center; gap: 4px; margin: 2px 0; font-size: 0.78rem; color: var(--text-dim); }
 .picker-finger-row span { width: 3.4rem; }
 .picker-seg { padding: 1px 7px; min-width: 0; font-size: 0.75rem; }
+
+/* ---- modal dialogs (Help overlay, About, Preferences) -------------------- */
+.modal-back {
+  position: fixed;
+  inset: 0;
+  z-index: 300;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem;
+}
+
+.modal {
+  background: var(--bg-raise);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  width: min(30rem, 100%);
+  max-height: 88vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.55);
+}
+
+.modal-wide {
+  width: min(44rem, 100%);
+}
+
+.modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.8rem 1.1rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.modal-head h2 {
+  margin: 0;
+  font-size: 1.05rem;
+}
+
+.modal-x {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  font-size: 1.4rem;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 0.3rem;
+}
+
+.modal-x:hover {
+  color: var(--text);
+}
+
+.modal-body {
+  padding: 1rem 1.1rem 1.3rem;
+  overflow-y: auto;
+}
+
+.about-body .logo {
+  font-size: 1.4rem;
+  margin: 0 0 0.6rem;
+}
+
+.about-body a {
+  color: var(--accent);
+}
+
+.shortcuts-body {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+  gap: 1rem 1.6rem;
+}
+
+.shortcut-group h3 {
+  margin: 0 0 0.4rem;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+}
+
+.shortcut-list {
+  margin: 0;
+  display: grid;
+  gap: 0.3rem;
+}
+
+.shortcut-list > div {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.shortcut-list dt {
+  color: var(--text);
+  font-size: 0.85rem;
+}
+
+.shortcut-list dd {
+  margin: 0;
+}
+
+kbd {
+  background: #232833;
+  border: 1px solid var(--border);
+  border-bottom-width: 2px;
+  border-radius: 5px;
+  padding: 0.05rem 0.4rem;
+  font-family: inherit;
+  font-size: 0.76rem;
+  white-space: nowrap;
+}
+
+/* ---- preferences dialog -------------------------------------------------- */
+.prefs-tabs {
+  display: flex;
+  gap: 0.3rem;
+  padding: 0 1.1rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.prefs-tab {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--text-dim);
+  padding: 0.55rem 0.6rem;
+  font-size: 0.82rem;
+  cursor: pointer;
+}
+
+.prefs-tab.active {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+}
+
+.prefs-page {
+  display: none;
+}
+
+.prefs-page.active {
+  display: block;
+}
+
+.prefs-page .field {
+  margin: 0.7rem 0;
+}
