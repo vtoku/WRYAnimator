@@ -790,6 +790,7 @@ export class PreviewScene {
     if (!this.rigEnabled || !this.clip) return;
     this.detachRig();
     for (const def of EFFECTORS) {
+      if (def.hidden) continue; // finger FK effectors: gizmo-on-select, no handle
       const bone = this.clip.names.indexOf(def.bone);
       if (bone < 0 || !this.boneNodes[bone]) continue;
       // IK effectors (movable) are spheres; FK cells are smaller octahedra;

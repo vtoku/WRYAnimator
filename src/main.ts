@@ -2621,11 +2621,17 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     compareProvider: (bones) => (compareBase ? denseChannelsFor(compareBase, bones) : null),
     onSelect: (bones) => {
       channelSelection = bones;
-      // Single mapped bone -> select its viewport effector (two-way sync).
-      if (bones.size === 1) {
-        const only = [...bones][0];
-        const eff = effectorForBone(only);
-        if (eff && activeTab === "rig") preview?.selectEffector(eff.id);
+      // Single mapped bone -> select its viewport effector (two-way sync). This
+      // is how per-finger FK works: a finger row selects its (hidden) effector,
+      // which pops the gizmo on that finger chain.
+      if (activeTab === "rig") {
+        if (bones.size === 1) {
+          const eff = effectorForBone([...bones][0]);
+          if (eff) preview?.selectEffector(eff.id);
+        } else if (selectedEffector && effectorDef(selectedEffector).hidden) {
+          // Leaving a single finger row: drop the transient finger gizmo.
+          preview?.selectEffector(null);
+        }
       }
       renderFilters();
     },

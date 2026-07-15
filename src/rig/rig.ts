@@ -52,6 +52,12 @@ export interface EffectorDef {
   tip?: string[];
   canMove: boolean;
   canRotate: boolean;
+  /**
+   * No always-on viewport handle. Finger effectors are FK-editable but far too
+   * many to show as handles — they're selected from the channel tree instead,
+   * which pops a gizmo on the chain (per the picker/fcurves spec).
+   */
+  hidden?: boolean;
 }
 
 export const EFFECTORS: EffectorDef[] = [
@@ -82,7 +88,38 @@ export const EFFECTORS: EffectorDef[] = [
   // Toes: FK rotate-only leaves (no tip child in the 55-bone array).
   { id: "leftToes", label: "Left toes", bone: "LeftToes", canMove: false, canRotate: true },
   { id: "rightToes", label: "Right toes", bone: "RightToes", canMove: false, canRotate: true },
+  ...buildFingerEffectors(),
 ];
+
+/**
+ * FK effectors for all 30 finger bones (HumanBodyBones 24-53), hidden from the
+ * always-on handle set. tip = the next segment so a translate-drag swings the
+ * joint. Effectors for bones a recording lacks resolve to nothing downstream.
+ */
+function buildFingerEffectors(): EffectorDef[] {
+  const fingers = ["Thumb", "Index", "Middle", "Ring", "Little"];
+  const segments = ["Proximal", "Intermediate", "Distal"];
+  const camel = (b: string) => b[0].toLowerCase() + b.slice(1);
+  const out: EffectorDef[] = [];
+  for (const side of ["Left", "Right"] as const) {
+    for (const finger of fingers) {
+      for (let s = 0; s < segments.length; s++) {
+        const bone = `${side}${finger}${segments[s]}`;
+        const tip = s < segments.length - 1 ? [`${side}${finger}${segments[s + 1]}`] : undefined;
+        out.push({
+          id: camel(bone),
+          label: `${side[0]} ${finger} ${s + 1}`,
+          bone,
+          tip,
+          canMove: false,
+          canRotate: true,
+          hidden: true,
+        });
+      }
+    }
+  }
+  return out;
+}
 
 export const effectorDef = (id: EffectorId): EffectorDef => EFFECTORS.find((e) => e.id === id)!;
 

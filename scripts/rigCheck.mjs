@@ -12,7 +12,7 @@ const { convertCharacter } = await import("../src/convert/clip.ts");
 const {
   makeLayer, getTrack, setPosKey, setRotKey, applyRigLayers, poseAtFrame, nearestFrame,
   retimeKeys, keyFullPose, bakeRange, dirtyRange, reduceKeys, setKeyEase,
-  keyEffectorTarget, fullStackPose, belowStackPose, captureBoneKeys, effectorDef,
+  keyEffectorTarget, fullStackPose, belowStackPose, captureBoneKeys, effectorDef, effectorForBone,
 } = await import("../src/rig/rig.ts");
 void fullStackPose;
 const { worldFromLocal } = await import("../src/convert/fk.ts");
@@ -539,6 +539,31 @@ const f0 = 0;
       `fingers moved ${movedFingers}, other bones touched ${touchedOther} (worst ${worstOther.toExponential(1)}°)`);
   } else {
     check("hand pose: (skipped — recording has no right-hand fingers)", true, "");
+  }
+}
+
+// ---- per-finger FK: gizmo-style FK capture writes only that finger bone --------
+{
+  const fingerBone = "RightIndexProximal";
+  if (boneI(fingerBone) >= 0) {
+    const layer = makeLayer("finger");
+    layer.extent = "hold";
+    const layers = [layer];
+    const fF = nearestFrame(c, 8);
+    const bi = boneI(fingerBone);
+    // Rotate the finger 25° about world X off its current world rotation.
+    const w0 = world(c, fF).rot[bi];
+    const a = 25 * Math.PI / 180;
+    const spin = [Math.sin(a / 2), 0, 0, Math.cos(a / 2)];
+    keyEffectorTarget(c, layers, 0, effectorForBone(fingerBone).id, fF, { rot: qmul(spin, w0) });
+    const tracks = layer.tracks.map((t) => t.bone);
+    const baked = applyRigLayers(c, layers);
+    const err = qangle(world(baked, fF).rot[bi], qmul(spin, w0));
+    check("per-finger FK: rotation lands, keys only that finger bone",
+      err < 0.2 && tracks.length === 1 && tracks[0] === fingerBone,
+      `world err ${err.toFixed(3)}°, tracks [${tracks.join(",")}]`);
+  } else {
+    check("per-finger FK: (skipped — no right index finger)", true, "");
   }
 }
 
