@@ -16,6 +16,7 @@
     "vrmaCheck": "node scripts/vrmaCheck.mjs",
     "rigCheck": "node scripts/rigCheck.mjs",
     "wanimCheck": "node scripts/wanimCheck.mjs",
+    "shogunCheck": "node scripts/shogunCheck.mjs",
     "drive": "node scripts/driveApp.mjs",
     "bootcheck": "node scripts/bootCheck.mjs"
   },

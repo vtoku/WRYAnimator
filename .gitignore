@@ -9,6 +9,7 @@ scripts/*.png
 scripts/*.log
 scripts/*.txt
 scripts/*.glb
+scripts/*.json
 scripts/downloaded.*
 .DS_Store
 .vite

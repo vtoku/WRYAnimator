@@ -26,6 +26,7 @@ import { buildFaceMesh } from "./convert/meshExport.ts";
 import { buildBodyData, bodyToSkinnedMeshExports, getBodyJoints, setBodySource, hasUserBody } from "./convert/body.ts";
 import { augmentFaceForVrm } from "./convert/vrmFaceMap.ts";
 import { sanitizeFilename, downloadBytes } from "./fbx/export.ts";
+import { exportShogunFbx, isVrmBody } from "./shogun/exportShogun.ts";
 import { PreviewScene } from "./preview/scene.ts";
 import { loadFaceMeshData } from "./preview/face.ts";
 import { createTransport, type Transport, type TransportKeyMarker } from "./ui/transport.ts";
@@ -620,6 +621,16 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     </div>
     <div id="reduceStats" class="clean-stats"></div>
     <h4 class="group">Formats <span class="hint-i" title="Format and Download live in the toolbar. Drag the in/out handles on the timeline to trim. FBX comes out as binary 7.5, which MotionBuilder can read, with the face and body meshes baked in if you turned them on. VRMA carries the humanoid motion and expressions for Warudo, VSeeFace, and Unity; it plays on any VRM and doesn't need a mesh. WANIM writes the cleaned recording back out so you can take it into Warudo again.">ⓘ</span></h4>
+
+    <h4 class="group">Shogun target rig <span class="hint-i" title="A static, world-aligned skeleton plus skinned mesh built straight from your loaded VRM body, for use as a Vicon Shogun retarget target. No animation is baked in. Bone names and hierarchy are kept exactly so name-keyed streaming back into Unity or Warudo still lines up.">ⓘ</span></h4>
+    <label class="field">
+      <span>Strip spring bones</span>
+      <input id="shogunStrip" type="checkbox" checked title="Drops VRM spring bones (hair, skirt, tail, accessories) and re-weights them onto their nearest kept parent. Shogun can't use them." />
+    </label>
+    <div class="rig-row">
+      <button id="shogunDl" class="button ghost">Shogun target rig (.fbx)</button>
+    </div>
+    <p id="shogunNote" class="clean-stats"></p>
     </div>
 
     <div class="tab" id="tab-info">
@@ -2237,6 +2248,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     }
     lastBodyChoice = bodySel.value;
     userBodyBytes = null;
+    syncShogunRow();
     void setBodySource(null).then(() => {
       preview?.setBodyMode(bodySel.value === "none" ? "none" : "human");
       preview?.setFaceVisible(true);
@@ -2256,6 +2268,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
       const mapped = await setBodySource(bytes);
       userBodyBytes = { name: file.name, data: bytes };
       lastBodyChoice = "vrm";
+      syncShogunRow();
       preview?.setBodyMode("human");
       preview?.setFaceVisible(false); // the VRM keeps its own head
       preview?.refreshBody();
@@ -2270,6 +2283,45 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
       showError(err instanceof Error ? err.message : String(err));
     }
   });
+
+  // ---- Shogun target-rig export -------------------------------------------
+  // Static skeleton + skinned mesh from the loaded VRM body, for a Vicon Shogun
+  // retarget target. Consumes the raw VRM bytes; unrelated to the clip.
+  const shogunStripChk = document.getElementById("shogunStrip") as HTMLInputElement;
+  const shogunDlBtn = document.getElementById("shogunDl") as HTMLButtonElement;
+  const shogunNote = document.getElementById("shogunNote") as HTMLParagraphElement;
+  function syncShogunRow() {
+    const ok = !!userBodyBytes && isVrmBody(userBodyBytes.data);
+    shogunDlBtn.disabled = !ok;
+    if (ok) {
+      shogunNote.textContent = `Ready from ${userBodyBytes!.name}.`;
+    } else if (userBodyBytes) {
+      shogunNote.textContent = "The loaded body has no VRM data. Load a .vrm body to export a Shogun rig.";
+    } else {
+      shogunNote.textContent = "Load your VRM body (Body mesh: Your VRM / GLB) to enable this.";
+    }
+  }
+  shogunDlBtn.addEventListener("click", async () => {
+    if (!userBodyBytes || !isVrmBody(userBodyBytes.data)) {
+      syncShogunRow();
+      return;
+    }
+    shogunDlBtn.disabled = true;
+    shogunDlBtn.textContent = "Generating…";
+    await new Promise((r) => setTimeout(r, 16));
+    try {
+      const res = await exportShogunFbx(userBodyBytes.data, { stripSprings: shogunStripChk.checked });
+      downloadBytes(`${outBase()}-shogun.fbx`, new TextEncoder().encode(res.fbx));
+      const stripped = res.strippedSprings ? `, ${res.springBoneCount} spring bones stripped` : "";
+      shogunNote.textContent = `Exported ${res.boneCount} bones${stripped}.`;
+    } catch (err) {
+      showError(err instanceof Error ? err.message : String(err));
+    } finally {
+      shogunDlBtn.textContent = "Shogun target rig (.fbx)";
+      syncShogunRow();
+    }
+  });
+  syncShogunRow();
 
   // ---- rig persistence -----------------------------------------------------
   // Auto-saved to localStorage per recording; also exportable as a .rig.json.
@@ -2521,6 +2573,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
           userBodyBytes = { name: bodyInfo.name, data: bytes.buffer as ArrayBuffer };
           lastBodyChoice = "vrm";
           bodySel.value = "vrm";
+          syncShogunRow();
           preview?.setBodyMode("human");
           preview?.setFaceVisible(false);
           preview?.refreshBody();
