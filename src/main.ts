@@ -38,6 +38,7 @@ import { keyFor, SHORTCUTS } from "./ui/shortcuts.ts";
 import { openShortcuts, openAbout, openPreferences as openPreferencesDialog } from "./ui/dialogs.ts";
 import { getPref, applyAppearance } from "./ui/prefs.ts";
 import { initLayout, setDockCollapsed, setLayoutSizes } from "./ui/layout.ts";
+import * as recent from "./ui/recent.ts";
 
 const emptyState = document.getElementById("empty-state") as HTMLElement; // dim prompt over the viewport grid
 const menubarEl = document.getElementById("menubar") as HTMLElement;
@@ -161,8 +162,22 @@ let menuActions: MenuActions | null = null;
 
 const APP_VERSION = document.querySelector(".version")?.textContent?.trim() ?? "";
 
-function openRecordingPicker() { fileInput.accept = ".wanim"; fileInput.click(); }
-function openScenePicker() { fileInput.accept = ".json,application/json"; fileInput.click(); }
+async function openRecordingPicker() {
+  if (recent.supported()) {
+    const picked = await recent.pickOpen("recording");
+    if (picked) { recent.setSaveHandle(null); await handleFile(picked.file); }
+    return;
+  }
+  fileInput.accept = ".wanim"; fileInput.click();
+}
+async function openScenePicker() {
+  if (recent.supported()) {
+    const picked = await recent.pickOpen("scene");
+    if (picked) { recent.setSaveHandle(picked.handle); await handleFile(picked.file); }
+    return;
+  }
+  fileInput.accept = ".json,application/json"; fileInput.click();
+}
 
 const openPreferences = openPreferencesDialog;
 // View menu layout presets: set both splitter sizes + the dock/panel state.
@@ -182,10 +197,22 @@ function applyLayoutPreset(preset: "default" | "cleanup" | "rig") {
     transport?.setPanelView("keys");
   }
 }
-// Reassigned by later feature modules (kept as `let` so the menu, which reads
-// them lazily each open, always sees the live implementation).
-let recentSupported: () => boolean = () => false;
-let recentSubmenu: () => MenuItem[] = () => [];
+// File > Recent: real reopenable handles via the File System Access API;
+// hidden entirely when unavailable (a dropped/<input> file cannot be reopened).
+const recentSupported = () => recent.supported();
+const recentSubmenu = (): MenuItem[] => {
+  const entries = recent.getRecent();
+  if (!entries.length) return [{ label: "No recent files", enabled: () => false }];
+  return entries.map((e) => ({
+    label: `${e.name}`,
+    action: () => void (async () => {
+      const file = await recent.openRecent(e);
+      if (!file) { showError(`Couldn't reopen ${e.name} (permission denied or file moved).`); return; }
+      recent.setSaveHandle(e.kind === "scene" ? e.handle : null);
+      await handleFile(file);
+    })(),
+  }));
+};
 
 const hasClip = () => !!menuActions;
 
@@ -255,6 +282,7 @@ const menuDefs: MenuDef[] = [
 ];
 applyAppearance(); // UI scale + hint visibility from saved prefs
 initLayout(dock, editMain, timelineDock); // splitters + persisted sizes + collapse
+void recent.initRecent(); // load the File > Recent list (if the API is available)
 buildMenuBar(menubarEl, menuDefs);
 // Test hook: bootcheck asserts every table entry shows in the Help overlay.
 (window as unknown as { __shortcuts?: typeof SHORTCUTS }).__shortcuts = SHORTCUTS;
@@ -2680,7 +2708,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
   }
 
   /** One button, whole work project: recording + edits + settings + assets. */
-  function saveScene(baseName?: string) {
+  function saveScene(baseName?: string, forcePicker = false) {
     if (!loaded) return;
     const scene: SceneFile = {
       magic: "wanimscene",
@@ -2695,10 +2723,16 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
         : undefined,
     };
     const base = sanitizeFilename(baseName || loaded.name) || "scene";
-    downloadBytes(`${base}.scene.json`, new TextEncoder().encode(JSON.stringify(scene)));
+    const bytes = new TextEncoder().encode(JSON.stringify(scene));
+    // Handle-aware save: re-saves to the held handle (Ctrl+S), prompts when
+    // there's none, or downloads when the FS Access API is unavailable.
+    void recent.saveScene(`${base}.scene.json`, bytes, forcePicker);
   }
   function saveSceneAs() {
     if (!loaded) return;
+    // Force a fresh save-file picker (or, unsupported, a plain download with a
+    // prompted name).
+    if (recent.supported()) { saveScene(undefined, true); return; }
     const name = prompt("Save scene as (file name):", sanitizeFilename(loaded.name));
     if (name === null) return;
     saveScene(name);
@@ -3007,7 +3041,7 @@ async function loadWanim(name: string, raw: ArrayBuffer, fromRestore = false) {
 
 fileInput.addEventListener("change", () => {
   const file = fileInput.files?.[0];
-  if (file) void handleFile(file);
+  if (file) { recent.setSaveHandle(null); void handleFile(file); } // no reopenable handle
   fileInput.value = "";
   fileInput.accept = ".wanim,.json"; // undo any per-button filter
 });
@@ -3029,7 +3063,7 @@ document.addEventListener("drop", (e) => {
   e.preventDefault();
   emptyState.classList.remove("dragging");
   const file = e.dataTransfer?.files?.[0];
-  if (file) void handleFile(file);
+  if (file) { recent.setSaveHandle(null); void handleFile(file); } // dropped = no reopenable handle
 });
 
 // ---- boot: straight into the editor, DCC style -----------------------------
