@@ -1853,6 +1853,20 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     saveRigCache();
   });
 
+  // Auto-build: every import gets a working rig with zero clicks — an empty
+  // Layer 1 ready to receive keys. Effectors for absent bones are dropped by
+  // the handle/picker/slider code, so recordings without UpperChest or fingers
+  // just show fewer controls. Skips if saved state already restored layers.
+  function ensureLayer() {
+    if (rigLayers.length === 0) {
+      rigLayers.push(makeLayer(`Layer ${++layerCounter}`));
+      activeLayerIdx = 0;
+      renderRigLayers();
+    }
+    syncRigVisibility();
+    updateRigEditor();
+  }
+
   gizmoMoveBtn.addEventListener("click", () => setGizmoModeUi("translate"));
   gizmoRotateBtn.addEventListener("click", () => setGizmoModeUi("rotate"));
 
@@ -2872,6 +2886,10 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
   } else {
     userBodyBytes = null; // fresh recording — no custom body yet
   }
+
+  // Auto-build the rig: an empty Layer 1 so the control rig works with zero
+  // clicks (unless saved state already brought its own layers).
+  ensureLayer();
 
   // Apply the default proportions selection (body-mesh skeleton) on load.
   void reclean();
