@@ -1,7 +1,8 @@
 import "./style.css";
 import { parseWanim, BONE_COUNT, type WanimClip } from "./wanim/parse.ts";
 import { convertCharacter, resample, retargetProportions, distributeBonelessSpine, type ConvertedClip } from "./convert/clip.ts";
-import { cleanClip, smoothRange, type CleanOpts, type CleanStats, type RangeSmooth } from "./convert/clean.ts";
+import { cleanClip, smoothRange, applyCleanOps, type CleanOpts, type CleanStats, type RangeSmooth, type CleanOp, type CleanFilter } from "./convert/clean.ts";
+import type { PlantSpan } from "./convert/feet.ts";
 import {
   makeLayer, getTrack, setPosKey, setRotKey, deleteKeysAt, keyTimes,
   applyRigLayers, nearestFrame,
@@ -16,7 +17,8 @@ import { vsub, vadd, vlen, vnorm, quatFromTo } from "./convert/ik.ts";
 import { applyModifiers, defaultModifiers, applyReach, anyReach } from "./rig/modifiers.ts";
 import { applyTimeWarp, warpMaps, type WarpKey } from "./rig/timewarp.ts";
 import { quatMul, quatDot, quatNormalize, quatToEulerZYX, eulerZYXToQuat, RAD2DEG } from "./convert/quat.ts";
-import type { CurveEase } from "./ui/curves.ts";
+import type { CurveEase, DenseModel, DenseChannel, ChannelsConfig } from "./ui/curves.ts";
+import { buildChannelGroups, groupBones, boneLabel } from "./ui/channels.ts";
 import type { Vec3, Quat } from "./wanim/parse.ts";
 import { writeAnimationFbx, type SkinnedMeshExport } from "./fbx/animationFbx.ts";
 import { remapNames, type NameScheme } from "./convert/skeleton.ts";
@@ -27,6 +29,7 @@ import { sanitizeFilename, downloadBytes } from "./fbx/export.ts";
 import { PreviewScene } from "./preview/scene.ts";
 import { loadFaceMeshData } from "./preview/face.ts";
 import { createTransport, type Transport, type TransportKeyMarker } from "./ui/transport.ts";
+import type { Marker } from "./ui/timemap.ts";
 import { saveLastSession, loadLastSession, clearLastSession } from "./session.ts";
 import { ICONS } from "./ui/icons.ts";
 
@@ -82,6 +85,15 @@ document.addEventListener("keydown", (e) => {
     else if (e.key === "ArrowRight") { e.preventDefault(); transportHotkeys?.step(e.shiftKey ? 10 : 1); }
     else if (e.key === "Home") { e.preventDefault(); transportHotkeys?.home(); }
     else if (e.key === "End") { e.preventDefault(); transportHotkeys?.end(); }
+    else if (k === "f") {
+      // Fit the timeline view to the trim range (if set) else the whole clip.
+      const tm = transport?.getTimeMap();
+      const tr = transport?.getTrim();
+      if (tm && tr) {
+        if (tr.end - tr.start < tm.duration - 0.02) tm.fit(tr.start, tr.end);
+        else tm.fit();
+      }
+    }
   }
 });
 
@@ -197,6 +209,136 @@ function unwrapEulerKeys(keys: Array<{ q: Quat }>): Vec3[] {
   return out;
 }
 
+/** Axis colors shared by the corrections + channels curve views. */
+const AXIS_COLOR = ["#ff6b6b", "#7dda6b", "#6bb1ff"];
+
+/**
+ * Unwrap a whole rotation track to continuous ZYX-euler degrees (per axis), so
+ * equivalent representations don't draw as ±180° jumps. Zero-norm quats read as
+ * identity (safeQuat rule) instead of poisoning the extraction.
+ */
+function unwrapEulerTrack(track: Quat[]): [Float32Array, Float32Array, Float32Array] {
+  const n = track.length;
+  const out: [Float32Array, Float32Array, Float32Array] = [new Float32Array(n), new Float32Array(n), new Float32Array(n)];
+  let prev: Vec3 | null = null;
+  const near = (v: number, ref: number) => v + 2 * Math.PI * Math.round((ref - v) / (2 * Math.PI));
+  for (let f = 0; f < n; f++) {
+    let q = track[f];
+    if (Math.hypot(q[0], q[1], q[2], q[3]) < 0.5) q = [0, 0, 0, 1];
+    let e = quatToEulerZYX(q);
+    if (prev) {
+      const p = prev;
+      const cand = (v: Vec3): Vec3 => [near(v[0], p[0]), near(v[1], p[1]), near(v[2], p[2])];
+      const alt: Vec3 = [e[0] + Math.PI, Math.PI - e[1], e[2] + Math.PI];
+      const c1 = cand(e);
+      const c2 = cand(alt);
+      const dist = (v: Vec3) => Math.abs(v[0] - p[0]) + Math.abs(v[1] - p[1]) + Math.abs(v[2] - p[2]);
+      e = dist(c2) < dist(c1) ? c2 : c1;
+    }
+    out[0][f] = e[0] * RAD2DEG;
+    out[1][f] = e[1] * RAD2DEG;
+    out[2][f] = e[2] * RAD2DEG;
+    prev = e;
+  }
+  return out;
+}
+
+/**
+ * Dense baked-motion channels for a set of bones: per-bone local rotation as
+ * unwrapped ZYX-euler degrees, plus Hips position in cm. Sampled from the
+ * given display clip (post clean + modifiers + layers — i.e. what exports).
+ */
+function denseChannelsFor(clip: ConvertedClip, bones: string[]): DenseModel {
+  const channels: DenseChannel[] = [];
+  for (const bone of bones) {
+    const bi = clip.names.indexOf(bone);
+    if (bi < 0) continue;
+    const eul = unwrapEulerTrack(clip.localQuat[bi]);
+    for (const axis of [0, 1, 2] as const) {
+      channels.push({
+        key: `${bone}.r${axis}`,
+        label: `${boneLabel(bone)} rot ${"XYZ"[axis]}`,
+        color: AXIS_COLOR[axis],
+        group: "rot",
+        axis,
+        values: eul[axis],
+      });
+    }
+    if (bone === "Hips") {
+      const pos = clip.localPos[0];
+      for (const axis of [0, 1, 2] as const) {
+        const v = new Float32Array(pos.length);
+        for (let f = 0; f < pos.length; f++) v[f] = pos[f][axis] * 100;
+        channels.push({
+          key: `${bone}.p${axis}`,
+          label: `Hips pos ${"XYZ"[axis]} (cm)`,
+          color: AXIS_COLOR[axis],
+          group: "pos",
+          axis,
+          values: v,
+        });
+      }
+    }
+  }
+  return { times: clip.times, channels };
+}
+
+/** Finger bones tolerate a looser key-reduction threshold than the body. */
+function isFingerBone(name: string): boolean {
+  return /(Thumb|Index|Middle|Ring|Little)(Proximal|Intermediate|Distal)$/.test(name);
+}
+
+/**
+ * Estimate how many keys a curve keeps after tolerance-based reduction: a key
+ * is needed wherever the value breaks a linear prediction from the two prior
+ * frames by more than `tol`. O(n) — an analysis readout, not the exact writer
+ * reduction (the exported clip stays dense).
+ */
+function estimateKeys(vals: Float32Array, tol: number): number {
+  const n = vals.length;
+  if (n <= 2) return n;
+  let keys = 2; // endpoints always kept
+  for (let i = 2; i < n; i++) {
+    const predicted = 2 * vals[i - 1] - vals[i - 2];
+    if (Math.abs(vals[i] - predicted) > tol) keys++;
+  }
+  return keys;
+}
+
+interface GroupReduction { label: string; before: number; after: number; }
+
+/** Per body-part before/after key counts for the reduction stats table. */
+function analyzeReduction(clip: ConvertedClip, groups: ChannelGroupLite[], tolBody: number, tolFinger: number): GroupReduction[] {
+  const frames = clip.times.length;
+  const out: GroupReduction[] = [];
+  for (const g of groups) {
+    let before = 0, after = 0;
+    for (const bone of g.bones) {
+      const bi = clip.names.indexOf(bone);
+      if (bi < 0) continue;
+      const tol = isFingerBone(bone) ? tolFinger : tolBody;
+      const eul = unwrapEulerTrack(clip.localQuat[bi]);
+      for (const axis of [0, 1, 2] as const) {
+        before += frames;
+        after += estimateKeys(eul[axis], tol);
+      }
+      if (bone === "Hips") {
+        const pos = clip.localPos[0];
+        for (const axis of [0, 1, 2] as const) {
+          const v = new Float32Array(pos.length);
+          for (let f = 0; f < pos.length; f++) v[f] = pos[f][axis] * 100;
+          before += frames;
+          after += estimateKeys(v, tolBody * 0.5); // cm units, tighter
+        }
+      }
+    }
+    if (before > 0) out.push({ label: g.label, before, after });
+  }
+  return out;
+}
+
+interface ChannelGroupLite { label: string; bones: string[]; }
+
 function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
   const frames = clip.times.length;
   const fps = converted.duration > 0 ? (frames - 1) / converted.duration : 0;
@@ -255,6 +397,8 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
       <span>Pin planted feet</span>
       <input id="fixFeet" type="checkbox" title="Stops feet sliding while they're planted and keeps them from dipping under the floor. Legs are adjusted; nothing else moves." />
     </label>
+    <p id="plantHint" class="clean-stats" hidden>Detected plants (× removes one; the leg stops being pinned there):</p>
+    <div id="plantList" class="rig-keys"></div>
 
     <h4 class="group">Arms &amp; hands</h4>
     <label class="field">
@@ -308,6 +452,22 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
       <button id="rangeAdd" class="button ghost">Smooth trim range</button>
     </div>
     <div id="rangeChips" class="rig-keys"></div>
+
+    <h4 class="group">Filters (scoped) <span class="hint-i" title="Fix just the channels you pick over just the section you pick. On the Rig timeline open the Channels view, select the bones (down to a single finger), set the trim handles around the bad section, choose a filter, then Add. Each filter is non-destructive and stacks; the colored underline on the timeline shows where it acts. Blends 0.25s at the edges.">ⓘ</span></h4>
+    <div class="rig-row">
+      <select id="filterType" title="Butterworth: zero-lag low-pass (smoothest). Moving-average: quick box smooth. Despike: removes one-frame pops.">
+        <option value="butterworth" selected>Butterworth</option>
+        <option value="smooth">Moving-average</option>
+        <option value="despike">Despike</option>
+      </select>
+      <input id="filterParam" type="number" step="0.5" min="0.5" value="5" title="Filter strength" style="width:4.2rem" />
+      <span id="filterUnit" class="clean-stats" style="margin:0">Hz</span>
+    </div>
+    <div class="rig-row">
+      <button id="filterAdd" class="button ghost" title="Apply the chosen filter to the selected bones over the trim range.">Add for selection + trim</button>
+    </div>
+    <p id="filterHint" class="clean-stats"></p>
+    <div id="filterList" class="rig-keys"></div>
     </div>
 
     <div class="tab" id="tab-rig">
@@ -445,6 +605,20 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
       </select>
     </label>
     <input id="bodyfile" type="file" accept=".vrm,.glb" hidden />
+
+    <h4 class="group">Key reduction <span class="hint-i" title="Estimates how many keyframes each body part could drop at the chosen tolerance (fingers usually tolerate looser). A confidence readout — the exported clip stays dense per frame; this shows the potential.">ⓘ</span></h4>
+    <label class="field sub">
+      <span>Body tolerance <output id="redBodyVal">1°</output></span>
+      <input id="redBody" type="range" min="0.5" max="5" step="0.5" value="1" />
+    </label>
+    <label class="field sub">
+      <span>Finger tolerance <output id="redFingerVal">3°</output></span>
+      <input id="redFinger" type="range" min="0.5" max="10" step="0.5" value="3" />
+    </label>
+    <div class="rig-row">
+      <button id="reduceAnalyze" class="button ghost" title="Estimate key counts before/after reduction per body part.">Analyze keys</button>
+    </div>
+    <div id="reduceStats" class="clean-stats"></div>
     <h4 class="group">Formats <span class="hint-i" title="Format and Download live in the toolbar. Drag the in/out handles on the timeline to trim. FBX comes out as binary 7.5, which MotionBuilder can read, with the face and body meshes baked in if you turned them on. VRMA carries the humanoid motion and expressions for Warudo, VSeeFace, and Unity; it plays on any VRM and doesn't need a mesh. WANIM writes the cleaned recording back out so you can take it into Warudo again.">ⓘ</span></h4>
     </div>
 
@@ -499,6 +673,9 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
   const limitLowerArmsChk = document.getElementById("limitLowerArms") as HTMLInputElement;
   const lockLowerArmSel = document.getElementById("lockLowerArmTwist") as HTMLSelectElement;
   const fixFeetChk = document.getElementById("fixFeet") as HTMLInputElement;
+  // Declared here (not with the rest of the edit state) so cleanOpts, which is
+  // called synchronously while seeding prevPipelineJson, can reference it.
+  const feetPlantRemoved: PlantSpan[] = []; // user-removed foot plants (scene state)
   const cleanOpts = (): CleanOpts => ({
     despike: despikeChk.checked,
     despikeDeg: Number(despikeDeg.value),
@@ -509,6 +686,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     limitLowerArms: limitLowerArmsChk.checked,
     lockLowerArmTwist: (lockLowerArmSel.value || undefined) as CleanOpts["lockLowerArmTwist"],
     fixFeet: fixFeetChk.checked,
+    feetEdits: { removed: feetPlantRemoved },
   });
 
   const cleanStatsEl = document.getElementById("cleanStats") as HTMLParagraphElement;
@@ -574,6 +752,9 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     const source = applyTimeWarp(loaded.converted, warpKeys);
     let display = withCleaning && anyFilter ? cleanClip(source, opts, stats) : source;
     if (withCleaning) for (const r of rangeSmooths) display = smoothRange(display, r);
+    // Scoped filter stack (bone set x range) — after global cleaning + range
+    // smoothing, before proportions/modifiers/layers.
+    if (withCleaning) display = applyCleanOps(display, cleanOps);
     // Report what the filters actually changed — proof they're applied — and
     // collect the touched frames as timeline tick marks so they're findable.
     // Consecutive corrected frames compress to ONE mark at the run start (a
@@ -594,6 +775,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
         for (const f of runStarts(stats.feet.fixedFrames)) marks.push({ time: source.times[f] - t0, color: "#3fc1ff" });
       }
       cleanMarks = marks;
+      currentPlants = opts.fixFeet ? (stats.feet?.plants ?? []) : [];
       if (!anyFilter) {
         cleanStatsEl.textContent = "";
       } else {
@@ -656,6 +838,8 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
   const mods = defaultModifiers(); // whole-clip parametric corrections
   const warpKeys: WarpKey[] = []; // time-warp speed ramp (source-time keys)
   const rangeSmooths: RangeSmooth[] = []; // user-applied range smoothing passes
+  const cleanOps: CleanOp[] = []; // scoped non-destructive filter stack
+  let currentPlants: PlantSpan[] = []; // last detected plants (drawing + chips)
   let rawRefCache: { gen: number; clip: ConvertedClip } | null = null; // reach reference
   // Tool state (not undo history — like the gizmo mode): world-pinned limbs
   // and limbs whose positional drags swing FK instead of solving IK.
@@ -663,6 +847,11 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
   const fkLimbs = new Set<EffectorId>();
   let ghostOn = false; // grey uncleaned-skeleton overlay
   let cleanMarks: Array<{ time: number; color: string }> = []; // filter tick marks
+  let sceneMarkers: Marker[] = []; // user timeline markers (scene state)
+  // Shared channel-tree selection (Channels mode) — scope for filters + reduce.
+  let channelSelection = new Set<string>();
+  // Assigned by the filter-stack UI (Stage 3); reads the selection then.
+  let renderFilters: () => void = () => { void channelSelection; };
   /**
    * Trim/playhead to apply AFTER the next reclean. The transport is rebuilt
    * (trim reset) whenever a warp changes the duration, so restores from scene
@@ -692,6 +881,9 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
       if (trim) preview.setTrim(trim.start, trim.end); // keep the user's trim
     }
     transport?.setMarks(cleanMarks);
+    refreshTimelineRanges(); // scoped-filter + plant underlines
+    renderPlants(); // per-plant chips
+    transport?.curveView.refreshChannels(); // dense view follows the new clip
     // Deferred trim/playhead (scene load, warp remap) — after any rebuild.
     if (pendingViewRestore) {
       const pv = pendingViewRestore;
@@ -729,6 +921,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
       comparing = true;
       compareBtn.classList.add("active");
       showClip(compareBase);
+      transport?.curveView.setCompare(true); // ghost the uncleaned dense curves
     })();
   });
   const endCompare = () => {
@@ -736,6 +929,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     comparing = false;
     compareBtn.classList.remove("active");
     showClip(loaded.display);
+    transport?.curveView.setCompare(false);
   };
   for (const ev of ["pointerup", "pointerleave", "pointercancel"] as const) {
     compareBtn.addEventListener(ev, endCompare);
@@ -806,7 +1000,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
   const rigSnapshot = () =>
     JSON.stringify({
       layers: rigLayers, mods, counter: layerCounter, active: activeLayerIdx,
-      warp: warpKeys, ranges: rangeSmooths, pipeline: pipelineSettings(),
+      warp: warpKeys, ranges: rangeSmooths, cleanOps, feetPlants: feetPlantRemoved, pipeline: pipelineSettings(),
     });
   function updateUndoUi() {
     rigUndoBtn.disabled = !undoStack.length;
@@ -828,17 +1022,24 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
       active: number;
       warp?: WarpKey[];
       ranges?: RangeSmooth[];
+      cleanOps?: CleanOp[];
+      feetPlants?: PlantSpan[];
       pipeline?: PipelineSettings;
     };
     const pipelineChanged =
       JSON.stringify(mods) !== JSON.stringify(d.mods) ||
       JSON.stringify(warpKeys) !== JSON.stringify(d.warp ?? []) ||
       JSON.stringify(rangeSmooths) !== JSON.stringify(d.ranges ?? []) ||
+      JSON.stringify(cleanOps) !== JSON.stringify(d.cleanOps ?? []) ||
+      JSON.stringify(feetPlantRemoved) !== JSON.stringify(d.feetPlants ?? []) ||
       (!!d.pipeline && JSON.stringify(d.pipeline) !== JSON.stringify(pipelineSettings()));
     rigLayers.splice(0, rigLayers.length, ...d.layers);
     Object.assign(mods, defaultModifiers(), d.mods);
     warpKeys.splice(0, warpKeys.length, ...(d.warp ?? []));
     rangeSmooths.splice(0, rangeSmooths.length, ...(d.ranges ?? []));
+    cleanOps.splice(0, cleanOps.length, ...(d.cleanOps ?? []));
+    feetPlantRemoved.splice(0, feetPlantRemoved.length, ...(d.feetPlants ?? []));
+    renderFilters();
     if (d.pipeline) applyPipelineUi(d.pipeline);
     layerCounter = d.counter;
     activeLayerIdx = Math.min(d.active, rigLayers.length - 1);
@@ -1546,6 +1747,12 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
   preview?.setRigCallbacks({
     onSelect: (e) => {
       selectedEffector = e;
+      // Scope the channel tree to this limb (viewport -> channels sync).
+      if (e) {
+        const def = effectorDef(e);
+        const bones = def.chain ? [def.chain.root, def.chain.mid, def.bone] : [def.bone];
+        transport?.curveView.syncTreeSelection(bones);
+      }
       updateRigEditor();
     },
     onDragStart: (e) => {
@@ -1811,6 +2018,164 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     void reclean();
   });
 
+  // ---- scoped filter stack (Stage 3) --------------------------------------
+  const filterTypeSel = document.getElementById("filterType") as HTMLSelectElement;
+  const filterParamEl = document.getElementById("filterParam") as HTMLInputElement;
+  const filterUnitEl = document.getElementById("filterUnit") as HTMLSpanElement;
+  const filterAddBtn = document.getElementById("filterAdd") as HTMLButtonElement;
+  const filterHintEl = document.getElementById("filterHint") as HTMLParagraphElement;
+  const filterListEl = document.getElementById("filterList") as HTMLDivElement;
+  const FILTER_COLOR: Record<CleanFilter, string> = { butterworth: "#b48cff", smooth: "#6bb1ff", despike: "#ffb020" };
+  const FILTER_DEFAULT: Record<CleanFilter, { value: number; unit: string; step: number; min: number }> = {
+    butterworth: { value: 5, unit: "Hz", step: 0.5, min: 0.5 },
+    smooth: { value: 5, unit: "frames", step: 1, min: 1 },
+    despike: { value: 35, unit: "°", step: 5, min: 5 },
+  };
+  function syncFilterParamUi() {
+    const d = FILTER_DEFAULT[filterTypeSel.value as CleanFilter];
+    filterParamEl.value = String(d.value);
+    filterParamEl.step = String(d.step);
+    filterParamEl.min = String(d.min);
+    filterUnitEl.textContent = d.unit;
+  }
+  syncFilterParamUi();
+  filterTypeSel.addEventListener("change", syncFilterParamUi);
+
+  function opParams(filter: CleanFilter, value: number): CleanOp["params"] {
+    if (filter === "butterworth") return { cutoffHz: value };
+    if (filter === "smooth") return { widthFrames: value };
+    return { thresholdDeg: value };
+  }
+  function opLabel(op: CleanOp): string {
+    const v = op.params.cutoffHz ?? op.params.widthFrames ?? op.params.thresholdDeg ?? 0;
+    const unit = FILTER_DEFAULT[op.filter].unit;
+    return `${op.filter} ${v}${unit === "°" ? "°" : ` ${unit}`}`;
+  }
+
+  const PLANT_COLOR = { Left: "#3fc1ff", Right: "#ffa24a" } as const;
+
+  /** Colored underlines: scoped filters (top lanes) + foot plants (bottom). */
+  function refreshTimelineRanges() {
+    const rs = cleanOps
+      .filter((o) => o.enabled)
+      .map((o, i) => ({ t0: o.range.t0, t1: o.range.t1, color: FILTER_COLOR[o.filter], lane: i % 3 }));
+    // Foot plants on a dedicated lane so they never collide with filters.
+    for (const p of currentPlants) rs.push({ t0: p.t0, t1: p.t1, color: PLANT_COLOR[p.side], lane: 4 });
+    transport?.setRanges(rs);
+  }
+
+  const plantHintEl = document.getElementById("plantHint") as HTMLParagraphElement;
+  const plantListEl = document.getElementById("plantList") as HTMLDivElement;
+  /** Chips for the detected foot plants; × removes one (per-plant control). */
+  function renderPlants() {
+    plantListEl.innerHTML = "";
+    const show = fixFeetChk.checked && currentPlants.length > 0;
+    plantHintEl.hidden = !show;
+    if (!show) return;
+    for (const p of [...currentPlants].sort((a, b) => a.t0 - b.t0)) {
+      const chip = document.createElement("span");
+      chip.className = "rig-key";
+      const label = document.createElement("button");
+      label.textContent = `${p.side[0]} ${fmtTime(p.t0)}–${fmtTime(p.t1)}`;
+      label.style.color = PLANT_COLOR[p.side];
+      label.title = "Zoom the timeline to this plant";
+      label.addEventListener("click", () => transport?.getTimeMap().fit(p.t0, p.t1));
+      const del = document.createElement("button");
+      del.textContent = "×";
+      del.title = "Stop pinning this plant";
+      del.addEventListener("click", () => {
+        pushHistory();
+        // Record the removal so re-detection keeps it (overlap match).
+        feetPlantRemoved.push({ side: p.side, t0: p.t0 - 0.02, t1: p.t1 + 0.02 });
+        void reclean();
+      });
+      chip.append(label, del);
+      plantListEl.appendChild(chip);
+    }
+  }
+
+  // Reassign the forward-declared stub with the real renderer.
+  renderFilters = () => {
+    filterListEl.innerHTML = "";
+    for (const op of cleanOps) {
+      const row = document.createElement("span");
+      row.className = "rig-key";
+      const en = document.createElement("input");
+      en.type = "checkbox";
+      en.checked = op.enabled;
+      en.title = "Enable/disable this filter";
+      en.addEventListener("change", () => { pushHistory(); op.enabled = en.checked; void reclean(); renderFilters(); });
+      const label = document.createElement("button");
+      label.textContent = `${opLabel(op)} · ${op.bones.length} bone${op.bones.length === 1 ? "" : "s"} · ${fmtTime(op.range.t0)}–${fmtTime(op.range.t1)}`;
+      label.title = "Click to zoom the timeline to this filter's range";
+      label.style.color = FILTER_COLOR[op.filter];
+      label.addEventListener("click", () => { transport?.getTimeMap().fit(op.range.t0, op.range.t1); });
+      const del = document.createElement("button");
+      del.textContent = "×";
+      del.title = "Delete this filter";
+      del.addEventListener("click", () => {
+        pushHistory();
+        cleanOps.splice(cleanOps.indexOf(op), 1);
+        renderFilters();
+        void reclean();
+      });
+      row.append(en, label, del);
+      filterListEl.appendChild(row);
+    }
+    refreshTimelineRanges();
+  };
+
+  // ---- key reduction analysis (Stage 4) -----------------------------------
+  const redBody = document.getElementById("redBody") as HTMLInputElement;
+  const redBodyVal = document.getElementById("redBodyVal") as HTMLOutputElement;
+  const redFinger = document.getElementById("redFinger") as HTMLInputElement;
+  const redFingerVal = document.getElementById("redFingerVal") as HTMLOutputElement;
+  const reduceStatsEl = document.getElementById("reduceStats") as HTMLDivElement;
+  redBody.addEventListener("input", () => { redBodyVal.value = `${redBody.value}°`; });
+  redFinger.addEventListener("input", () => { redFingerVal.value = `${redFinger.value}°`; });
+  (document.getElementById("reduceAnalyze") as HTMLButtonElement).addEventListener("click", () => {
+    if (!loaded) return;
+    const flat = buildChannelGroups(new Set(loaded.display.names)).map((g) => ({ label: g.label, bones: groupBones(g) }));
+    const rows = analyzeReduction(loaded.display, flat, Number(redBody.value), Number(redFinger.value));
+    let before = 0, after = 0;
+    for (const r of rows) { before += r.before; after += r.after; }
+    const pctDrop = before ? Math.round((1 - after / before) * 100) : 0;
+    const table = rows
+      .map((r) => `<div><dt>${r.label}</dt><dd>${r.after.toLocaleString()} / ${r.before.toLocaleString()} (−${before ? Math.round((1 - r.after / r.before) * 100) : 0}%)</dd></div>`)
+      .join("");
+    reduceStatsEl.innerHTML =
+      `<dl class="stats reduce-table">${table}` +
+      `<div><dt><b>Total</b></dt><dd><b>${after.toLocaleString()} / ${before.toLocaleString()} keys (−${pctDrop}%)</b></dd></div></dl>` +
+      `<p class="hint">Estimate at ${redBody.value}° body / ${redFinger.value}° finger. The export stays dense per frame; this shows the reduction potential.</p>`;
+  });
+
+  filterAddBtn.addEventListener("click", () => {
+    const trim = transport?.getTrim();
+    if (!trim || !loaded) return;
+    if (!channelSelection.size) {
+      showError("Select the bones first: open the Rig timeline's Channels view and pick channels (a group or single fingers).");
+      return;
+    }
+    if (trim.end - trim.start > loaded.display.duration - 0.05) {
+      filterHintEl.textContent = "Tip: set the trim handles around a section to scope the filter tighter.";
+    } else {
+      filterHintEl.textContent = "";
+    }
+    const filter = filterTypeSel.value as CleanFilter;
+    const value = Number(filterParamEl.value);
+    pushHistory();
+    cleanOps.push({
+      id: `op${Date.now().toString(36)}`,
+      bones: [...channelSelection],
+      range: { t0: trim.start, t1: trim.end },
+      filter,
+      params: opParams(filter, value),
+      enabled: true,
+    });
+    renderFilters();
+    void reclean();
+  });
+
   (document.getElementById("rigReduce") as HTMLButtonElement).addEventListener("click", () => {
     const layer = rigLayers[activeLayerIdx];
     const tr = layer && selectedEffector ? getTrack(layer, selectedEffector) : null;
@@ -1917,13 +2282,15 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
         rigLayers.length ||
         warpKeys.length ||
         rangeSmooths.length ||
+        cleanOps.length ||
+        feetPlantRemoved.length ||
         JSON.stringify(mods) !== JSON.stringify(defaultModifiers());
       if (dirty) {
         localStorage.setItem(
           rigCacheKey,
           JSON.stringify({
             v: 3, layers: rigLayers, mods, counter: layerCounter, warp: warpKeys, ranges: rangeSmooths,
-            pins: [...pinnedEffectors], fk: [...fkLimbs],
+            cleanOps, feetPlants: feetPlantRemoved, pins: [...pinnedEffectors], fk: [...fkLimbs],
             settings: sceneSettings(),
           }),
         );
@@ -1940,6 +2307,8 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     counter?: number;
     warp?: WarpKey[];
     ranges?: RangeSmooth[];
+    cleanOps?: CleanOp[];
+    feetPlants?: PlantSpan[];
     pins?: EffectorId[];
     fk?: EffectorId[];
   }) {
@@ -1965,10 +2334,13 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     Object.assign(mods, defaultModifiers(), d.mods ?? {});
     warpKeys.splice(0, warpKeys.length, ...(d.warp ?? []));
     rangeSmooths.splice(0, rangeSmooths.length, ...(d.ranges ?? []));
+    cleanOps.splice(0, cleanOps.length, ...(d.cleanOps ?? []));
+    feetPlantRemoved.splice(0, feetPlantRemoved.length, ...(d.feetPlants ?? []));
     layerCounter = d.counter ?? rigLayers.length;
     activeLayerIdx = rigLayers.length - 1;
     pickedKeys = [];
     syncAdjustUi();
+    renderFilters();
     renderRigLayers();
   }
 
@@ -2007,7 +2379,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
   (document.getElementById("rigSave") as HTMLButtonElement).addEventListener("click", () => {
     if (!loaded) return;
     const json = JSON.stringify(
-      { v: 3, layers: rigLayers, mods, counter: layerCounter, warp: warpKeys, ranges: rangeSmooths, pins: [...pinnedEffectors], fk: [...fkLimbs] },
+      { v: 3, layers: rigLayers, mods, counter: layerCounter, warp: warpKeys, ranges: rangeSmooths, cleanOps, feetPlants: feetPlantRemoved, pins: [...pinnedEffectors], fk: [...fkLimbs] },
       null,
       1,
     );
@@ -2046,6 +2418,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
       body: bodySel.value, // 'vrm' restores from the scene's embedded body
       trim: transport?.getTrim(),
       time: preview?.getTime() ?? 0,
+      markers: sceneMarkers,
     };
   }
 
@@ -2065,6 +2438,10 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
       bodySel.value = s.body;
       preview?.setBodyMode(s.body === "none" ? "none" : "human");
     }
+    if (Array.isArray(s.markers)) {
+      sceneMarkers = (s.markers as Marker[]).filter((m) => typeof m?.time === "number");
+      transport?.setMarkers(sceneMarkers);
+    }
     prevPipelineJson = JSON.stringify(pipelineSettings());
     // Trim + playhead apply AFTER the coming reclean: a scene with a time
     // warp rebuilds the transport (which resets trim), so restoring here
@@ -2079,10 +2456,10 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     if (!loaded) return;
     const scene: SceneFile = {
       magic: "wanimscene",
-      v: 2,
+      v: 3,
       name: loaded.name,
       settings: sceneSettings(),
-      rig: { v: 3, layers: rigLayers, mods, counter: layerCounter, warp: warpKeys, ranges: rangeSmooths, pins: [...pinnedEffectors], fk: [...fkLimbs] },
+      rig: { v: 3, layers: rigLayers, mods, counter: layerCounter, warp: warpKeys, ranges: rangeSmooths, cleanOps, feetPlants: feetPlantRemoved, pins: [...pinnedEffectors], fk: [...fkLimbs] },
       wanim: bytesToBase64(new Uint8Array(loaded.raw)),
       // Embed the custom body so the project is fully self-contained.
       body: userBodyBytes
@@ -2100,6 +2477,30 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
       openWanim: () => { fileInput.accept = ".wanim"; fileInput.click(); },
       openScene: () => { fileInput.accept = ".json,application/json"; fileInput.click(); },
     });
+    transport?.setMarkers(sceneMarkers);
+    transport?.onMarkersChange((m) => { sceneMarkers = m; saveRigCache(); });
+    wireChannels();
+  }
+
+  // ---- Channels mode (dense f-curve view) ---------------------------------
+  const channelsConfig: ChannelsConfig = {
+    groups: buildChannelGroups(new Set(converted.names)),
+    provider: (bones) => denseChannelsFor(loaded?.display ?? converted, bones),
+    compareProvider: (bones) => (compareBase ? denseChannelsFor(compareBase, bones) : null),
+    onSelect: (bones) => {
+      channelSelection = bones;
+      // Single mapped bone -> select its viewport effector (two-way sync).
+      if (bones.size === 1) {
+        const only = [...bones][0];
+        const eff = effectorForBone(only);
+        if (eff && activeTab === "rig") preview?.selectEffector(eff.id);
+      }
+      renderFilters();
+    },
+    onSeek: (t) => { preview?.pause(); preview?.seek(t); },
+  };
+  function wireChannels() {
+    transport?.setChannels(channelsConfig);
   }
   wireTransportScene();
 
@@ -2158,6 +2559,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
         const warpedSrc = applyTimeWarp(loaded.converted, warpKeys);
         let clip = cleanClip(warpedSrc, cleanOpts());
         for (const r of rangeSmooths) clip = smoothRange(clip, r);
+        clip = applyCleanOps(clip, cleanOps);
         if (distSpineChk.checked) clip = distributeBonelessSpine(clip, Number(distSpineAmt.value) / 100);
         // Modifiers + rig layers bake here too. Additive deltas transfer
         // cleanly; override targets were authored on the display proportions,

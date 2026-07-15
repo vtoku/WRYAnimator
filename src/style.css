@@ -600,6 +600,180 @@ main:has(.loaded-state:not([hidden])) {
   white-space: nowrap;
 }
 
+.t-magnet.active,
+.t-fit.active {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.t-framebox {
+  font-size: 0.78rem;
+  color: var(--text-dim);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.t-frame {
+  width: 3.4rem;
+  background: rgba(40, 46, 56, 0.9);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 0.15rem 0.3rem;
+  font-size: 0.78rem;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.t-frame:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.t-fps {
+  color: var(--text-dim);
+}
+
+/* ---- f-curve editor: Channels mode ---- */
+.t-curves {
+  position: relative;
+}
+
+.cv-side {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: var(--dope-gutter, 0px);
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding-right: 6px;
+  box-sizing: border-box;
+  overflow: hidden;
+  z-index: 2;
+}
+
+.cv-mode {
+  display: flex;
+  gap: 4px;
+}
+
+.cv-mode button,
+.cv-axis {
+  background: rgba(40, 46, 56, 0.9);
+  color: var(--text-dim);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 0.1rem 0.45rem;
+  font-size: 0.72rem;
+  cursor: pointer;
+}
+
+.cv-mode button.active {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.cv-axes {
+  display: flex;
+  gap: 3px;
+}
+
+.cv-axis {
+  width: 1.5rem;
+  text-align: center;
+  opacity: 0.5;
+}
+
+.cv-axis.on {
+  opacity: 1;
+  color: var(--text);
+}
+
+.cv-search {
+  width: 100%;
+  background: rgba(40, 46, 56, 0.9);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 0.15rem 0.35rem;
+  font-size: 0.72rem;
+  box-sizing: border-box;
+}
+
+.cv-tree {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-height: 0;
+  flex: 1;
+}
+
+.cv-tree-list {
+  overflow-y: auto;
+  font-size: 0.7rem;
+  flex: 1;
+  min-height: 0;
+}
+
+.cv-group {
+  font-weight: 600;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  font-size: 0.62rem;
+  padding: 2px 4px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.cv-group.sel {
+  color: var(--accent);
+}
+
+.cv-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 1px 4px;
+  cursor: pointer;
+  border-radius: 3px;
+  white-space: nowrap;
+}
+
+.cv-row:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.cv-row.sel {
+  background: rgba(127, 178, 255, 0.18);
+  color: var(--text);
+}
+
+.cv-eye {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 0.7rem;
+  padding: 0;
+  line-height: 1;
+}
+
+.cv-row.sel .cv-eye {
+  color: var(--accent);
+}
+
+.reduce-table {
+  font-size: 0.72rem;
+  gap: 0.15rem;
+}
+
+.reduce-table dd {
+  font-variant-numeric: tabular-nums;
+}
+
 .section {
   font-size: 0.78rem;
   text-transform: uppercase;

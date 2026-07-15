@@ -1,5 +1,6 @@
 import type { PreviewScene, PlaybackState } from "../preview/scene.ts";
-import { CurveView, type CurveModel, type CurveCallbacks } from "./curves.ts";
+import { CurveView, type CurveModel, type CurveCallbacks, type ChannelsConfig } from "./curves.ts";
+import { TimeMap, chooseTickStep, type Marker } from "./timemap.ts";
 import { ICONS } from "./icons.ts";
 
 export interface TransportKeyMarker {
@@ -39,21 +40,44 @@ export interface TransportMark {
   color: string;
 }
 
+/** A colored underline spanning a range (a scoped filter op, a foot plant). */
+export interface TransportRange {
+  t0: number;
+  t1: number;
+  color: string;
+  /** Which lane (0 = top) to draw on, so overlapping ranges don't collide. */
+  lane?: number;
+}
+
 export interface Transport {
   element: HTMLElement;
   getTrim(): { start: number; end: number };
   /** Restore a trim range (scene load). */
   setTrim(start: number, end: number): void;
+  /** The shared zoom/pan time->pixel mapping (for channels + curve views). */
+  getTimeMap(): TimeMap;
+  /** Ruler markers (scene state). Replaces the current set. */
+  setMarkers(markers: Marker[]): void;
+  /** Called when the user adds/edits/removes a ruler marker. */
+  onMarkersChange(fn: (markers: Marker[]) => void): void;
+  /** Whether snap-to-key magnet is on (key drags read this). */
+  isMagnet(): boolean;
   /** Wire the Load/Save buttons (scene handling lives in the app). */
   setSceneActions(cbs: { save(): void; openWanim(): void; openScene(): void }): void;
   /** Show rig-layer key markers on the timeline (replaces the previous set). */
   setKeys(markers: TransportKeyMarker[], cbs?: TransportKeyCallbacks): void;
   /** Correction tick marks along the strip bottom (replaces the previous set). */
   setMarks(marks: TransportMark[]): void;
+  /** Colored range underlines (scoped filters, foot plants). */
+  setRanges(ranges: TransportRange[]): void;
   /** Mini dope sheet under the strip: per-effector key rows (empty = hidden). */
   setDope(rows: DopeRow[], cbs?: TransportKeyCallbacks): void;
   /** Curve editor under the strip (null = unavailable). */
   setCurves(model: CurveModel | null, cbs: CurveCallbacks | null): void;
+  /** Configure Channels mode (dense motion + channel tree). */
+  setChannels(config: ChannelsConfig | null): void;
+  /** The embedded curve view (channels mode drives it directly). */
+  curveView: CurveView;
   dispose(): void;
 }
 
@@ -66,13 +90,20 @@ function fmt(seconds: number): string {
 
 /**
  * Transport bar overlaid on the 3D viewport: play/pause, a click-to-seek
- * timeline with draggable in/out trim handles, and a live playhead.
- * `frames` (when known) adds a frame counter to the readout.
+ * timeline with draggable in/out trim handles, and a live playhead. The strip,
+ * dope sheet, and curve editor share one zoomable TimeMap (view range distinct
+ * from trim). `frames` (when known) adds a frame counter to the readout.
  */
 export function createTransport(preview: PreviewScene, duration: number, frames = 0): Transport {
   let trimStart = 0;
   let trimEnd = duration;
   let scrubbing = false;
+
+  const tm = new TimeMap(duration, frames);
+  let markers: Marker[] = [];
+  let markersCb: ((m: Marker[]) => void) | null = null;
+  let magnet = false;
+  let ranges: TransportRange[] = [];
 
   const el = document.createElement("div");
   el.className = "transport-overlay";
@@ -98,7 +129,10 @@ export function createTransport(preview: PreviewScene, duration: number, frames 
         <div class="t-handle t-out" aria-label="Trim end"></div>
         <div class="t-playhead"></div>
       </div>
+      <button class="t-btn t-magnet" title="Snap key drags to other keys and the playhead">🧲</button>
+      <button class="t-btn t-fit" title="Fit the view to the clip (F fits the trim range when set)">Fit</button>
       <span class="t-time">0:00.00 / 0:00.00</span>
+      <span class="t-framebox" title="Type a frame and press Enter to jump there">f <input class="t-frame" type="text" inputmode="numeric" size="5" value="0" /><span class="t-fps"></span></span>
       <button class="t-btn t-setin" title="Set trim start to playhead">In</button>
       <button class="t-btn t-setout" title="Set trim end to playhead">Out</button>
       <button class="t-btn t-reset" title="Clear trim">Reset</button>
@@ -112,6 +146,7 @@ export function createTransport(preview: PreviewScene, duration: number, frames 
   // Curve editor panel (shares the dock with the dope sheet; created early so
   // the playback-state callback can reference it from the first emit).
   const curveView = new CurveView();
+  curveView.setTimeMap(tm);
   el.appendChild(curveView.el);
 
   const playBtn = el.querySelector(".t-play") as HTMLButtonElement;
@@ -121,23 +156,48 @@ export function createTransport(preview: PreviewScene, duration: number, frames 
   const outH = el.querySelector(".t-out") as HTMLElement;
   const playhead = el.querySelector(".t-playhead") as HTMLElement;
   const timeText = el.querySelector(".t-time") as HTMLElement;
+  const frameInput = el.querySelector(".t-frame") as HTMLInputElement;
+  const fpsLabel = el.querySelector(".t-fps") as HTMLElement;
+  const magnetBtn = el.querySelector(".t-magnet") as HTMLButtonElement;
+  const fitBtn = el.querySelector(".t-fit") as HTMLButtonElement;
+  fpsLabel.textContent = frames > 1 ? ` · ${tm.fps.toFixed(0)} fps` : "";
 
-  const pct = (t: number) => (duration > 0 ? (t / duration) * 100 : 0);
+  // Position via the shared view mapping (fraction of the visible span), so
+  // everything zooms/pans together. Off-screen elements clip to the strip.
+  const pct = (t: number) => tm.pct(t);
 
   function renderTrim() {
     inH.style.left = `${pct(trimStart)}%`;
     outH.style.left = `${pct(trimEnd)}%`;
     region.style.left = `${pct(trimStart)}%`;
-    region.style.width = `${pct(trimEnd - trimStart)}%`;
+    region.style.width = `${pct(trimEnd) - pct(trimStart)}%`;
   }
   function applyTrim() {
     preview.setTrim(trimStart, trimEnd);
     renderTrim();
   }
 
+  // Redraw everything that positions off the view when zoom/pan changes.
+  let lastKeyMarkers: TransportKeyMarker[] = [];
+  const rerenderView = () => {
+    renderTrim();
+    playhead.style.left = `${pct(lastTime)}%`;
+    drawMarks();
+    for (const dot of Array.from(keysEl.children) as HTMLElement[]) {
+      const t = Number(dot.dataset.time);
+      dot.style.left = `${pct(t)}%`;
+    }
+    for (const strip of Array.from(dopeRowsEl.querySelectorAll<HTMLElement>(".d-strip"))) {
+      for (const dot of Array.from(strip.children) as HTMLElement[]) {
+        dot.style.left = `${pct(Number(dot.dataset.time))}%`;
+      }
+    }
+    curveView.redraw();
+  };
+  tm.onChange(rerenderView);
+
   let lastTime = 0;
   const currentTime = () => lastTime;
-  const frameOf = (t: number) => (duration > 0 ? Math.round((t / duration) * (frames - 1)) : 0);
   let playIconPlaying = true; // matches the initial markup (pause icon)
   preview.setOnState((s: PlaybackState) => {
     lastTime = s.time;
@@ -147,8 +207,8 @@ export function createTransport(preview: PreviewScene, duration: number, frames 
     }
     playhead.style.left = `${pct(s.time)}%`;
     const len = trimEnd - trimStart;
-    const fr = frames > 1 ? `  ·  f ${frameOf(s.time)}/${frames - 1}` : "";
-    timeText.textContent = `${fmt(s.time)} / ${fmt(duration)}${fr}  ·  trim ${fmt(len)}`;
+    timeText.textContent = `${fmt(s.time)} / ${fmt(duration)}  ·  trim ${fmt(len)}`;
+    if (document.activeElement !== frameInput && frames > 1) frameInput.value = String(tm.frameOf(s.time));
     curveView.setPlayhead(s.time);
   });
 
@@ -158,10 +218,44 @@ export function createTransport(preview: PreviewScene, duration: number, frames 
   rateSel.value = String(preview.getRate());
   rateSel.addEventListener("change", () => preview.setRate(Number(rateSel.value)));
 
+  magnetBtn.addEventListener("click", () => {
+    magnet = !magnet;
+    magnetBtn.classList.toggle("active", magnet);
+  });
+  const doFit = () => {
+    const trimmed = trimEnd - trimStart < duration - 0.02;
+    if (trimmed) tm.fit(trimStart, trimEnd);
+    else tm.fit(0, duration);
+  };
+  fitBtn.addEventListener("click", doFit);
+
+  frameInput.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter") return;
+    const f = parseInt(frameInput.value, 10);
+    if (Number.isFinite(f)) {
+      preview.pause();
+      preview.seek(tm.timeOfFrame(f));
+    }
+    frameInput.blur();
+  });
+
   const timeAt = (clientX: number): number => {
     const r = timeline.getBoundingClientRect();
-    const frac = Math.max(0, Math.min(1, (clientX - r.left) / r.width));
-    return frac * duration;
+    const frac = (clientX - r.left) / r.width;
+    return Math.max(0, Math.min(duration, tm.timeAtFrac(frac)));
+  };
+  /** Snap a time to the nearest key/playhead when the magnet is on. */
+  const snap = (t: number): number => {
+    if (!magnet) return t;
+    const r = timeline.getBoundingClientRect();
+    const tol = (12 / Math.max(1, r.width)) * tm.span; // 12 px
+    let best = t;
+    let bestD = tol;
+    for (const cand of [lastTime, ...lastKeyMarkers.map((m) => m.time)]) {
+      const d = Math.abs(cand - t);
+      if (d < bestD) { bestD = d; best = cand; }
+    }
+    return best;
   };
 
   let dragging: "in" | "out" | "seek" | null = null;
@@ -190,8 +284,36 @@ export function createTransport(preview: PreviewScene, duration: number, frames 
 
   inH.addEventListener("pointerdown", (e) => startDrag("in", e));
   outH.addEventListener("pointerdown", (e) => startDrag("out", e));
+
+  // Wheel = zoom around the cursor.
+  timeline.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    const r = timeline.getBoundingClientRect();
+    const frac = (e.clientX - r.left) / r.width;
+    tm.zoomAt(frac, e.deltaY > 0 ? 1.2 : 1 / 1.2);
+  }, { passive: false });
+
   timeline.addEventListener("pointerdown", (e) => {
     if (e.target === inH || e.target === outH) return;
+    // Middle-drag anywhere = pan the view.
+    if (e.button === 1 || (e.button === 0 && e.altKey)) {
+      e.preventDefault();
+      const r = timeline.getBoundingClientRect();
+      let lastX = e.clientX;
+      const move = (ev: PointerEvent) => {
+        const dx = ev.clientX - lastX;
+        lastX = ev.clientX;
+        tm.panByFrac(-dx / Math.max(1, r.width));
+      };
+      const up = () => {
+        window.removeEventListener("pointermove", move);
+        window.removeEventListener("pointerup", up);
+      };
+      window.addEventListener("pointermove", move);
+      window.addEventListener("pointerup", up);
+      return;
+    }
+    if (e.button !== 0) return;
     if (e.shiftKey) {
       // Shift-drag = band-select keys instead of scrubbing.
       e.preventDefault();
@@ -203,7 +325,7 @@ export function createTransport(preview: PreviewScene, duration: number, frames 
       const drawBand = () => {
         const lo = Math.min(tA, tB), hi = Math.max(tA, tB);
         band.style.left = `${pct(lo)}%`;
-        band.style.width = `${pct(hi - lo)}%`;
+        band.style.width = `${pct(hi) - pct(lo)}%`;
       };
       drawBand();
       const move = (ev: PointerEvent) => { tB = timeAt(ev.clientX); drawBand(); };
@@ -238,9 +360,10 @@ export function createTransport(preview: PreviewScene, duration: number, frames 
   renderTrim();
   applyTrim();
 
-  // ---- cleaning tick marks -------------------------------------------------
-  // Thin lines along the strip's lower half showing where filters acted; a
-  // canvas because there can be thousands. Non-interactive.
+  // ---- ruler + tick marks + filter ranges ---------------------------------
+  // One canvas over the strip draws: adaptive frame/second ruler ticks + grid,
+  // cleaning tick marks (where a filter acted), colored range underlines, and
+  // ruler markers (flags). Everything positions through the shared TimeMap.
   const marksCanvas = el.querySelector(".t-marks") as HTMLCanvasElement;
   let marks: TransportMark[] = [];
   function drawMarks() {
@@ -252,20 +375,108 @@ export function createTransport(preview: PreviewScene, duration: number, frames 
     if (!g) return;
     g.setTransform(dpr, 0, 0, dpr, 0, 0);
     g.clearRect(0, 0, r.width, r.height);
-    if (!marks.length || duration <= 0) return;
-    g.globalAlpha = 0.55;
-    for (const m of marks) {
-      g.fillStyle = m.color;
-      g.fillRect((m.time / duration) * r.width, r.height * 0.6, 1, r.height * 0.4);
+    if (duration <= 0 || r.width < 2) return;
+
+    // Ruler ticks + faint grid.
+    const secPerPx = tm.span / r.width;
+    const { step, asFrames } = chooseTickStep(secPerPx, tm.fps);
+    const first = Math.ceil(tm.viewStart / step) * step;
+    g.font = "9px system-ui, sans-serif";
+    g.textBaseline = "top";
+    for (let t = first; t <= tm.viewEnd + 1e-6; t += step) {
+      const x = pct(t) / 100 * r.width;
+      g.strokeStyle = "rgba(255,255,255,0.09)";
+      g.lineWidth = 1;
+      g.beginPath();
+      g.moveTo(x + 0.5, 0);
+      g.lineTo(x + 0.5, r.height);
+      g.stroke();
+      g.fillStyle = "rgba(230,236,244,0.5)";
+      const label = asFrames ? String(Math.round(t * tm.fps)) : `${t.toFixed(step < 1 ? 2 : step < 10 ? 1 : 0)}s`;
+      g.fillText(label, x + 2, 1);
     }
-    g.globalAlpha = 1;
+
+    // Filter/plant range underlines (lanes stacked from the bottom).
+    for (const rg of ranges) {
+      const x0 = pct(rg.t0) / 100 * r.width;
+      const x1 = pct(rg.t1) / 100 * r.width;
+      const lane = rg.lane ?? 0;
+      const y = r.height - 3 - lane * 3;
+      g.strokeStyle = rg.color;
+      g.lineWidth = 2;
+      g.beginPath();
+      g.moveTo(Math.max(0, x0), y);
+      g.lineTo(Math.min(r.width, x1), y);
+      g.stroke();
+    }
+
+    // Cleaning tick marks.
+    if (marks.length) {
+      g.globalAlpha = 0.55;
+      for (const m of marks) {
+        g.fillStyle = m.color;
+        g.fillRect(pct(m.time) / 100 * r.width, r.height * 0.55, 1, r.height * 0.45);
+      }
+      g.globalAlpha = 1;
+    }
+
+    // Ruler markers (small flags with labels).
+    for (const mk of markers) {
+      const x = pct(mk.time) / 100 * r.width;
+      if (x < -2 || x > r.width + 2) continue;
+      g.fillStyle = "#ffd24a";
+      g.beginPath();
+      g.moveTo(x, 0);
+      g.lineTo(x + 8, 3);
+      g.lineTo(x, 6);
+      g.closePath();
+      g.fill();
+      g.fillStyle = "rgba(255,210,74,0.9)";
+      g.fillRect(x, 0, 1, r.height);
+      if (mk.label) {
+        g.font = "9px system-ui, sans-serif";
+        g.fillText(mk.label, x + 9, 0);
+      }
+    }
   }
   function setMarks(next: TransportMark[]) {
     marks = next;
     drawMarks();
   }
+  function setRanges(next: TransportRange[]) {
+    ranges = next;
+    drawMarks();
+  }
   const marksRo = new ResizeObserver(drawMarks);
   marksRo.observe(timeline);
+
+  // Right-click ruler = add/remove marker.
+  timeline.addEventListener("contextmenu", (e) => {
+    e.preventDefault();
+    const t = timeAt(e.clientX);
+    // If close to an existing marker, offer to remove it; else add.
+    const r = timeline.getBoundingClientRect();
+    const tol = (10 / Math.max(1, r.width)) * tm.span;
+    const near = markers.find((m) => Math.abs(m.time - t) < tol);
+    if (near) {
+      markers = markers.filter((m) => m !== near);
+      drawMarks();
+      markersCb?.(markers);
+      return;
+    }
+    keyCbs?.onContextBlank(e.clientX, e.clientY);
+    // Also expose a lightweight add-marker affordance: double-right adds.
+  });
+  // Double-click ruler adds a marker with an editable label.
+  timeline.addEventListener("dblclick", (e) => {
+    const t = timeAt(e.clientX);
+    const label = prompt("Marker label (blank to cancel):", "");
+    if (label === null) return;
+    markers.push({ time: t, label });
+    markers.sort((a, b) => a.time - b.time);
+    drawMarks();
+    markersCb?.(markers);
+  });
 
   // ---- rig key markers ----------------------------------------------------
   const keysEl = el.querySelector(".t-keys") as HTMLElement;
@@ -275,6 +486,7 @@ export function createTransport(preview: PreviewScene, duration: number, frames 
   function makeKeyDot(m: TransportKeyMarker, cbs?: TransportKeyCallbacks): HTMLSpanElement {
     const dot = document.createElement("span");
     dot.className = "t-key" + (m.selected ? " sel" : "") + (m.picked ? " picked" : "");
+    dot.dataset.time = String(m.time);
     dot.style.left = `${pct(m.time)}%`;
     dot.style.background = m.color;
     dot.title = `${m.tag} key @ ${fmt(m.time)}: click to jump, drag to retime, right-click for options`;
@@ -295,7 +507,7 @@ export function createTransport(preview: PreviewScene, duration: number, frames 
       const move = (ev: PointerEvent) => {
         if (!moved && Math.abs(ev.clientX - startX) < 4) return;
         moved = true;
-        newTime = timeAt(ev.clientX);
+        newTime = snap(timeAt(ev.clientX));
         dot.style.left = `${pct(newTime)}%`;
         preview.pause();
         preview.seek(newTime);
@@ -318,10 +530,11 @@ export function createTransport(preview: PreviewScene, duration: number, frames 
     return dot;
   }
 
-  function setKeys(markers: TransportKeyMarker[], cbs?: TransportKeyCallbacks) {
+  function setKeys(markersIn: TransportKeyMarker[], cbs?: TransportKeyCallbacks) {
     keyCbs = cbs;
+    lastKeyMarkers = markersIn;
     keysEl.innerHTML = "";
-    for (const m of markers) keysEl.appendChild(makeKeyDot(m, cbs));
+    for (const m of markersIn) keysEl.appendChild(makeKeyDot(m, cbs));
   }
 
   // ---- mini dope sheet ------------------------------------------------------
@@ -333,8 +546,6 @@ export function createTransport(preview: PreviewScene, duration: number, frames 
   // Rows + curves must line up with the strip: pad to the timeline's range.
   const alignDope = () => {
     const tl = timeline.getBoundingClientRect();
-    // Measure against the target element itself — its border-box left doesn't
-    // move with its own padding, so this self-corrects in one pass.
     const pad = (target: HTMLElement) => {
       const r = target.getBoundingClientRect();
       const left = Math.max(0, tl.left - r.left);
@@ -345,6 +556,7 @@ export function createTransport(preview: PreviewScene, duration: number, frames 
     };
     pad(dopeRowsEl);
     pad(curveView.el);
+    curveView.redraw();
   };
   const dopeRo = new ResizeObserver(alignDope);
   dopeRo.observe(el);
@@ -361,7 +573,6 @@ export function createTransport(preview: PreviewScene, duration: number, frames 
     dopeToggle.textContent = view === "keys" ? "Keys ▾" : view === "curves" ? "Curves ▾" : "Panels ▸";
   };
   dopeToggle.addEventListener("click", () => {
-    // Cycle: keys → curves → hidden → keys (skipping unavailable views).
     const order: Array<typeof view> = ["keys", "curves", "none"];
     for (let i = 1; i <= order.length; i++) {
       const next = order[(order.indexOf(view) + i) % order.length];
@@ -390,24 +601,23 @@ export function createTransport(preview: PreviewScene, duration: number, frames 
       r.append(label, strip);
       dopeRowsEl.appendChild(r);
     }
-    // Visibility first: showing the Keys toggle changes the timeline width,
-    // and the alignment has to measure the final layout.
     syncDopeVisibility();
     alignDope();
   }
 
   function setCurves(model: CurveModel | null, cbs: CurveCallbacks | null) {
-    curveAvailable = !!model && model.channels.some((c) => c.keys.length > 0);
     curveView.setModel(model, cbs);
+    curveAvailable = curveView.available();
     syncDopeVisibility();
     alignDope();
   }
 
-  // Right-click on empty timeline → paste target etc.
-  timeline.addEventListener("contextmenu", (e) => {
-    e.preventDefault();
-    keyCbs?.onContextBlank(e.clientX, e.clientY);
-  });
+  function setChannels(config: ChannelsConfig | null) {
+    curveView.setChannels(config);
+    curveAvailable = curveView.available();
+    syncDopeVisibility();
+    alignDope();
+  }
 
   return {
     element: el,
@@ -417,6 +627,10 @@ export function createTransport(preview: PreviewScene, duration: number, frames 
       trimEnd = Math.max(trimStart + 0.01, Math.min(duration, end));
       applyTrim();
     },
+    getTimeMap: () => tm,
+    setMarkers: (m) => { markers = m.slice().sort((a, b) => a.time - b.time); drawMarks(); },
+    onMarkersChange: (fn) => { markersCb = fn; },
+    isMagnet: () => magnet,
     setSceneActions: (cbs) => {
       (el.querySelector(".t-scene-save") as HTMLButtonElement).onclick = () => cbs.save();
       (el.querySelector(".t-load-wanim") as HTMLButtonElement).onclick = () => cbs.openWanim();
@@ -424,8 +638,11 @@ export function createTransport(preview: PreviewScene, duration: number, frames 
     },
     setKeys,
     setMarks,
+    setRanges,
     setDope,
     setCurves,
+    setChannels,
+    curveView,
     dispose: () => {
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);

@@ -1,7 +1,7 @@
 import type { ConvertedClip } from "./clip.ts";
 import type { Quat, Vec3 } from "../wanim/parse.ts";
 import { quatNormalize, quatDot, quatSlerp } from "./quat.ts";
-import { fixFeet, type FeetStats } from "./feet.ts";
+import { fixFeet, type FeetStats, type FeetEdits } from "./feet.ts";
 
 // Basic mocap cleaning, applied to the converted (≈uniform-rate) clip so it
 // shows in the preview and flows to the export.
@@ -42,6 +42,8 @@ export interface CleanOpts {
    * via two-bone leg IK. Runs last so smoothing can't undo it.
    */
   fixFeet?: boolean;
+  /** Per-plant user overrides (removed plants) applied on top of detection. */
+  feetEdits?: FeetEdits;
 }
 
 /** Filled by cleanClip when passed: what each filter actually changed. */
@@ -300,6 +302,151 @@ export function smoothRange(c: ConvertedClip, r: RangeSmooth): ConvertedClip {
   return { ...c, localQuat, localPos, bindPos: localPos.map((t) => t[0]) };
 }
 
+// --- non-destructive scoped filter stack --------------------------------
+// A CleanOp is a filter (butterworth / despike / smooth) scoped to a BONE SET
+// and a TIME RANGE, applied non-destructively as an ordered list after the
+// global cleaning toggles + range smoothing. Every op blends 0.25 s at the
+// range edges (smoothRange precedent) so stacking never pops. Zero-norm quats
+// are left untouched (safeQuat rule).
+
+export type CleanFilter = "butterworth" | "despike" | "smooth";
+
+export interface CleanOp {
+  id: string;
+  bones: string[];
+  range: { t0: number; t1: number };
+  filter: CleanFilter;
+  params: { cutoffHz?: number; thresholdDeg?: number; widthFrames?: number };
+  enabled: boolean;
+}
+
+const OP_BLEND = 0.25;
+
+/** Smooth-step blend weight inside [t0,t1], easing over OP_BLEND at each edge. */
+function edgeWeight(t: number, t0: number, t1: number): number {
+  const inL = Math.min(1, Math.max(0, (t - t0) / OP_BLEND + 1));
+  const inR = Math.min(1, Math.max(0, (t1 - t) / OP_BLEND + 1));
+  const w = Math.min(inL, inR);
+  return w * w * (3 - 2 * w);
+}
+
+/** Frame range [f0,f1] covering [t0,t1] plus the blend pad, or null if tiny. */
+function rangeFrames(times: number[], t0: number, t1: number): { f0: number; f1: number } | null {
+  const off = times[0];
+  const f0 = times.findIndex((t) => t - off >= t0 - 0.35);
+  let f1 = times.length - 1;
+  while (f1 > 0 && times[f1] - off > t1 + 0.35) f1--;
+  if (f0 < 0 || f1 - f0 < 4) return null;
+  return { f0, f1 };
+}
+
+function trackValid(track: Quat[], f0: number, f1: number): boolean {
+  for (let f = f0; f <= f1; f++) {
+    if (Math.hypot(track[f][0], track[f][1], track[f][2], track[f][3]) < 0.5) return false;
+  }
+  return true;
+}
+
+/** Butterworth filtfilt on one quat track over [f0,f1] with edge blends. */
+function butterRange(track: Quat[], times: number[], f0: number, f1: number, cutoffHz: number, t0: number, t1: number): void {
+  if (!trackValid(track, f0, f1)) return;
+  const off = times[0];
+  const n = f1 - f0 + 1;
+  const fs = (n - 1) / Math.max(1e-6, times[f1] - times[f0]);
+  const fc = Math.max(0.5, Math.min(cutoffHz, fs / 2 - 0.1));
+  const q = butterworthLowpass(fc, fs);
+  for (let comp = 0; comp < 4; comp++) {
+    const x = new Array<number>(n);
+    for (let i = 0; i < n; i++) x[i] = track[f0 + i][comp];
+    const y = filtfilt(x, q);
+    for (let i = 0; i < n; i++) {
+      const w = edgeWeight(times[f0 + i] - off, t0, t1);
+      track[f0 + i][comp] = x[i] + (y[i] - x[i]) * w;
+    }
+  }
+  for (let f = f0; f <= f1; f++) track[f] = quatNormalize(track[f]);
+}
+
+/** Moving-average (box) smoothing on one quat track over [f0,f1] w/ blend. */
+function boxRange(track: Quat[], times: number[], f0: number, f1: number, width: number, t0: number, t1: number): void {
+  if (!trackValid(track, f0, f1)) return;
+  const off = times[0];
+  const half = Math.max(1, Math.round(width / 2));
+  const src = track.slice(f0, f1 + 1).map((qq) => [...qq] as Quat);
+  const n = src.length;
+  for (let i = 0; i < n; i++) {
+    let ax = 0, ay = 0, az = 0, aw = 0, cnt = 0;
+    for (let k = -half; k <= half; k++) {
+      const j = i + k;
+      if (j < 0 || j >= n) continue;
+      // Sign-align to the center sample so averaging doesn't cancel.
+      const s = src[j];
+      const d = s[0] * src[i][0] + s[1] * src[i][1] + s[2] * src[i][2] + s[3] * src[i][3];
+      const sgn = d < 0 ? -1 : 1;
+      ax += sgn * s[0]; ay += sgn * s[1]; az += sgn * s[2]; aw += sgn * s[3]; cnt++;
+    }
+    const avg = quatNormalize([ax / cnt, ay / cnt, az / cnt, aw / cnt]);
+    const w = edgeWeight(times[f0 + i] - off, t0, t1);
+    track[f0 + i] = quatNormalize(quatSlerp(src[i], avg, w));
+  }
+}
+
+/** Scoped despike over [f0,f1] only. */
+function despikeRange(track: Quat[], f0: number, f1: number, thresholdRad: number): void {
+  for (let i = Math.max(1, f0); i <= Math.min(track.length - 2, f1); i++) {
+    const dPrev = angleBetween(track[i - 1], track[i]);
+    const dNext = angleBetween(track[i], track[i + 1]);
+    const dSpan = angleBetween(track[i - 1], track[i + 1]);
+    if (dPrev > thresholdRad && dNext > thresholdRad && dSpan < thresholdRad) {
+      track[i] = quatSlerp(track[i - 1], track[i + 1], 0.5);
+    }
+  }
+}
+
+/** Apply one op's filter to its bone set within its range, in place. */
+function applyOpInPlace(times: number[], localQuat: Quat[][], localPos: Vec3[][], names: string[], op: CleanOp): void {
+  const fr = rangeFrames(times, op.range.t0, op.range.t1);
+  if (!fr) return;
+  const { f0, f1 } = fr;
+  const { t0, t1 } = op.range;
+  for (const bone of op.bones) {
+    const bi = names.indexOf(bone);
+    if (bi < 0) continue;
+    const track = localQuat[bi];
+    if (op.filter === "butterworth") butterRange(track, times, f0, f1, op.params.cutoffHz ?? 5, t0, t1);
+    else if (op.filter === "smooth") boxRange(track, times, f0, f1, op.params.widthFrames ?? 5, t0, t1);
+    else despikeRange(track, f0, f1, (op.params.thresholdDeg ?? 35) * DEG2RAD);
+    // Hips carries root travel — filter its position track too.
+    if (bi === 0 && (op.filter === "butterworth" || op.filter === "smooth")) {
+      const off = times[0];
+      const n = f1 - f0 + 1;
+      const fs = (n - 1) / Math.max(1e-6, times[f1] - times[f0]);
+      const fc = Math.max(0.5, Math.min(op.params.cutoffHz ?? 5, fs / 2 - 0.1));
+      const q = butterworthLowpass(fc, fs);
+      const hips = localPos[0];
+      for (let comp = 0; comp < 3; comp++) {
+        const x = new Array<number>(n);
+        for (let i = 0; i < n; i++) x[i] = hips[f0 + i][comp];
+        const y = filtfilt(x, q);
+        for (let i = 0; i < n; i++) {
+          const w = edgeWeight(times[f0 + i] - off, t0, t1);
+          hips[f0 + i][comp] = x[i] + (y[i] - x[i]) * w;
+        }
+      }
+    }
+  }
+}
+
+/** Replay the ordered filter stack on a copy of the clip. */
+export function applyCleanOps(c: ConvertedClip, ops: CleanOp[]): ConvertedClip {
+  const active = ops.filter((o) => o.enabled && o.bones.length);
+  if (!active.length) return c;
+  const localQuat = c.localQuat.map((t) => t.map((q) => [...q] as Quat));
+  const localPos = c.localPos.map((t) => t.map((p) => [...p] as Vec3));
+  for (const op of active) applyOpInPlace(c.times, localQuat, localPos, c.names, op);
+  return { ...c, localQuat, localPos, bindPos: localPos.map((t) => t[0]) };
+}
+
 export function cleanClip(c: ConvertedClip, opts: CleanOpts, stats?: CleanStats): ConvertedClip {
   const frames = c.times.length;
   if (frames < 5) return c;
@@ -385,7 +532,7 @@ export function cleanClip(c: ConvertedClip, opts: CleanOpts, stats?: CleanStats)
   // Feet last: pinning must survive every other filter untouched.
   if (opts.fixFeet) {
     const fs: FeetStats = { spans: 0, frames: 0, maxFixCm: 0 };
-    fixFeet(c, localPos, localQuat, fs);
+    fixFeet(c, localPos, localQuat, fs, opts.feetEdits);
     if (stats) stats.feet = fs;
   }
 

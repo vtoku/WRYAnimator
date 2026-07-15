@@ -323,5 +323,50 @@ const check = (label, ok, detail) => {
   );
 }
 
+// --- 9. scoped filter op touches ONLY its bone inside its range -------------
+// A CleanOp scoped to one wrist over a 1s range must change only that bone's
+// quats inside [range ± 0.25s blend]; everything else stays bit-identical.
+{
+  const { applyCleanOps } = await import("../src/convert/clean.ts");
+  const target = "RightHand";
+  const ti = c.names.indexOf(target);
+  const t0 = c.duration * 0.4, t1 = t0 + 1.0;
+  const op = {
+    id: "test", bones: [target], range: { t0, t1 },
+    filter: "butterworth", params: { cutoffHz: 3 }, enabled: true,
+  };
+  const out = applyCleanOps(c, [op]);
+  const base = c.times[0];
+  const pt = (f) => c.times[f] - base;
+  const same = (a, b) => a[0] === b[0] && a[1] === b[1] && a[2] === b[2] && a[3] === b[3];
+
+  // (a) every non-target bone is bit-identical everywhere.
+  let otherTouched = 0;
+  for (let b = 0; b < c.names.length; b++) {
+    if (b === ti) continue;
+    for (let f = 0; f < frames; f++) if (!same(c.localQuat[b][f], out.localQuat[b][f])) { otherTouched++; break; }
+  }
+  check("scoped filter: other bones bit-identical", otherTouched === 0, `bones changed outside the scope=${otherTouched}`);
+
+  // (b) target frames OUTSIDE range±blend are bit-identical.
+  let outsideTouched = 0, insideChanged = 0;
+  for (let f = 0; f < frames; f++) {
+    const inWindow = pt(f) >= t0 - 0.3 && pt(f) <= t1 + 0.3;
+    const changed = !same(c.localQuat[ti][f], out.localQuat[ti][f]);
+    if (changed && !inWindow) outsideTouched++;
+    if (changed && pt(f) >= t0 && pt(f) <= t1) insideChanged++;
+  }
+  check("scoped filter: target unchanged outside range±blend", outsideTouched === 0, `frames changed outside window=${outsideTouched}`);
+  check("scoped filter: target changed inside range", insideChanged > 0, `frames changed inside range=${insideChanged}`);
+
+  // (c) hips position is untouched when the op scopes a non-hips bone.
+  let hipsMoved = 0;
+  for (let f = 0; f < frames; f++) {
+    const a = c.localPos[0][f], b = out.localPos[0][f];
+    if (a[0] !== b[0] || a[1] !== b[1] || a[2] !== b[2]) hipsMoved++;
+  }
+  check("scoped filter: hips position untouched (non-hips scope)", hipsMoved === 0, `hips frames moved=${hipsMoved}`);
+}
+
 if (failures) { console.error(`${failures} FAILURES`); process.exit(1); }
 console.log("OK");

@@ -32,6 +32,26 @@ export interface FeetStats {
   maxFixCm: number;
   /** The adjusted frame indices — drives the timeline tick marks. */
   fixedFrames?: number[];
+  /** Final pinned plants (playback time, times rebased by times[0]) for the UI. */
+  plants?: PlantSpan[];
+}
+
+/** One planted-foot lock region, in playback (times[0]-relative) seconds. */
+export interface PlantSpan {
+  side: "Left" | "Right";
+  t0: number;
+  t1: number;
+}
+
+/** User overrides applied on top of auto-detection (playback seconds). */
+export interface FeetEdits {
+  /** Detected plants overlapping any of these intervals are dropped. */
+  removed?: PlantSpan[];
+}
+
+/** Does [a0,a1] overlap [b0,b1]? */
+function overlaps(a0: number, a1: number, b0: number, b1: number): boolean {
+  return a0 < b1 && b0 < a1;
 }
 
 // Contact detection tuning (meters, m/s, seconds).
@@ -126,13 +146,16 @@ function detectSpans(times: number[], lowY: number[], ankle: Vec3[], ground: num
  * Fix feet contacts in-place on the (already copied) localPos/localQuat
  * tracks. Mutates leg-chain rotations only.
  */
-export function fixFeet(c: ConvertedClip, localPos: Vec3[][], localQuat: Quat[][], stats?: FeetStats): void {
+export function fixFeet(c: ConvertedClip, localPos: Vec3[][], localQuat: Quat[][], stats?: FeetStats, edits?: FeetEdits): void {
   const frames = c.times.length;
   const adjusted = new Set<number>(); // frame keys, side-tagged
   let spanCount = 0;
   let maxFix = 0;
+  const plants: PlantSpan[] = [];
+  const t0base = c.times[0];
+  const removed = edits?.removed ?? [];
 
-  for (const side of ["Left", "Right"]) {
+  for (const side of ["Left", "Right"] as const) {
     const ch: Chain = {
       hip: c.names.indexOf(`${side}UpperLeg`),
       knee: c.names.indexOf(`${side}LowerLeg`),
@@ -152,9 +175,14 @@ export function fixFeet(c: ConvertedClip, localPos: Vec3[][], localQuat: Quat[][
     }
     const ground = percentile(lowY, 0.05);
 
-    // 1. Pin each contact span to where the foot first landed.
+    // 1. Pin each contact span to where the foot first landed. A user-removed
+    // plant (by interval overlap) is skipped so re-detection keeps the edit.
     const spans = detectSpans(c.times, lowY, ankle, ground);
     for (const s of spans) {
+      const st0 = c.times[s.start] - t0base;
+      const st1 = c.times[s.end - 1] - t0base;
+      if (removed.some((r) => r.side === side && overlaps(st0, st1, r.t0, r.t1))) continue;
+      plants.push({ side, t0: st0, t1: st1 });
       // Anchor = mean ankle over the first ~100 ms (settle-in), height from
       // the whole span so brief dips don't set it low.
       let ax = 0, az = 0, n = 0;
@@ -198,5 +226,6 @@ export function fixFeet(c: ConvertedClip, localPos: Vec3[][], localQuat: Quat[][
     stats.maxFixCm = maxFix * 100;
     // Keys are frame*2+side — decode and dedupe to plain frame indices.
     stats.fixedFrames = [...new Set([...adjusted].map((k) => k >> 1))];
+    stats.plants = plants;
   }
 }
