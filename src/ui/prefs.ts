@@ -10,6 +10,7 @@ export interface Prefs {
   showHints: boolean;         // master switch for the (i) tooltips
   // Defaults (new sessions)
   exportFps: number;
+  exportSpeed: number;        // export speed multiplier (0.25 - 4)
   nameScheme: "unity" | "motionbuilder";
   restPose: "tpose" | "first";
   gizmoSpace: "local" | "world";
@@ -43,6 +44,7 @@ const DEFAULTS: Prefs = {
   confirmReplace: true,
   showHints: true,
   exportFps: 60,
+  exportSpeed: 1,
   nameScheme: "unity",
   restPose: "tpose",
   gizmoSpace: "local",

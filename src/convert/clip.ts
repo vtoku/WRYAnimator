@@ -268,13 +268,16 @@ export function distributeBonelessSpine(c: ConvertedClip, amount = 0.5): Convert
 /**
  * Resample variable-rate motion onto a fixed frame rate (linear pos, slerp rot).
  * `trimStart`/`trimEnd` (seconds from clip start) restrict the exported range;
- * output time is rebased so the first kept frame is t=0.
+ * output time is rebased so the first kept frame is t=0. `speed` retimes the
+ * export by scaling the sampling step: speed S means output duration =
+ * trimmed duration / S (2× plays twice as fast) — no timewarp keys involved.
  */
-export function resample(c: ConvertedClip, fps = 60, trimStart = 0, trimEnd?: number): ResampledClip {
+export function resample(c: ConvertedClip, fps = 60, trimStart = 0, trimEnd?: number, speed = 1): ResampledClip {
   const t0 = c.times[0];
   const start = Math.max(0, Math.min(c.duration, trimStart));
   const end = Math.max(start, Math.min(c.duration, trimEnd ?? c.duration));
-  const duration = end - start;
+  const s = Math.max(0.01, speed);
+  const duration = (end - start) / s;
   const frameCount = Math.max(1, Math.round(duration * fps) + 1);
   const boneCount = c.names.length;
 
@@ -284,7 +287,7 @@ export function resample(c: ConvertedClip, fps = 60, trimStart = 0, trimEnd?: nu
 
   let cursor = 0;
   for (let i = 0; i < frameCount; i++) {
-    const t = t0 + start + i / fps;
+    const t = t0 + start + (i * s) / fps;
     // advance cursor so c.times[cursor] <= t < c.times[cursor+1]
     while (cursor < c.times.length - 2 && c.times[cursor + 1] < t) cursor++;
     const ta = c.times[cursor];

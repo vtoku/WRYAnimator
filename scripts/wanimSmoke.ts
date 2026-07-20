@@ -1,15 +1,25 @@
 // Smoke test: parse a real .wanim, convert + resample, write FBX, sanity-check.
-// Usage: node --experimental-strip-types scripts/wanimSmoke.ts <file.wanim> [outFbx]
+// Usage: node --experimental-strip-types scripts/wanimSmoke.ts <file.wanim> [outFbx] [--fps N] [--speed S]
+// --fps/--speed exercise the export-retiming resample path (B2): speed S
+// means output duration = source duration / S at the chosen frame rate.
 import { readFileSync, writeFileSync } from "node:fs";
 import { parseWanim } from "../src/wanim/parse.ts";
 import { convertCharacter, resample } from "../src/convert/clip.ts";
 import { writeAnimationFbx } from "../src/fbx/animationFbx.ts";
 import { remapNames } from "../src/convert/skeleton.ts";
 
-const file = process.argv[2];
-const out = process.argv[3];
+const argv = process.argv.slice(2);
+const flagVal = (name: string): number | null => {
+  const i = argv.indexOf(`--${name}`);
+  return i >= 0 && argv[i + 1] !== undefined ? Number(argv[i + 1]) : null;
+};
+const fps = flagVal("fps") ?? 60;
+const speed = flagVal("speed") ?? 1;
+const positional = argv.filter((a, i) => !a.startsWith("--") && !(i > 0 && argv[i - 1].startsWith("--")));
+const file = positional[0];
+const out = positional[1];
 if (!file) {
-  console.error("usage: node --experimental-strip-types scripts/wanimSmoke.ts <file.wanim> [outFbx]");
+  console.error("usage: node --experimental-strip-types scripts/wanimSmoke.ts <file.wanim> [outFbx] [--fps N] [--speed S]");
   process.exit(1);
 }
 
@@ -23,8 +33,14 @@ console.log(`duration   ${duration.toFixed(2)}s (${((frames - 1) / duration).toF
 console.log(`characters ${clip.characters.length}`);
 
 const converted = convertCharacter(clip, 0);
-const resampled = resample(converted, 60);
-console.log(`resampled  ${resampled.frameCount} frames @ ${resampled.fps} fps`);
+const resampled = resample(converted, fps, 0, undefined, speed);
+console.log(`resampled  ${resampled.frameCount} frames @ ${resampled.fps} fps${speed !== 1 ? ` (${speed}× speed)` : ""}`);
+// Retiming invariant: frameCount = round(duration / speed * fps) + 1.
+const expected = Math.round((converted.duration / speed) * fps) + 1;
+if (Math.abs(resampled.frameCount - expected) > 1) {
+  throw new Error(`retiming: frameCount ${resampled.frameCount} != expected ${expected}`);
+}
+if (fps !== 60 || speed !== 1) console.log(`retiming   expected ${expected} frames (duration/speed×fps+1) — OK`);
 
 const hips0 = resampled.localPos[0][0].map((v) => (v * 100).toFixed(1));
 console.log(`hips(cm)   [${hips0.join(", ")}] at frame 0`);

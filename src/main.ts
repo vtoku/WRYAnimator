@@ -5,9 +5,10 @@ import { importFbxAnimation, type FbxImportResult } from "./convert/importFbx.ts
 import { defaultRestClip } from "./convert/restSkeleton.ts";
 import { parseVrmMeta } from "./vrm/vrmHumanoid.ts";
 import { cleanClip, smoothRange, applyCleanOps, type CleanOpts, type CleanStats, type RangeSmooth, type CleanOp, type CleanFilter } from "./convert/clean.ts";
+import { makeLoop, findLoopPoint, type LoopOp } from "./convert/loop.ts";
 import type { PlantSpan } from "./convert/feet.ts";
 import {
-  makeLayer, getTrack, setPosKey, setRotKey, deleteKeysAt, keyTimes,
+  makeLayer, getTrack, getBoneTrack, setPosKey, setRotKey, deleteKeysAt, keyTimes,
   applyRigLayers, nearestFrame,
   effectorDef, effectorForBone, effectorColor, retimeKeys, keyFullPose,
   bakeRange, bakeRangeAsync, dirtyRange, unionRange, fkDragRef, setKeyEase, reduceKeys, smoothKeys,
@@ -42,7 +43,7 @@ import { saveLastSession, loadLastSession, clearLastSession } from "./session.ts
 import { ICONS } from "./ui/icons.ts";
 import { buildMenuBar, type MenuDef, type MenuItem } from "./ui/menu.ts";
 import { keyFor, SHORTCUTS } from "./ui/shortcuts.ts";
-import { openShortcuts, openAbout, openPreferences as openPreferencesDialog } from "./ui/dialogs.ts";
+import { openShortcuts, openAbout, openModal, openPreferences as openPreferencesDialog } from "./ui/dialogs.ts";
 import { getPref, getPrefs, setPref, onPrefsChange, applyAppearance } from "./ui/prefs.ts";
 import { createAidStrip } from "./ui/aidstrip.ts";
 import { initLayout, setDockCollapsed, setLayoutSizes } from "./ui/layout.ts";
@@ -163,6 +164,11 @@ interface MenuActions {
   del(): void;
   keyPose(): void;
   resetModifiers(): void;
+  /** Time menu (Phase B): loop / hold / retiming tools. */
+  makeLoop(): void;
+  autoFindLoop(): void;
+  insertHold(): void;
+  exportRetiming(): void;
   setDockTab(t: "clean" | "rig" | "export" | "info"): void;
   cyclePanels(): void;
   toggleGhost(): void;
@@ -284,6 +290,27 @@ const menuDefs: MenuDef[] = [
       { label: "Reset modifiers", enabled: hasClip, action: () => menuActions?.resetModifiers() },
       { separator: true },
       { label: "Preferences...", action: () => openPreferences() },
+    ],
+  },
+  {
+    label: "Time",
+    items: () => [
+      { label: "Make loop...", enabled: hasClip, action: () => menuActions?.makeLoop() },
+      { label: "Auto-find loop point", enabled: hasClip, action: () => menuActions?.autoFindLoop() },
+      { label: "Insert hold...", enabled: hasClip, action: () => menuActions?.insertHold() },
+      { separator: true },
+      { label: "Export retiming...", enabled: hasClip, action: () => menuActions?.exportRetiming() },
+      {
+        label: "Fit trim",
+        enabled: hasClip,
+        action: () => {
+          const tm = transport?.getTimeMap();
+          const tr = transport?.getTrim();
+          if (!tm || !tr) return;
+          if (tr.end - tr.start < tm.duration - 0.02) tm.fit(tr.start, tr.end);
+          else tm.fit();
+        },
+      },
     ],
   },
   {
@@ -677,6 +704,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
       <button id="rangeAdd" class="button ghost">Smooth trim range</button>
     </div>
     <div id="rangeChips" class="rig-keys"></div>
+    <div id="loopChips" class="rig-keys"></div>
 
     <h4 class="group">Filters (scoped) <span class="hint-i" title="Fix just the channels you pick over just the section you pick. On the Rig timeline open the Channels view, select the bones (down to a single finger), set the trim handles around the bad section, choose a filter, then Add. Each filter is non-destructive and stacks; the colored underline on the timeline shows where it acts. Blends 0.25s at the edges.">ⓘ</span></h4>
     <div class="rig-row">
@@ -807,10 +835,21 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
       <span>Frame rate</span>
       <select id="fps">
         <option value="30">30 fps</option>
+        <option value="50">50 fps</option>
         <option value="60" selected>60 fps</option>
         <option value="120">120 fps</option>
+        <option value="custom">Custom…</option>
       </select>
     </label>
+    <label class="field sub" id="fpsCustomRow" hidden>
+      <span>Custom fps</span>
+      <input id="fpsCustom" type="number" min="1" max="240" step="1" value="60" style="width:4.2rem" />
+    </label>
+    <label class="field sub">
+      <span>Speed <output id="speedVal">1×</output></span>
+      <input id="speed" type="range" min="0.25" max="4" step="0.25" value="1" title="Export speed multiplier. 2× halves the output duration, 0.5× doubles it; the frame rate stays as chosen." />
+    </label>
+    <p id="retimeInfo" class="clean-stats"></p>
     <label class="field">
       <span>Bone names</span>
       <select id="names">
@@ -905,6 +944,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     for (const el of dock.querySelectorAll(".tab")) el.classList.toggle("active", el.id === `tab-${t}`);
     syncRigVisibility();
     updateRigEditor();
+    if (t === "export") updateRetimeInfo();
   }
   for (const b of tabBtns) b.addEventListener("click", () => setTab(b.dataset.tab!));
 
@@ -915,6 +955,11 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
   const cutoff = document.getElementById("cutoff") as HTMLInputElement;
   const cutoffVal = document.getElementById("cutoffVal") as HTMLOutputElement;
   const fpsSel = document.getElementById("fps") as HTMLSelectElement;
+  const fpsCustomRow = document.getElementById("fpsCustomRow") as HTMLLabelElement;
+  const fpsCustom = document.getElementById("fpsCustom") as HTMLInputElement;
+  const speedEl = document.getElementById("speed") as HTMLInputElement;
+  const speedValOut = document.getElementById("speedVal") as HTMLOutputElement;
+  const retimeInfoEl = document.getElementById("retimeInfo") as HTMLParagraphElement;
   const namesSel = document.getElementById("names") as HTMLSelectElement;
   const restSel = document.getElementById("rest") as HTMLSelectElement;
   const propSel = document.getElementById("proportions") as HTMLSelectElement;
@@ -935,7 +980,9 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
   // Preference defaults for a NEW session: these seed the baseline before the
   // per-recording cache / scene restore (which runs later and overrides them),
   // so an already-edited recording never gets retroactively reset.
-  fpsSel.value = String(getPref("exportFps"));
+  setFpsUi(getPref("exportFps"));
+  speedEl.value = String(getPref("exportSpeed"));
+  speedValOut.value = `${speedEl.value}×`;
   namesSel.value = getPref("nameScheme");
   restSel.value = getPref("restPose");
   despikeChk.checked = getPref("cleanDespike");
@@ -962,6 +1009,45 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
   });
 
   const cleanStatsEl = document.getElementById("cleanStats") as HTMLParagraphElement;
+
+  // ---- export retiming (B2) -----------------------------------------------
+  // Target fps + speed multiplier. Speed ≠ fps: speed S scales the resample
+  // time step so output duration = trimmed duration / S — no timewarp keys.
+  /** Reflect an fps number in the select (custom input when not a preset). */
+  function setFpsUi(fps: number | string) {
+    const preset = ["30", "50", "60", "120"].includes(String(fps));
+    fpsSel.value = preset ? String(fps) : "custom";
+    if (!preset && Number.isFinite(Number(fps))) fpsCustom.value = String(fps);
+    fpsCustomRow.hidden = fpsSel.value !== "custom";
+  }
+  function exportFpsVal(): number {
+    const v = fpsSel.value === "custom" ? Number(fpsCustom.value) : Number(fpsSel.value);
+    return Number.isFinite(v) && v >= 1 ? Math.min(240, v) : 60;
+  }
+  function exportSpeedVal(): number {
+    const v = Number(speedEl.value);
+    return Number.isFinite(v) && v > 0 ? Math.min(4, Math.max(0.25, v)) : 1;
+  }
+  /** Live readout: frame count + duration the current fps/speed/trim produce. */
+  function updateRetimeInfo() {
+    if (!loaded) return;
+    const trim = transport?.getTrim() ?? { start: 0, end: loaded.display.duration };
+    const fps = exportFpsVal();
+    const speed = exportSpeedVal();
+    const outDur = Math.max(0, trim.end - trim.start) / speed;
+    const framesOut = Math.max(1, Math.round(outDur * fps) + 1);
+    retimeInfoEl.textContent =
+      `Export: ${framesOut} frames · ${fmtTime(outDur)} @ ${fps} fps` +
+      (speed !== 1 ? ` · ${speed}× speed` : "");
+  }
+  fpsSel.addEventListener("change", () => {
+    fpsCustomRow.hidden = fpsSel.value !== "custom";
+    setPref("exportFps", exportFpsVal());
+    updateRetimeInfo();
+  });
+  fpsCustom.addEventListener("change", () => { setPref("exportFps", exportFpsVal()); updateRetimeInfo(); });
+  speedEl.addEventListener("input", () => { speedValOut.value = `${speedEl.value}×`; updateRetimeInfo(); });
+  speedEl.addEventListener("change", () => { setPref("exportSpeed", exportSpeedVal()); updateRetimeInfo(); });
 
   // ---- pipeline settings in undo ------------------------------------------
   // Cleaning toggles/sliders (+ proportions + spine spread) change the motion
@@ -1027,6 +1113,9 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     // Scoped filter stack (bone set x range) — after global cleaning + range
     // smoothing, before proportions/modifiers/layers.
     if (withCleaning) display = applyCleanOps(display, cleanOps);
+    // Make-loop (Time menu): blend the trim range into a clean cycle. Runs
+    // after the filter stack so filters can't reopen the seam.
+    if (withCleaning && loopOp) display = makeLoop(display, loopOp);
     // Report what the filters actually changed — proof they're applied — and
     // collect the touched frames as timeline tick marks so they're findable.
     // Consecutive corrected frames compress to ONE mark at the run start (a
@@ -1111,6 +1200,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
   const warpKeys: WarpKey[] = []; // time-warp speed ramp (source-time keys)
   const rangeSmooths: RangeSmooth[] = []; // user-applied range smoothing passes
   const cleanOps: CleanOp[] = []; // scoped non-destructive filter stack
+  let loopOp: LoopOp | null = null; // make-loop cycle blend (chip-listed)
   let currentPlants: PlantSpan[] = []; // last detected plants (drawing + chips)
   let rawRefCache: { gen: number; clip: ConvertedClip } | null = null; // reach reference
   // Tool state (not undo history — like the gizmo mode): world-pinned limbs
@@ -1156,6 +1246,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     transport?.setMarks(cleanMarks);
     refreshTimelineRanges(); // scoped-filter + plant underlines
     renderPlants(); // per-plant chips
+    updateRetimeInfo(); // export readout follows duration/trim changes
     transport?.curveView.refreshChannels(); // dense view follows the new clip
     // Deferred trim/playhead (scene load, warp remap) — after any rebuild.
     if (pendingViewRestore) {
@@ -1296,7 +1387,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
   const rigSnapshot = () =>
     JSON.stringify({
       layers: rigLayers, mods, counter: layerCounter, active: activeLayerIdx,
-      warp: warpKeys, ranges: rangeSmooths, cleanOps, feetPlants: feetPlantRemoved, pipeline: pipelineSettings(),
+      warp: warpKeys, ranges: rangeSmooths, cleanOps, loop: loopOp, feetPlants: feetPlantRemoved, pipeline: pipelineSettings(),
     });
   function updateUndoUi() {
     rigUndoBtn.disabled = !undoStack.length;
@@ -1319,6 +1410,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
       warp?: WarpKey[];
       ranges?: RangeSmooth[];
       cleanOps?: CleanOp[];
+      loop?: LoopOp | null;
       feetPlants?: PlantSpan[];
       pipeline?: PipelineSettings;
     };
@@ -1327,6 +1419,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
       JSON.stringify(warpKeys) !== JSON.stringify(d.warp ?? []) ||
       JSON.stringify(rangeSmooths) !== JSON.stringify(d.ranges ?? []) ||
       JSON.stringify(cleanOps) !== JSON.stringify(d.cleanOps ?? []) ||
+      JSON.stringify(loopOp) !== JSON.stringify(d.loop ?? null) ||
       JSON.stringify(feetPlantRemoved) !== JSON.stringify(d.feetPlants ?? []) ||
       (!!d.pipeline && JSON.stringify(d.pipeline) !== JSON.stringify(pipelineSettings()));
     rigLayers.splice(0, rigLayers.length, ...d.layers);
@@ -1334,6 +1427,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     warpKeys.splice(0, warpKeys.length, ...(d.warp ?? []));
     rangeSmooths.splice(0, rangeSmooths.length, ...(d.ranges ?? []));
     cleanOps.splice(0, cleanOps.length, ...(d.cleanOps ?? []));
+    loopOp = d.loop ?? null;
     feetPlantRemoved.splice(0, feetPlantRemoved.length, ...(d.feetPlants ?? []));
     renderFilters();
     if (d.pipeline) applyPipelineUi(d.pipeline);
@@ -2529,6 +2623,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
       r.t0 = re(r.t0);
       r.t1 = re(r.t1);
     }
+    if (loopOp) loopOp = { ...loopOp, t0: re(loopOp.t0), t1: re(loopOp.t1) };
     pickedKeys = pickedKeys.map((p) => ({ ...p, time: re(p.time) }));
     const trim = transport?.getTrim();
     pendingViewRestore = {
@@ -2598,6 +2693,31 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
       rangeChipsEl.appendChild(chip);
     }
   }
+  const loopChipsEl = document.getElementById("loopChips") as HTMLDivElement;
+  /** The make-loop op as a removable chip next to the range-smooth chips. */
+  function renderLoopChip() {
+    loopChipsEl.innerHTML = "";
+    if (!loopOp) return;
+    const op = loopOp;
+    const chip = document.createElement("span");
+    chip.className = "rig-key";
+    const label = document.createElement("button");
+    label.textContent = `Loop ${fmtTime(op.t0)}–${fmtTime(op.t1)} · ${op.blendS}s blend${op.inPlace ? " · in-place" : ""}`;
+    label.title = "Make-loop cycle blend. Click to zoom the timeline to the loop.";
+    label.addEventListener("click", () => transport?.getTimeMap().fit(op.t0, op.t1));
+    const del = document.createElement("button");
+    del.textContent = "×";
+    del.title = "Remove the loop blend";
+    del.addEventListener("click", () => {
+      pushHistory();
+      loopOp = null;
+      renderLoopChip();
+      void reclean();
+    });
+    chip.append(label, del);
+    loopChipsEl.appendChild(chip);
+  }
+
   (document.getElementById("rangeAdd") as HTMLButtonElement).addEventListener("click", () => {
     const trim = transport?.getTrim();
     if (!trim || !loaded) return;
@@ -2802,6 +2922,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     }
     renderWarpChips();
     renderRangeChips();
+    renderLoopChip();
   }
 
   function doResetModifiers() {
@@ -2934,6 +3055,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
         warpKeys.length ||
         rangeSmooths.length ||
         cleanOps.length ||
+        !!loopOp ||
         feetPlantRemoved.length ||
         JSON.stringify(mods) !== JSON.stringify(defaultModifiers());
       if (dirty) {
@@ -2941,7 +3063,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
           rigCacheKey,
           JSON.stringify({
             v: 3, layers: rigLayers, mods, counter: layerCounter, warp: warpKeys, ranges: rangeSmooths,
-            cleanOps, feetPlants: feetPlantRemoved, pins: [...pinnedEffectors], fk: [...fkLimbs], ikfk: { ...ikfk },
+            cleanOps, loop: loopOp, feetPlants: feetPlantRemoved, pins: [...pinnedEffectors], fk: [...fkLimbs], ikfk: { ...ikfk },
             settings: sceneSettings(),
           }),
         );
@@ -2959,6 +3081,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     warp?: WarpKey[];
     ranges?: RangeSmooth[];
     cleanOps?: CleanOp[];
+    loop?: LoopOp | null;
     feetPlants?: PlantSpan[];
     pins?: EffectorId[];
     fk?: EffectorId[];
@@ -2989,6 +3112,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     warpKeys.splice(0, warpKeys.length, ...(d.warp ?? []));
     rangeSmooths.splice(0, rangeSmooths.length, ...(d.ranges ?? []));
     cleanOps.splice(0, cleanOps.length, ...(d.cleanOps ?? []));
+    loopOp = d.loop ?? null; // absent in older caches/scenes — no loop
     feetPlantRemoved.splice(0, feetPlantRemoved.length, ...(d.feetPlants ?? []));
     layerCounter = d.counter ?? rigLayers.length;
     activeLayerIdx = rigLayers.length - 1;
@@ -3034,7 +3158,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
   (document.getElementById("rigSave") as HTMLButtonElement).addEventListener("click", () => {
     if (!loaded) return;
     const json = JSON.stringify(
-      { v: 3, layers: rigLayers, mods, counter: layerCounter, warp: warpKeys, ranges: rangeSmooths, cleanOps, feetPlants: feetPlantRemoved, pins: [...pinnedEffectors], fk: [...fkLimbs], ikfk: { ...ikfk } },
+      { v: 3, layers: rigLayers, mods, counter: layerCounter, warp: warpKeys, ranges: rangeSmooths, cleanOps, loop: loopOp, feetPlants: feetPlantRemoved, pins: [...pinnedEffectors], fk: [...fkLimbs], ikfk: { ...ikfk } },
       null,
       1,
     );
@@ -3063,7 +3187,8 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
   function sceneSettings(): Record<string, unknown> {
     return {
       clean: cleanOpts(),
-      fps: fpsSel.value,
+      fps: exportFpsVal(),
+      speed: exportSpeedVal(),
       names: namesSel.value,
       rest: restSel.value,
       proportions: propSel.value,
@@ -3080,7 +3205,11 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
   function applyScene(s?: Record<string, unknown>) {
     if (!s) return;
     applyCleanUi((s.clean ?? {}) as CleanOpts);
-    if (s.fps) fpsSel.value = String(s.fps);
+    if (s.fps) setFpsUi(s.fps as number | string);
+    if (typeof s.speed === "number" && s.speed > 0) {
+      speedEl.value = String(Math.min(4, Math.max(0.25, s.speed)));
+      speedValOut.value = `${speedEl.value}×`;
+    }
     if (typeof s.names === "string") namesSel.value = s.names;
     if (typeof s.rest === "string") restSel.value = s.rest;
     if (typeof s.proportions === "string") propSel.value = s.proportions;
@@ -3116,7 +3245,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
       name: loaded.name,
       source: loaded.source,
       settings: sceneSettings(),
-      rig: { v: 3, layers: rigLayers, mods, counter: layerCounter, warp: warpKeys, ranges: rangeSmooths, cleanOps, feetPlants: feetPlantRemoved, pins: [...pinnedEffectors], fk: [...fkLimbs], ikfk: { ...ikfk } },
+      rig: { v: 3, layers: rigLayers, mods, counter: layerCounter, warp: warpKeys, ranges: rangeSmooths, cleanOps, loop: loopOp, feetPlants: feetPlantRemoved, pins: [...pinnedEffectors], fk: [...fkLimbs], ikfk: { ...ikfk } },
       // The original source bytes, so the project reopens byte-for-byte.
       wanim: loaded.source === "wanim" ? rawB64 : undefined,
       fbx: loaded.source === "fbx" ? rawB64 : undefined,
@@ -3147,6 +3276,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     // channels wired (this runs again after a warp-duration transport rebuild).
     transport?.setMarkers(sceneMarkers);
     transport?.onMarkersChange((m) => { sceneMarkers = m; saveRigCache(); });
+    transport?.onTrimChange(() => updateRetimeInfo()); // live export readout
     wireChannels();
   }
 
@@ -3286,7 +3416,8 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     downloadBtn.textContent = "Generating…";
     await new Promise((r) => setTimeout(r, 16));
     try {
-      const fps = Number(fpsSel.value);
+      const fps = exportFpsVal();
+      const speed = exportSpeedVal();
       const trim = transport?.getTrim() ?? { start: 0, end: loaded.display.duration };
       if (format === "wanim") {
         // Re-export the cleaned recording as .wanim for re-import into Warudo.
@@ -3297,6 +3428,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
         let clip = cleanClip(warpedSrc, cleanOpts());
         for (const r of rangeSmooths) clip = smoothRange(clip, r);
         clip = applyCleanOps(clip, cleanOps);
+        if (loopOp) clip = makeLoop(clip, loopOp); // same slot as the display pipeline
         if (distSpineChk.checked) clip = distributeBonelessSpine(clip, Number(distSpineAmt.value) / 100);
         // Modifiers + rig layers bake here too. Additive deltas transfer
         // cleanly; override targets were authored on the display proportions,
@@ -3308,11 +3440,11 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
           clip = applyReach(clip, applyModifiers(raw, mods), mods);
         }
         clip = applyRigLayers(clip, rigLayers);
-        const rs = resample(clip, fps, trim.start, trim.end);
+        const rs = resample(clip, fps, trim.start, trim.end, speed);
         const { writeWanim } = await import("./wanim/writeWanim.ts");
         downloadBytes(`${outBase()}.wanim`, writeWanim(rs, loaded.clip));
       } else {
-      const resampled = resample(loaded.display, fps, trim.start, trim.end);
+      const resampled = resample(loaded.display, fps, trim.start, trim.end, speed);
       if (format === "vrma") {
         // Original ARKit tracks become custom expressions; the synthesized
         // preset tracks (A/Blink/Look_*) fill the VRM presets.
@@ -3360,6 +3492,174 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
   }
   downloadBtn.addEventListener("click", () => { void doExport(formatSel.value); });
 
+  // ---- Time menu tools (Phase B) ------------------------------------------
+  let findingLoop = false;
+  /** Auto-find loop point: best pose-match pair in the trim range (≥ 1 s). */
+  async function doAutoFindLoop(): Promise<{ t0: number; t1: number } | null> {
+    if (!loaded || !transport || !preview || findingLoop) return null;
+    findingLoop = true;
+    try {
+      const trim = transport.getTrim();
+      // Deferred off the click like a reclean, so the menu closes first.
+      await new Promise((r) => setTimeout(r, 16));
+      const best = findLoopPoint(loaded.display, trim.start, trim.end);
+      if (!best) {
+        showError("No loop point found — the trim range needs at least a second of motion.");
+        return null;
+      }
+      transport.setTrim(best.t0, best.t1);
+      preview.pause();
+      preview.seek(best.t0);
+      return best;
+    } finally {
+      findingLoop = false;
+    }
+  }
+
+  /** Time > Make loop…: blend the trim range into a clean cycle. */
+  function openMakeLoopDialog() {
+    if (!loaded || !transport) return;
+    const trim = transport.getTrim();
+    const body = document.createElement("div");
+    body.className = "modal-body";
+    body.innerHTML = `
+      <p class="note" id="loopNote">Blends the last moments of the trim range (${fmtTime(trim.start)}–${fmtTime(trim.end)}) toward its start, so the range plays as a seamless cycle.</p>
+      <label class="field"><span>Blend seconds</span><input id="loopBlend" type="number" min="0.1" max="2" step="0.1" value="0.5" style="width:4.2rem" /></label>
+      <label class="field"><span>In-place loop (remove travel drift)</span><input id="loopInPlace" type="checkbox" /></label>
+      <div class="rig-row">
+        <button id="loopAutoFind" class="button ghost" title="Scan the trim range for the most similar pose pair at least a second apart, and move the trim handles there.">Auto-find loop point</button>
+        <button id="loopApply" class="button primary">Apply</button>
+      </div>
+    `;
+    const close = openModal("Make loop", body);
+    const noteEl = body.querySelector("#loopNote") as HTMLParagraphElement;
+    (body.querySelector("#loopAutoFind") as HTMLButtonElement).addEventListener("click", () => {
+      noteEl.textContent = "Scanning for the best loop point…";
+      void doAutoFindLoop().then((best) => {
+        noteEl.textContent = best
+          ? `Trim moved to the best pose match: ${fmtTime(best.t0)}–${fmtTime(best.t1)}.`
+          : "No loop point found in the trim range.";
+      });
+    });
+    (body.querySelector("#loopApply") as HTMLButtonElement).addEventListener("click", () => {
+      const tr = transport?.getTrim();
+      if (!tr || !loaded) return;
+      if (tr.end - tr.start < 0.5) {
+        showError("Trim range is too short to loop (needs at least half a second).");
+        return;
+      }
+      const raw = Number((body.querySelector("#loopBlend") as HTMLInputElement).value);
+      const blendS = Math.min(Number.isFinite(raw) && raw > 0 ? Math.min(2, raw) : 0.5, (tr.end - tr.start) / 2);
+      const inPlace = (body.querySelector("#loopInPlace") as HTMLInputElement).checked;
+      pushHistory();
+      loopOp = { t0: tr.start, t1: tr.end, blendS, inPlace };
+      close();
+      renderLoopChip();
+      void reclean();
+    });
+  }
+
+  /** Insert a hold: freeze the playhead pose across [t0, t1] on "Holds". */
+  function doInsertHold(t0: number, t1: number, bones: string[]) {
+    if (!rigBaseClip || !preview || !bones.length) return;
+    const clip = rigBaseClip;
+    pushHistory();
+    // Dedicated auto-created override layer. Fade extent (not "hold"): hold
+    // would extend the first/last key across the whole clip and freeze the
+    // motion OUTSIDE the span too; fade is bit-exact outside span ± fadeS.
+    let holdIdx = rigLayers.findIndex((l) => l.name === "Holds");
+    if (holdIdx < 0) {
+      const l = makeLayer("Holds");
+      l.mode = "override";
+      l.extent = "fade";
+      l.fadeS = 0.3;
+      rigLayers.push(l);
+      holdIdx = rigLayers.length - 1;
+    }
+    const layer = rigLayers[holdIdx];
+    const fp = nearestFrame(clip, preview.getTime());
+    const f1 = nearestFrame(clip, t1);
+    // Capture both poses BEFORE writing keys so the release pose can't be
+    // contaminated by the hold key's own influence on the stack.
+    const poseHold = stackPoseThrough(clip, rigLayers, holdIdx, fp);
+    const poseRelease = stackPoseThrough(clip, rigLayers, holdIdx, f1);
+    const withHips = bones.includes("Hips");
+    captureBoneKeys(clip, rigLayers, holdIdx, bones, poseHold, fp, t0, withHips);
+    // Step ease: the pose holds flat until the release key at the span end,
+    // where the underlying motion is re-keyed so it releases cleanly.
+    for (const b of bones) {
+      const tr = getBoneTrack(layer, b);
+      if (tr) setKeyEase(tr, t0, "step");
+    }
+    captureBoneKeys(clip, rigLayers, holdIdx, bones, poseRelease, f1, t1, withHips);
+    activeLayerIdx = holdIdx;
+    renderRigLayers();
+    rebakeRig();
+    updateRigEditor();
+    saveRigCache();
+  }
+
+  /** Time > Insert hold…: span + scope dialog, then doInsertHold. */
+  function openInsertHoldDialog() {
+    if (!loaded || !rigBaseClip || !preview || !transport) return;
+    const selDef = selectedEffector ? effectorDef(selectedEffector) : null;
+    const body = document.createElement("div");
+    body.className = "modal-body";
+    body.innerHTML = `
+      <p class="note">Freezes the pose at the playhead across a span, on a "Holds" override layer. The motion is re-keyed at the span end so it releases cleanly; delete the keys to remove the hold.</p>
+      <label class="field"><span>Span</span>
+        <select id="holdSpan">
+          <option value="secs" selected>Seconds from playhead</option>
+          <option value="trim">Trim range</option>
+        </select>
+      </label>
+      <label class="field sub" id="holdSecsRow"><span>Seconds</span><input id="holdSecs" type="number" min="0.1" max="60" step="0.1" value="1" style="width:4.2rem" /></label>
+      <label class="field"><span>Scope</span>
+        <select id="holdScope">
+          <option value="full" selected>Whole body</option>
+          <option value="selected"${selDef ? "" : " disabled"}>Selected effector${selDef ? ` (${selDef.label})` : ""}</option>
+        </select>
+      </label>
+      <div class="rig-row"><button id="holdApply" class="button primary">Insert hold</button></div>
+    `;
+    const close = openModal("Insert hold", body);
+    const spanSel = body.querySelector("#holdSpan") as HTMLSelectElement;
+    const secsRow = body.querySelector("#holdSecsRow") as HTMLElement;
+    spanSel.addEventListener("change", () => { secsRow.hidden = spanSel.value !== "secs"; });
+    (body.querySelector("#holdApply") as HTMLButtonElement).addEventListener("click", () => {
+      if (!loaded || !rigBaseClip || !preview) return;
+      const clip = rigBaseClip;
+      let t0: number, t1: number;
+      if (spanSel.value === "trim") {
+        const tr = transport!.getTrim();
+        t0 = tr.start;
+        t1 = tr.end;
+      } else {
+        const secs = Number((body.querySelector("#holdSecs") as HTMLInputElement).value);
+        t0 = preview.getTime();
+        t1 = Math.min(clip.duration, t0 + (Number.isFinite(secs) && secs > 0 ? secs : 1));
+      }
+      if (t1 - t0 < 0.05) {
+        showError("Hold span is too short.");
+        return;
+      }
+      const scope = (body.querySelector("#holdScope") as HTMLSelectElement).value;
+      const bones =
+        scope === "selected" && selectedEffector
+          ? (selDef!.chain ? [selDef!.chain.root, selDef!.chain.mid, selDef!.bone] : [selDef!.bone]).filter((b) => clip.names.includes(b))
+          : clip.names.filter((b) => !!effectorForBone(b)); // same set keyFullPose covers
+      close();
+      doInsertHold(t0, t1, bones);
+    });
+  }
+
+  /** Time > Export retiming…: open the Export tab focused on the fps/speed. */
+  function focusExportRetiming() {
+    setTab("export");
+    fpsSel.focus();
+    fpsSel.scrollIntoView({ block: "center" });
+  }
+
   // Expose this panel's actions to the (persistent) menu bar.
   menuActions = {
     saveScene: () => saveScene(),
@@ -3375,6 +3675,10 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     del: deletePicked,
     keyPose: doKeyPose,
     resetModifiers: doResetModifiers,
+    makeLoop: openMakeLoopDialog,
+    autoFindLoop: () => { void doAutoFindLoop(); },
+    insertHold: openInsertHoldDialog,
+    exportRetiming: focusExportRetiming,
     setDockTab: (t) => setTab(t),
     cyclePanels: () => transport?.cyclePanel(),
     toggleGhost: () => ghostBtn.click(),

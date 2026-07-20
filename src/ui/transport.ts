@@ -54,6 +54,8 @@ export interface Transport {
   getTrim(): { start: number; end: number };
   /** Restore a trim range (scene load). */
   setTrim(start: number, end: number): void;
+  /** Called whenever the trim range changes (drags, In/Out/Reset, setTrim). */
+  onTrimChange(fn: (trim: { start: number; end: number }) => void): void;
   /** The shared zoom/pan time->pixel mapping (for channels + curve views). */
   getTimeMap(): TimeMap;
   /** Ruler markers (scene state). Replaces the current set. */
@@ -171,9 +173,11 @@ export function createTransport(preview: PreviewScene, duration: number, frames 
     region.style.left = `${pct(trimStart)}%`;
     region.style.width = `${pct(trimEnd) - pct(trimStart)}%`;
   }
+  let trimCb: ((trim: { start: number; end: number }) => void) | null = null;
   function applyTrim() {
     preview.setTrim(trimStart, trimEnd);
     renderTrim();
+    trimCb?.({ start: trimStart, end: trimEnd });
   }
 
   // Redraw everything that positions off the view when zoom/pan changes.
@@ -632,6 +636,7 @@ export function createTransport(preview: PreviewScene, duration: number, frames 
       trimEnd = Math.max(trimStart + 0.01, Math.min(duration, end));
       applyTrim();
     },
+    onTrimChange: (fn) => { trimCb = fn; },
     getTimeMap: () => tm,
     setMarkers: (m) => { markers = m.slice().sort((a, b) => a.time - b.time); drawMarks(); },
     onMarkersChange: (fn) => { markersCb = fn; },
