@@ -12,11 +12,11 @@ import {
   applyRigLayers, nearestFrame,
   effectorDef, effectorForBone, effectorColor, retimeKeys, keyFullPose,
   bakeRange, bakeRangeAsync, dirtyRange, unionRange, fkDragRef, setKeyEase, reduceKeys, smoothKeys,
-  sampleTrackPos, sampleTrackRot,
+  sampleTrackPos, sampleTrackRot, unwrapEulerKeys, matchKeys, flattenKeysToFirst, blendKeysToward,
   stackPoseThrough, belowStackPose, clonePose, solveEffectorOnPose, captureBoneKeys, applyLayersToPose, convertLayerMode,
   capturePinTargets, distributeWristTwist,
   defaultIkfkBlend, limbForEffector, blendChainToFK, solvePoleOnPose, bodyPartBones,
-  type RigLayer, type EffectorId, type TimeRange, type EffectorTarget, type PinTarget, type IkfkBlend,
+  type RigLayer, type RigTrack, type EffectorId, type TimeRange, type EffectorTarget, type PinTarget, type IkfkBlend,
 } from "./rig/rig.ts";
 import { keyHandPose, applyHandPose, hasHandFingers, type HandSide, type HandPoseAmounts } from "./rig/hands.ts";
 import { worldFromLocal, type FramePose } from "./convert/fk.ts";
@@ -433,33 +433,8 @@ function fmtTime(seconds: number): string {
   return `${m}:${s.toFixed(2).padStart(5, "0")}`;
 }
 
-/**
- * ZYX euler triples for a rot-key list, unwrapped for DISPLAY: each key picks
- * the representation (canonical, or the (x+π, π−y, z+π) alternate, plus ±2π
- * per-axis shifts) closest to the previous key, so equivalent rotations don't
- * draw as ±180° curve jumps. eulerZYXToQuat is 2π-periodic and representation-
- * blind, so editing an unwrapped value round-trips to the same rotation.
- */
-function unwrapEulerKeys(keys: Array<{ q: Quat }>): Vec3[] {
-  const out: Vec3[] = [];
-  let prev: Vec3 | null = null;
-  for (const k of keys) {
-    let e = quatToEulerZYX(k.q);
-    if (prev) {
-      const p = prev;
-      const near = (v: number, ref: number) => v + 2 * Math.PI * Math.round((ref - v) / (2 * Math.PI));
-      const cand = (v: Vec3): Vec3 => [near(v[0], p[0]), near(v[1], p[1]), near(v[2], p[2])];
-      const alt: Vec3 = [e[0] + Math.PI, Math.PI - e[1], e[2] + Math.PI];
-      const c1 = cand(e);
-      const c2 = cand(alt);
-      const dist = (v: Vec3) => Math.abs(v[0] - p[0]) + Math.abs(v[1] - p[1]) + Math.abs(v[2] - p[2]);
-      e = dist(c2) < dist(c1) ? c2 : c1;
-    }
-    out.push(e);
-    prev = e;
-  }
-  return out;
-}
+// unwrapEulerKeys (the euler-safe single-axis edit path) now lives in rig.ts,
+// shared with the curve power ops (match/flatten/blend).
 
 /** Axis colors shared by the corrections + channels curve views. */
 const AXIS_COLOR = ["#ff6b6b", "#7dda6b", "#6bb1ff"];
@@ -1980,6 +1955,44 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
             preview?.pause();
             preview?.seek(t);
           },
+          onBrush: (span, amount) => {
+            // One brush tick: low-amount smooth over the keys under the brush.
+            // The view refreshes from updateRigEditor (no drag flag is set), so
+            // the curve visibly relaxes while painting.
+            const c = curveTrackNow();
+            if (!c) return;
+            const ts = keyTimes(c.tr).filter((t) => t >= span.t0 && t <= span.t1);
+            if (!ts.length) return;
+            if (!smoothKeys(c.tr, span.t0, span.t1, amount)) return;
+            let dirty = dirtyRange(c.lay, c.tr, ts[0]);
+            for (const t of ts) dirty = unionRange(dirty, dirtyRange(c.lay, c.tr, t));
+            rebakeRig(dirty);
+            updateRigEditor();
+          },
+          onRetime: (moves) => {
+            // One commit per drag: the view previewed the slide; move the real
+            // keys now (retimeKeys rebuilds key identity, hence not live).
+            const c = curveTrackNow();
+            if (!c || !moves.length) return;
+            pushHistory();
+            const dt = moves[0].to - moves[0].from;
+            // Move in an order that can't collide with not-yet-moved members.
+            const ordered = [...moves].sort((a, b) => (dt > 0 ? b.from - a.from : a.from - b.from));
+            let dirty: TimeRange | null = null;
+            for (const mv of ordered) {
+              const before = dirtyRange(c.lay, c.tr, mv.from);
+              retimeKeys(c.tr, mv.from, mv.to);
+              const after = dirtyRange(c.lay, c.tr, mv.to);
+              dirty = dirty ? unionRange(unionRange(dirty, before), after) : unionRange(before, after);
+            }
+            // Strip/dope picks on the moved track follow the keys.
+            pickedKeys = pickedKeys.map((p) => {
+              const mv = p.effector === selectedEffector ? moves.find((m) => Math.abs(m.from - p.time) < 1e-3) : undefined;
+              return mv ? { ...p, time: mv.to } : p;
+            });
+            rebakeRig(dirty ?? undefined);
+            updateRigEditor();
+          },
           onContext: (info) => {
             // Curves are per-axis but the underlying keys are whole pos/rot
             // vectors — operations act on the unique key TIMES in play.
@@ -1994,6 +2007,15 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
                 { label: `Delete ${n} key${n === 1 ? "" : "s"}`, action: () => curveDeleteMany(times) },
                 { label: "Smooth keys", action: () => curveSmoothSel(span), disabled: n < 2 },
                 { label: "Reduce keys", action: () => curveReduceSel(span), disabled: n < 3 },
+                // Propagate/match ops act per CHANNEL: only the selected axes
+                // of each key change (rotations via the euler-safe path).
+                { label: "Match previous", action: () => curveEditSel(times, (tr) => matchKeys(tr, info.keys, -1)) },
+                { label: "Match next", action: () => curveEditSel(times, (tr) => matchKeys(tr, info.keys, 1)) },
+                { label: "Flatten to first", action: () => curveEditSel(times, (tr) => flattenKeysToFirst(tr, info.keys)), disabled: info.keys.length < 2 },
+                ...([0.25, 0.5, 0.75] as const).map((amt) => ({
+                  label: `Blend toward neighbors ${amt * 100}%`,
+                  action: () => curveEditSel(times, (tr) => blendKeysToward(tr, info.keys, amt)),
+                })),
                 ...(["linear", "smooth", "step"] as const).map((ease) => ({
                   label: `Ease: ${ease}`,
                   action: () => curveEaseMany(times, ease),
@@ -2064,6 +2086,17 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
       pushHistory();
       smoothKeys(c.tr, span.t0, span.t1);
       rebakeRig();
+      updateRigEditor();
+    }
+    /** Shared wrapper for the per-channel ops (match/flatten/blend). */
+    function curveEditSel(times: number[], fn: (tr: RigTrack) => number) {
+      const c = curveTrackNow();
+      if (!c || !times.length) return;
+      pushHistory();
+      fn(c.tr);
+      let dirty = dirtyRange(c.lay, c.tr, times[0]);
+      for (const t of times) dirty = unionRange(dirty, dirtyRange(c.lay, c.tr, t));
+      rebakeRig(dirty);
       updateRigEditor();
     }
 
@@ -3302,6 +3335,9 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
       renderFilters();
     },
     onSeek: (t) => { preview?.pause(); preview?.seek(t); },
+    // Smooth-brush stroke over dense curves: ONE moving-average chip spanning
+    // the stroke (same path as the band menu, so it's undoable/inspectable).
+    onBrushSpan: (span) => { addCleanOpScoped("smooth", span); },
     onContext: (info) => {
       const trim = transport?.getTrim();
       const span = info.span ?? (trim ? { t0: trim.start, t1: trim.end } : null);

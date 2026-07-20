@@ -1,6 +1,6 @@
 import type { ConvertedClip } from "../convert/clip.ts";
 import type { Quat, Vec3 } from "../wanim/parse.ts";
-import { quatMul, quatNormalize, quatSlerp, quatRotate } from "../convert/quat.ts";
+import { quatMul, quatNormalize, quatSlerp, quatRotate, quatToEulerZYX, eulerZYXToQuat } from "../convert/quat.ts";
 import { solveTwoBone, qconj, vadd, vsub, vscale, vlerp, vnorm, vlen } from "../convert/ik.ts";
 import { worldFromLocal, type FramePose } from "../convert/fk.ts";
 
@@ -350,6 +350,141 @@ export function smoothKeys(track: RigTrack, t0 = -Infinity, t1 = Infinity, amoun
 export function setKeyEase(track: RigTrack, time: number, ease: KeyEase): void {
   for (const k of track.posKeys) if (Math.abs(k.time - time) < KEY_EPS) k.ease = ease;
   for (const k of track.rotKeys) if (Math.abs(k.time - time) < KEY_EPS) k.ease = ease;
+}
+
+// ---- curve power ops (per-channel key edits) ---------------------------------
+
+/** One selected curve channel on a key: (key time, pos|rot, axis). */
+export interface ChannelKeyRef {
+  time: number;
+  group: "pos" | "rot";
+  axis: 0 | 1 | 2;
+}
+
+/**
+ * ZYX euler triples for a rot-key list, unwrapped for DISPLAY: each key picks
+ * the representation (canonical, or the (x+π, π−y, z+π) alternate, plus ±2π
+ * per-axis shifts) closest to the previous key, so equivalent rotations don't
+ * draw as ±180° curve jumps. eulerZYXToQuat is 2π-periodic and representation-
+ * blind, so editing an unwrapped value round-trips to the same rotation.
+ */
+export function unwrapEulerKeys(keys: Array<{ q: Quat }>): Vec3[] {
+  const out: Vec3[] = [];
+  let prev: Vec3 | null = null;
+  for (const k of keys) {
+    let e = quatToEulerZYX(k.q);
+    if (prev) {
+      const p = prev;
+      const near = (v: number, ref: number) => v + 2 * Math.PI * Math.round((ref - v) / (2 * Math.PI));
+      const cand = (v: Vec3): Vec3 => [near(v[0], p[0]), near(v[1], p[1]), near(v[2], p[2])];
+      const alt: Vec3 = [e[0] + Math.PI, Math.PI - e[1], e[2] + Math.PI];
+      const c1 = cand(e);
+      const c2 = cand(alt);
+      const dist = (v: Vec3) => Math.abs(v[0] - p[0]) + Math.abs(v[1] - p[1]) + Math.abs(v[2] - p[2]);
+      e = dist(c2) < dist(c1) ? c2 : c1;
+    }
+    out.push(e);
+    prev = e;
+  }
+  return out;
+}
+
+/**
+ * Per-channel edit core: `compute` returns the new scalar for one selected
+ * channel (or null to skip), reading ONLY the pre-edit snapshots so operation
+ * order can't feed back. Rotation axes are edited on the key's UNWRAPPED euler
+ * triple and converted back once per key — the euler-safe single-axis path
+ * (mixing a fresh extraction between axis edits could silently switch
+ * representation and warp the rotation). Returns how many channels changed.
+ */
+function editChannels(
+  track: RigTrack,
+  sel: ChannelKeyRef[],
+  compute: (ref: ChannelKeyRef, i: number, posSrc: Vec3[], eulSrc: Vec3[]) => number | null,
+): number {
+  const posSrc = track.posKeys.map((k) => [...k.v] as Vec3);
+  const eulSrc = unwrapEulerKeys(track.rotKeys);
+  const rotEdits = new Map<number, Vec3>();
+  let n = 0;
+  for (const ref of sel) {
+    if (ref.group === "pos") {
+      const i = track.posKeys.findIndex((k) => Math.abs(k.time - ref.time) < 1e-3);
+      if (i < 0) continue;
+      const v = compute(ref, i, posSrc, eulSrc);
+      if (v === null) continue;
+      track.posKeys[i].v[ref.axis] = v;
+      n++;
+    } else {
+      const i = track.rotKeys.findIndex((k) => Math.abs(k.time - ref.time) < 1e-3);
+      if (i < 0) continue;
+      const v = compute(ref, i, posSrc, eulSrc);
+      if (v === null) continue;
+      let e = rotEdits.get(i);
+      if (!e) rotEdits.set(i, (e = [...eulSrc[i]] as Vec3));
+      e[ref.axis] = v;
+      n++;
+    }
+  }
+  for (const [i, e] of rotEdits) track.rotKeys[i].q = eulerZYXToQuat(e);
+  return n;
+}
+
+/** Copy the previous (dir=-1) / next (dir=+1) key's value onto each selected channel. */
+export function matchKeys(track: RigTrack, sel: ChannelKeyRef[], dir: -1 | 1): number {
+  return editChannels(track, sel, (ref, i, posSrc, eulSrc) => {
+    const src = ref.group === "pos" ? posSrc : eulSrc;
+    const j = i + dir;
+    return j >= 0 && j < src.length ? src[j][ref.axis] : null;
+  });
+}
+
+/** Every selected channel takes the value of its earliest selected key. */
+export function flattenKeysToFirst(track: RigTrack, sel: ChannelKeyRef[]): number {
+  return editChannels(track, sel, (ref, _i, posSrc, eulSrc) => {
+    let first = ref;
+    for (const r of sel) {
+      if (r.group === ref.group && r.axis === ref.axis && r.time < first.time - 1e-9) first = r;
+    }
+    const keys: Array<{ time: number }> = first.group === "pos" ? track.posKeys : track.rotKeys;
+    const fi = keys.findIndex((k) => Math.abs(k.time - first.time) < 1e-3);
+    if (fi < 0) return null;
+    return (ref.group === "pos" ? posSrc : eulSrc)[fi][ref.axis];
+  });
+}
+
+/**
+ * Blend each selected channel toward the time-weighted midpoint of its
+ * neighbor keys by `amount` (the smoothKeys rule, but per channel: only the
+ * selected axes move). Endpoint keys stay put.
+ */
+export function blendKeysToward(track: RigTrack, sel: ChannelKeyRef[], amount: number): number {
+  return editChannels(track, sel, (ref, i, posSrc, eulSrc) => {
+    const keys: Array<{ time: number }> = ref.group === "pos" ? track.posKeys : track.rotKeys;
+    if (i <= 0 || i >= keys.length - 1) return null;
+    const src = ref.group === "pos" ? posSrc : eulSrc;
+    const f = (keys[i].time - keys[i - 1].time) / Math.max(1e-9, keys[i + 1].time - keys[i - 1].time);
+    const mid = src[i - 1][ref.axis] + (src[i + 1][ref.axis] - src[i - 1][ref.axis]) * f;
+    return src[i][ref.axis] + (mid - src[i][ref.axis]) * amount;
+  });
+}
+
+/**
+ * Clamp a retime delta so no time in `sel` crosses (or lands within `gap` of)
+ * a time in `others` — the curve-editor drag's collision rule, mirroring the
+ * strip's "keys don't pass each other". Returns the admissible delta (0 when
+ * the constraints already conflict).
+ */
+export function clampRetimeDelta(sel: number[], others: number[], dt: number, gap: number): number {
+  let lo = -Infinity;
+  let hi = Infinity;
+  for (const t of sel) {
+    for (const o of others) {
+      if (o > t) hi = Math.min(hi, o - gap - t);
+      else lo = Math.max(lo, o + gap - t);
+    }
+  }
+  if (lo > hi) return 0;
+  return Math.max(lo, Math.min(hi, dt));
 }
 
 // ---- sampling ----------------------------------------------------------------

@@ -6,6 +6,7 @@
 
 import type { TimeMap } from "./timemap.ts";
 import { ChannelTree, type ChannelGroup } from "./channels.ts";
+import { clampRetimeDelta } from "../rig/rig.ts";
 
 export type CurveEase = "linear" | "smooth" | "step";
 
@@ -48,6 +49,8 @@ export interface ChannelsConfig {
   onSeek(t: number): void;
   /** Right-click: host shows the scoped-filter menu for the span/cursor. */
   onContext(info: ChannelsContextInfo): void;
+  /** Brush stroke finished: ONE moving-average op over the stroked span. */
+  onBrushSpan?(span: { t0: number; t1: number }): void;
 }
 
 export interface CurveKey {
@@ -100,11 +103,17 @@ export interface CurveCallbacks {
   onSeek(t: number): void;
   /** Right-click: host shows its menu for the selection/cursor. */
   onContext(info: CurveContextInfo): void;
+  /** Brush tick: small-amount smooth over the keys in [t0,t1] (throttled). */
+  onBrush?(span: { t0: number; t1: number }, amount: number): void;
+  /** Retime commit (one per drag): selected keys moved per unique time. */
+  onRetime?(moves: Array<{ from: number; to: number }>): void;
 }
 
 const HEIGHT = 150;
 const PAD_TOP = 10;
 const PAD_BOTTOM = 16;
+/** Smooth-brush radius in canvas pixels. */
+const BRUSH_R = 20;
 
 export class CurveView {
   readonly el: HTMLDivElement;
@@ -124,6 +133,24 @@ export class CurveView {
     startY: number;
   } | null = null;
   private hover: { ch: CurveChannel; key: CurveKey } | null = null;
+  /** Drag tool: Select (marquee/value drags), Brush (paint smooth), Retime. */
+  private tool: "select" | "brush" | "retime" = "select";
+  /** Held R = temporary Retime (spring-loaded, like the gizmo hotkeys). */
+  private rHeld = false;
+  private toolRow: HTMLDivElement;
+  /** Brush cursor position in canvas coords (drawn as a circle). */
+  private brushPt: { x: number; y: number } | null = null;
+  /** Channels-mode brush stroke: the accumulated time span so far. */
+  private brushStroke: { t0: number; t1: number } | null = null;
+  /** Retime drag state (blocks setModel like value drags do). */
+  private timeDrag: {
+    targets: Array<{ ch: CurveChannel; key: CurveKey; startTime: number }>;
+    dt: number;
+  } | null = null;
+  /** Box-scale drag state (blocks setModel like value drags do). */
+  private boxScale = false;
+  private onKeyDown: (e: KeyboardEvent) => void;
+  private onKeyUp: (e: KeyboardEvent) => void;
   /** Selected keys as stable refs (model rebuilds swap the key objects). */
   private selected = new Set<string>();
   /** Marquee rectangle while band-selecting, in canvas coordinates. */
@@ -166,6 +193,19 @@ export class CurveView {
       b.addEventListener("click", () => this.setMode(m));
       this.modeRow.appendChild(b);
     }
+    this.toolRow = document.createElement("div");
+    this.toolRow.className = "cv-tools";
+    for (const t of ["select", "brush", "retime"] as const) {
+      const b = document.createElement("button");
+      b.dataset.tool = t;
+      b.textContent = t[0].toUpperCase() + t.slice(1);
+      b.title =
+        t === "select" ? "Drag = marquee select; drag keys vertically"
+        : t === "brush" ? "Paint over keys to smooth them (Esc to exit)"
+        : "Drag selected keys horizontally to retime (hold R for a quick switch)";
+      b.addEventListener("click", () => this.setTool(t));
+      this.toolRow.appendChild(b);
+    }
     this.axisRow = document.createElement("div");
     this.axisRow.className = "cv-axes";
     this.axisRow.hidden = true;
@@ -183,8 +223,34 @@ export class CurveView {
     });
     this.tree = new ChannelTree();
     this.tree.el.hidden = true;
-    this.side.append(this.modeRow, this.axisRow, this.tree.el);
+    this.side.append(this.modeRow, this.toolRow, this.axisRow, this.tree.el);
     this.el.appendChild(this.side);
+
+    // Esc leaves the current tool / clears the selection; holding R is a
+    // spring-loaded Retime (Corrections mode). Text fields keep their keys.
+    this.onKeyDown = (e: KeyboardEvent) => {
+      if (this.el.hidden) return;
+      const t = e.target as HTMLElement | null;
+      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
+      if (e.key === "Escape") {
+        if (this.tool !== "select") this.setTool("select");
+        else if (this.selected.size) {
+          this.selected.clear();
+          this.draw();
+        }
+      } else if ((e.key === "r" || e.key === "R") && !e.ctrlKey && !e.metaKey && !e.altKey && !e.repeat) {
+        this.rHeld = true;
+        this.syncToolUi();
+      }
+    };
+    this.onKeyUp = (e: KeyboardEvent) => {
+      if (e.key === "r" || e.key === "R") {
+        this.rHeld = false;
+        this.syncToolUi();
+      }
+    };
+    window.addEventListener("keydown", this.onKeyDown);
+    window.addEventListener("keyup", this.onKeyUp);
 
     this.canvas = document.createElement("canvas");
     this.canvas.style.width = "100%";
@@ -214,6 +280,11 @@ export class CurveView {
         return;
       }
       if (e.button !== 0) return;
+      // Brush paints in either mode and suppresses marquee/seek entirely.
+      if (this.effTool() === "brush") {
+        this.beginBrush(e);
+        return;
+      }
       // Channels mode: drag = band-select a time span (scoped-filter target);
       // a still click seeks and clears the span. No key editing here.
       if (this.mode === "channels") {
@@ -244,6 +315,16 @@ export class CurveView {
         return;
       }
       if (!this.model || !this.cbs) return;
+      if (this.effTool() === "retime") {
+        this.beginRetime(e);
+        return;
+      }
+      // Selection-box edge handles beat key picking (they overlap keys).
+      const edge = this.pickBoxEdge(e);
+      if (edge) {
+        this.beginBoxScale(e, edge);
+        return;
+      }
       const hit = this.pickKey(e);
       if (hit) {
         e.preventDefault();
@@ -254,27 +335,12 @@ export class CurveView {
           if (!e.shiftKey) this.selected.clear();
           this.selected.add(ref);
         }
-        const targets = this.selectedKeys().map((t) => ({ ...t, startValue: t.key.value }));
-        this.drag = { targets, primary: hit, startY: e.clientY };
-        this.cbs.onValueStart();
-        const move = (ev: PointerEvent) => {
-          if (!this.drag) return;
-          for (const t of this.drag.targets) {
-            t.key.value = t.startValue + (this.drag.startY - ev.clientY) * this.valuePerPx(t.ch.group);
-            this.cbs!.onValue(t.ch.group, t.ch.axis, t.key.time, t.key.value);
-          }
-          this.draw();
-        };
-        const up = () => {
-          window.removeEventListener("pointermove", move);
-          window.removeEventListener("pointerup", up);
-          if (this.drag) {
-            this.drag = null;
-            this.cbs?.onValueEnd();
-          }
-        };
-        window.addEventListener("pointermove", move);
-        window.addEventListener("pointerup", up);
+        this.beginValueDrag(e, hit);
+      } else if (this.pointInBox(e)) {
+        // Inside the selection box but not on a key: offset the whole selection.
+        e.preventDefault();
+        const sel = this.selectedKeys();
+        if (sel.length) this.beginValueDrag(e, sel[0]);
       } else {
         // Empty drag = marquee select; a still click seeks instead.
         e.preventDefault();
@@ -305,11 +371,39 @@ export class CurveView {
       }
     });
     this.canvas.addEventListener("pointermove", (e) => {
-      if (this.drag || this.band || this.mode === "channels") return;
+      if (this.effTool() === "brush") {
+        // Track the pointer for the brush-circle cursor even between strokes.
+        const r = this.canvas.getBoundingClientRect();
+        this.brushPt = { x: e.clientX - r.left, y: e.clientY - r.top };
+        this.canvas.style.cursor = "none";
+        if (!this.brushStroke) this.draw();
+        return;
+      }
+      if (this.drag || this.timeDrag || this.boxScale || this.band || this.mode === "channels") return;
+      if (this.effTool() === "retime") {
+        this.canvas.style.cursor = this.pickKey(e) ? "ew-resize" : "default";
+        return;
+      }
+      if (this.pickBoxEdge(e)) {
+        this.canvas.style.cursor = "ns-resize";
+        if (this.hover) {
+          this.hover = null;
+          this.draw();
+        }
+        return;
+      }
       const hit = this.pickKey(e);
       if (hit?.key !== this.hover?.key) {
         this.hover = hit;
-        this.canvas.style.cursor = hit ? "ns-resize" : "default";
+        this.canvas.style.cursor = hit ? "ns-resize" : this.pointInBox(e) ? "move" : "default";
+        this.draw();
+      } else if (!hit) {
+        this.canvas.style.cursor = this.pointInBox(e) ? "move" : "default";
+      }
+    });
+    this.canvas.addEventListener("pointerleave", () => {
+      if (this.brushPt && !this.brushStroke) {
+        this.brushPt = null;
         this.draw();
       }
     });
@@ -374,8 +468,282 @@ export class CurveView {
     return out;
   }
 
+  // ---- tools (value drag / brush / retime / transform box) -----------------
+  /** Held R springs Select into Retime without touching the sticky tool. */
+  private effTool(): "select" | "brush" | "retime" {
+    if (this.rHeld && this.mode === "corrections" && this.tool === "select") return "retime";
+    return this.tool;
+  }
+
+  private setTool(t: "select" | "brush" | "retime") {
+    if (t === "retime" && this.mode === "channels") return;
+    this.tool = t;
+    this.brushPt = null;
+    this.syncToolUi();
+    this.draw();
+  }
+
+  private syncToolUi() {
+    const eff = this.effTool();
+    for (const b of Array.from(this.toolRow.children) as HTMLButtonElement[]) {
+      b.classList.toggle("active", b.dataset.tool === eff);
+      if (b.dataset.tool === "retime") b.disabled = this.mode === "channels";
+    }
+    this.canvas.style.cursor = eff === "brush" ? "none" : eff === "retime" ? "ew-resize" : "default";
+    if (eff !== "brush" && this.brushPt) {
+      this.brushPt = null;
+      this.draw();
+    }
+  }
+
+  /** Drag the selection vertically (shared by key drags and box-body drags). */
+  private beginValueDrag(e: PointerEvent, primary: { ch: CurveChannel; key: CurveKey }) {
+    if (!this.cbs) return;
+    const targets = this.selectedKeys().map((t) => ({ ...t, startValue: t.key.value }));
+    this.drag = { targets, primary, startY: e.clientY };
+    this.cbs.onValueStart();
+    const move = (ev: PointerEvent) => {
+      if (!this.drag) return;
+      for (const t of this.drag.targets) {
+        t.key.value = t.startValue + (this.drag.startY - ev.clientY) * this.valuePerPx(t.ch.group);
+        this.cbs!.onValue(t.ch.group, t.ch.axis, t.key.time, t.key.value);
+      }
+      this.draw();
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      if (this.drag) {
+        this.drag = null;
+        this.cbs?.onValueEnd();
+      }
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  }
+
+  /** Pixel bbox around the selection (≥2 keys, Corrections mode) — the C3 box. */
+  private selBox(): { x0: number; y0: number; x1: number; y1: number } | null {
+    if (this.mode !== "corrections" || this.selected.size < 2) return null;
+    const sel = this.selectedKeys();
+    if (sel.length < 2) return null;
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (const { ch, key } of sel) {
+      const kx = this.x(key.time);
+      const ky = this.y(key.value, ch.group);
+      if (kx < x0) x0 = kx;
+      if (kx > x1) x1 = kx;
+      if (ky < y0) y0 = ky;
+      if (ky > y1) y1 = ky;
+    }
+    return { x0: x0 - 8, y0: y0 - 8, x1: x1 + 8, y1: y1 + 8 };
+  }
+
+  private pickBoxEdge(e: PointerEvent): "top" | "bottom" | null {
+    if (this.effTool() !== "select") return null;
+    const box = this.selBox();
+    if (!box) return null;
+    const r = this.canvas.getBoundingClientRect();
+    const px = e.clientX - r.left;
+    const py = e.clientY - r.top;
+    if (px < box.x0 - 4 || px > box.x1 + 4) return null;
+    if (Math.abs(py - box.y0) <= 5) return "top";
+    if (Math.abs(py - box.y1) <= 5) return "bottom";
+    return null;
+  }
+
+  private pointInBox(e: PointerEvent): boolean {
+    if (this.effTool() !== "select") return false;
+    const box = this.selBox();
+    if (!box) return false;
+    const r = this.canvas.getBoundingClientRect();
+    const px = e.clientX - r.left;
+    const py = e.clientY - r.top;
+    return px >= box.x0 && px <= box.x1 && py >= box.y0 && py <= box.y1;
+  }
+
+  /** Inverse of y(): canvas y -> value in the group's own scale. */
+  private valueAtY(py: number, group: "pos" | "rot"): number {
+    const s = this.scales[group];
+    const h = HEIGHT - PAD_TOP - PAD_BOTTOM;
+    return s.min + (1 - (py - PAD_TOP) / Math.max(1, h)) * (s.max - s.min);
+  }
+
+  /**
+   * Drag a box edge: scale the selected VALUES about the opposite edge. The
+   * factor is uniform (pixels), but each key scales about its own group's
+   * pivot VALUE — pos (cm) and rot (°) sit on independent y-scales, so a
+   * shared pixel pivot would mean different, warped value pivots per group.
+   */
+  private beginBoxScale(e: PointerEvent, edge: "top" | "bottom") {
+    if (!this.cbs) return;
+    e.preventDefault();
+    const box = this.selBox()!;
+    const r = this.canvas.getBoundingClientRect();
+    const pivotY = edge === "top" ? box.y1 : box.y0;
+    const edgeY = edge === "top" ? box.y0 : box.y1;
+    const pivotVal = {
+      pos: this.valueAtY(pivotY, "pos"),
+      rot: this.valueAtY(pivotY, "rot"),
+    };
+    const targets = this.selectedKeys().map((t) => ({ ...t, startValue: t.key.value }));
+    this.boxScale = true;
+    this.cbs.onValueStart();
+    const move = (ev: PointerEvent) => {
+      const py = ev.clientY - r.top;
+      const s = (py - pivotY) / (edgeY - pivotY || 1);
+      for (const t of targets) {
+        const pivot = pivotVal[t.ch.group];
+        t.key.value = pivot + (t.startValue - pivot) * s;
+        this.cbs!.onValue(t.ch.group, t.ch.axis, t.key.time, t.key.value);
+      }
+      this.draw();
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      this.boxScale = false;
+      this.cbs?.onValueEnd();
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  }
+
+  /**
+   * Retime drag: slide the selected keys horizontally, snapped to frames and
+   * clamped so no selected key crosses a non-selected key on this track.
+   * The move commits ONCE on release (retiming rebuilds key identity).
+   */
+  private beginRetime(e: PointerEvent) {
+    if (!this.model || !this.cbs) return;
+    const hit = this.pickKey(e);
+    if (!hit) return;
+    e.preventDefault();
+    const ref = this.refOf(hit.ch, hit.key);
+    if (!this.selected.has(ref)) {
+      if (!e.shiftKey) this.selected.clear();
+      this.selected.add(ref);
+      this.draw();
+    }
+    const targets = this.selectedKeys().map((t) => ({ ch: t.ch, key: t.key, startTime: t.key.time }));
+    if (!targets.length) return;
+    const near = (t: number, list: number[]) => list.some((o) => Math.abs(o - t) < 1e-3);
+    const selTimes = [...new Set(targets.map((t) => t.startTime.toFixed(4)))].map(Number);
+    const allTimes = [...new Set((this.model.channels.flatMap((c) => c.keys.map((k) => k.time))).map((t) => t.toFixed(4)))].map(Number);
+    const otherTimes = allTimes.filter((t) => !near(t, selTimes));
+    const fps = this.tm?.fps ?? 60;
+    const dur = this.tm?.duration ?? this.model.duration;
+    const r = this.canvas.getBoundingClientRect();
+    const w = Math.max(1, r.width);
+    const secPerPx = this.tm
+      ? (this.tm.timeAtFrac(1) - this.tm.timeAtFrac(0)) / w
+      : this.model.duration / w;
+    const startX = e.clientX;
+    this.timeDrag = { targets, dt: 0 };
+    const lo = Math.min(...selTimes);
+    const hi = Math.max(...selTimes);
+    const move = (ev: PointerEvent) => {
+      if (!this.timeDrag) return;
+      let dt = (ev.clientX - startX) * secPerPx;
+      dt = Math.round((lo + dt) * fps) / fps - lo; // frame snap
+      dt = Math.max(-lo, Math.min(dur - hi, dt));
+      dt = clampRetimeDelta(selTimes, otherTimes, dt, 1 / fps);
+      this.timeDrag.dt = dt;
+      for (const t of targets) t.key.time = t.startTime + dt;
+      // Keep the refs glued to the moving keys so highlight/box follow.
+      this.selected = new Set(targets.map((t) => this.refOf(t.ch, t.key)));
+      this.draw();
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      const dt = this.timeDrag?.dt ?? 0;
+      this.timeDrag = null;
+      if (Math.abs(dt) > 1e-6) {
+        this.cbs?.onRetime?.(selTimes.map((t) => ({ from: t, to: t + dt })));
+      }
+      this.draw();
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  }
+
+  /**
+   * Brush stroke. Corrections: throttled small-amount smooths over the keys
+   * under the ~20px brush — dwelling re-applies, so strength grows with time.
+   * Channels: the stroke accumulates a span; ONE smooth op lands on release.
+   */
+  private beginBrush(e: PointerEvent) {
+    e.preventDefault();
+    const r = this.canvas.getBoundingClientRect();
+    const pt = (ev: PointerEvent) => ({ x: ev.clientX - r.left, y: ev.clientY - r.top });
+    this.brushPt = pt(e);
+    if (this.mode === "channels") {
+      const t = this.snapToFrame(this.timeAtX(this.brushPt.x, r.width));
+      this.brushStroke = { t0: t, t1: t };
+      const move = (ev: PointerEvent) => {
+        this.brushPt = pt(ev);
+        const tt = this.snapToFrame(this.timeAtX(this.brushPt.x, r.width));
+        if (this.brushStroke) {
+          this.brushStroke.t0 = Math.min(this.brushStroke.t0, tt);
+          this.brushStroke.t1 = Math.max(this.brushStroke.t1, tt);
+        }
+        this.draw();
+      };
+      const up = () => {
+        window.removeEventListener("pointermove", move);
+        window.removeEventListener("pointerup", up);
+        const span = this.brushStroke;
+        this.brushStroke = null;
+        if (span && span.t1 - span.t0 > 1e-6) this.channels?.onBrushSpan?.({ ...span });
+        this.draw();
+      };
+      window.addEventListener("pointermove", move);
+      window.addEventListener("pointerup", up);
+      return;
+    }
+    if (!this.model || !this.cbs?.onBrush) return;
+    let started = false;
+    const apply = () => {
+      if (!this.brushPt || !this.model) return;
+      let t0 = Infinity, t1 = -Infinity;
+      for (const ch of this.model.channels) {
+        for (const key of ch.keys) {
+          const d = Math.hypot(this.x(key.time) - this.brushPt.x, this.y(key.value, ch.group) - this.brushPt.y);
+          if (d <= BRUSH_R) {
+            if (key.time < t0) t0 = key.time;
+            if (key.time > t1) t1 = key.time;
+          }
+        }
+      }
+      if (t0 > t1) return;
+      if (!started) {
+        started = true;
+        this.cbs!.onValueStart(); // one undo entry per stroke
+      }
+      this.cbs!.onBrush!({ t0: t0 - 1e-3, t1: t1 + 1e-3 }, 0.15);
+    };
+    this.brushStroke = { t0: 0, t1: 0 }; // marks "stroking" for the move handler
+    apply();
+    const timer = window.setInterval(apply, 120); // dwell = more smoothing
+    const move = (ev: PointerEvent) => {
+      this.brushPt = pt(ev);
+      this.draw();
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      window.clearInterval(timer);
+      this.brushStroke = null;
+      if (started) this.cbs?.onValueEnd();
+      this.draw();
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  }
+
   setModel(model: CurveModel | null, cbs: CurveCallbacks | null) {
-    if (this.drag) return; // never rebuild under an active drag
+    if (this.drag || this.timeDrag || this.boxScale) return; // never rebuild under an active drag
     this.model = model;
     this.cbs = cbs;
     // Drop selection refs that no longer resolve to a key (retimed/deleted).
@@ -430,6 +798,7 @@ export class CurveView {
     if (m === "channels" && !this.channels) return;
     this.mode = m;
     this.chanSpan = null;
+    if (m === "channels" && this.tool === "retime") this.tool = "select";
     this.syncSideUi();
     this.refreshDense();
     this.fitScale();
@@ -459,6 +828,7 @@ export class CurveView {
     this.axisRow.hidden = !chan;
     this.tree.el.hidden = !chan;
     this.side.classList.toggle("open", chan);
+    this.syncToolUi();
   }
 
   private refreshDense() {
@@ -488,6 +858,8 @@ export class CurveView {
 
   dispose() {
     this.ro.disconnect();
+    window.removeEventListener("keydown", this.onKeyDown);
+    window.removeEventListener("keyup", this.onKeyUp);
     this.el.remove();
   }
 
@@ -598,6 +970,7 @@ export class CurveView {
     if (this.mode === "channels") {
       this.drawDense(g, w);
       this.drawBandRect(g);
+      this.drawBrushCursor(g);
       return;
     }
     if (!this.model) return;
@@ -663,6 +1036,7 @@ export class CurveView {
       }
     }
 
+    this.drawSelBox(g);
     this.drawBandRect(g);
 
     // Playhead.
@@ -678,6 +1052,44 @@ export class CurveView {
     const readout = hov ? `  ·  ${hov.ch.label} @ ${hov.key.time.toFixed(2)}s = ${hov.key.value.toFixed(1)}` : "";
     const selCount = this.selected.size ? `  ·  ${this.selected.size} selected` : "";
     g.fillText(this.model.title + readout + selCount, 34, PAD_TOP);
+
+    this.drawBrushCursor(g);
+  }
+
+  /** C3 transform box: bounding rect + top/bottom scale handles. */
+  private drawSelBox(g: CanvasRenderingContext2D) {
+    if (this.effTool() !== "select" || this.band) return;
+    const box = this.selBox();
+    if (!box) return;
+    const bw = box.x1 - box.x0;
+    g.strokeStyle = "rgba(255,255,255,0.55)";
+    g.lineWidth = 1;
+    g.setLineDash([5, 4]);
+    g.strokeRect(box.x0 + 0.5, box.y0 + 0.5, bw, box.y1 - box.y0);
+    g.setLineDash([]);
+    // Edge handles (drag = scale values about the opposite edge).
+    const cx = (box.x0 + box.x1) / 2;
+    g.fillStyle = "rgba(255,255,255,0.9)";
+    for (const y of [box.y0, box.y1]) g.fillRect(cx - 11, y - 2, 22, 4);
+  }
+
+  /** Brush-mode circle cursor + (Channels) the accumulating stroke span. */
+  private drawBrushCursor(g: CanvasRenderingContext2D) {
+    if (this.effTool() !== "brush") return;
+    if (this.mode === "channels" && this.brushStroke) {
+      const sx0 = this.x(this.brushStroke.t0);
+      const sx1 = this.x(this.brushStroke.t1);
+      g.fillStyle = "rgba(107,177,255,0.14)";
+      g.fillRect(sx0, 0, sx1 - sx0, HEIGHT);
+    }
+    if (!this.brushPt) return;
+    g.strokeStyle = "rgba(255,255,255,0.8)";
+    g.lineWidth = 1.2;
+    g.beginPath();
+    g.arc(this.brushPt.x, this.brushPt.y, BRUSH_R, 0, Math.PI * 2);
+    g.stroke();
+    g.fillStyle = "rgba(255,255,255,0.8)";
+    g.fillRect(this.brushPt.x - 0.5, this.brushPt.y - 0.5, 1, 1);
   }
 
   /** Marquee band while drag-selecting (both modes). */

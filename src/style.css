@@ -887,12 +887,15 @@ main:has(.loaded-state:not([hidden])) {
   z-index: 2;
 }
 
-.cv-mode {
+.cv-mode,
+.cv-tools {
   display: flex;
-  gap: 4px;
+  flex-wrap: wrap; /* the gutter can be narrow — wrap instead of clipping */
+  gap: 3px;
 }
 
 .cv-mode button,
+.cv-tools button,
 .cv-axis {
   background: rgba(40, 46, 56, 0.9);
   color: var(--text-dim);
@@ -903,9 +906,19 @@ main:has(.loaded-state:not([hidden])) {
   cursor: pointer;
 }
 
-.cv-mode button.active {
+.cv-mode button.active,
+.cv-tools button.active {
   border-color: var(--accent);
   color: var(--accent);
+}
+
+.cv-tools button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.cv-tools button {
+  padding: 0.1rem 0.35rem;
 }
 
 .cv-axes {
