@@ -309,14 +309,14 @@ export function smoothRange(c: ConvertedClip, r: RangeSmooth): ConvertedClip {
 // range edges (smoothRange precedent) so stacking never pops. Zero-norm quats
 // are left untouched (safeQuat rule).
 
-export type CleanFilter = "butterworth" | "despike" | "smooth";
+export type CleanFilter = "butterworth" | "despike" | "smooth" | "reduce";
 
 export interface CleanOp {
   id: string;
   bones: string[];
   range: { t0: number; t1: number };
   filter: CleanFilter;
-  params: { cutoffHz?: number; thresholdDeg?: number; widthFrames?: number };
+  params: { cutoffHz?: number; thresholdDeg?: number; widthFrames?: number; toleranceDeg?: number };
   enabled: boolean;
 }
 
@@ -391,6 +391,82 @@ function boxRange(track: Quat[], times: number[], f0: number, f1: number, width:
   }
 }
 
+/**
+ * Keyframe reduction on a quat track over [f0,f1]: pick the frames the motion
+ * actually needs (Douglas-Peucker split until every in-between sits within
+ * `tolRad` of the slerp between kept frames), then rewrite the in-betweens AS
+ * that slerp. The clip stays dense, but between real poses the motion becomes
+ * clean interpolation — micro-jitter drops out and the curves flatten.
+ */
+function reduceRange(track: Quat[], times: number[], f0: number, f1: number, tolRad: number, t0: number, t1: number): void {
+  if (!trackValid(track, f0, f1)) return;
+  const off = times[0];
+  const src = track.slice(f0, f1 + 1).map((q) => [...q] as Quat);
+  const n = src.length;
+  const segFrac = (a: number, b: number, i: number) =>
+    (times[f0 + i] - times[f0 + a]) / Math.max(1e-9, times[f0 + b] - times[f0 + a]);
+  const kept = [0, n - 1];
+  const stack: Array<[number, number]> = [[0, n - 1]];
+  while (stack.length) {
+    const [a, b] = stack.pop()!;
+    if (b - a < 2) continue;
+    let worst = -1;
+    let worstD = tolRad;
+    for (let i = a + 1; i < b; i++) {
+      const d = angleBetween(quatSlerp(src[a], src[b], segFrac(a, b, i)), src[i]);
+      if (d > worstD) { worstD = d; worst = i; }
+    }
+    if (worst >= 0) { kept.push(worst); stack.push([a, worst], [worst, b]); }
+  }
+  kept.sort((x, y) => x - y);
+  for (let s = 0; s < kept.length - 1; s++) {
+    const a = kept[s], b = kept[s + 1];
+    for (let i = a + 1; i < b; i++) {
+      const w = edgeWeight(times[f0 + i] - off, t0, t1);
+      if (w <= 0) continue; // keep frames outside the blend bit-identical
+      const y = quatSlerp(src[a], src[b], segFrac(a, b, i));
+      track[f0 + i] = quatNormalize(quatSlerp(src[i], y, w));
+    }
+  }
+}
+
+/** Same reduction for the hips position track (linear, tolerance in meters). */
+function reducePosRange(hips: Vec3[], times: number[], f0: number, f1: number, tolM: number, t0: number, t1: number): void {
+  const off = times[0];
+  const src = hips.slice(f0, f1 + 1).map((p) => [...p] as Vec3);
+  const n = src.length;
+  const segFrac = (a: number, b: number, i: number) =>
+    (times[f0 + i] - times[f0 + a]) / Math.max(1e-9, times[f0 + b] - times[f0 + a]);
+  const lerpAt = (a: number, b: number, i: number): Vec3 => {
+    const f = segFrac(a, b, i);
+    return [src[a][0] + (src[b][0] - src[a][0]) * f, src[a][1] + (src[b][1] - src[a][1]) * f, src[a][2] + (src[b][2] - src[a][2]) * f];
+  };
+  const kept = [0, n - 1];
+  const stack: Array<[number, number]> = [[0, n - 1]];
+  while (stack.length) {
+    const [a, b] = stack.pop()!;
+    if (b - a < 2) continue;
+    let worst = -1;
+    let worstD = tolM;
+    for (let i = a + 1; i < b; i++) {
+      const y = lerpAt(a, b, i);
+      const d = Math.hypot(y[0] - src[i][0], y[1] - src[i][1], y[2] - src[i][2]);
+      if (d > worstD) { worstD = d; worst = i; }
+    }
+    if (worst >= 0) { kept.push(worst); stack.push([a, worst], [worst, b]); }
+  }
+  kept.sort((x, y) => x - y);
+  for (let s = 0; s < kept.length - 1; s++) {
+    const a = kept[s], b = kept[s + 1];
+    for (let i = a + 1; i < b; i++) {
+      const w = edgeWeight(times[f0 + i] - off, t0, t1);
+      if (w <= 0) continue; // keep frames outside the blend bit-identical
+      const y = lerpAt(a, b, i);
+      for (let c = 0; c < 3; c++) hips[f0 + i][c] = src[i][c] + (y[c] - src[i][c]) * w;
+    }
+  }
+}
+
 /** Scoped despike over [f0,f1] only. */
 function despikeRange(track: Quat[], f0: number, f1: number, thresholdRad: number): void {
   for (let i = Math.max(1, f0); i <= Math.min(track.length - 2, f1); i++) {
@@ -415,7 +491,13 @@ function applyOpInPlace(times: number[], localQuat: Quat[][], localPos: Vec3[][]
     const track = localQuat[bi];
     if (op.filter === "butterworth") butterRange(track, times, f0, f1, op.params.cutoffHz ?? 5, t0, t1);
     else if (op.filter === "smooth") boxRange(track, times, f0, f1, op.params.widthFrames ?? 5, t0, t1);
+    else if (op.filter === "reduce") reduceRange(track, times, f0, f1, (op.params.toleranceDeg ?? 1) * DEG2RAD, t0, t1);
     else despikeRange(track, f0, f1, (op.params.thresholdDeg ?? 35) * DEG2RAD);
+    // Hips carries root travel — reduce its position track alongside
+    // (1° tolerance ≈ 0.5 cm, matching the analysis panel's ratio).
+    if (bi === 0 && op.filter === "reduce") {
+      reducePosRange(localPos[0], times, f0, f1, (op.params.toleranceDeg ?? 1) * 0.005, t0, t1);
+    }
     // Hips carries root travel — filter its position track too.
     if (bi === 0 && (op.filter === "butterworth" || op.filter === "smooth")) {
       const off = times[0];

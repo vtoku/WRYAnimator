@@ -268,9 +268,10 @@ export function retimeKeys(track: RigTrack, from: number, to: number): void {
 
 /**
  * Remove keys whose absence the sampled curve wouldn't notice. Greedy sweep
- * until stable; first and last keys always survive.
+ * until stable; first and last keys always survive. Pass [t0,t1] to only
+ * consider keys inside that span (curve-editor selection scope).
  */
-export function reduceKeys(track: RigTrack, posTol = 0.005, rotTol = 1 * Math.PI / 180): number {
+export function reduceKeys(track: RigTrack, posTol = 0.005, rotTol = 1 * Math.PI / 180, t0 = -Infinity, t1 = Infinity): number {
   let removed = 0;
   const sweep = <K extends { time: number }>(
     keys: K[],
@@ -281,6 +282,7 @@ export function reduceKeys(track: RigTrack, posTol = 0.005, rotTol = 1 * Math.PI
     for (let changed = true; changed && out.length > 2; ) {
       changed = false;
       for (let i = 1; i < out.length - 1; i++) {
+        if (out[i].time < t0 || out[i].time > t1) continue;
         const rest = out.filter((_, j) => j !== i);
         if (err(out[i], rest) < tol) {
           out = rest;
@@ -310,6 +312,38 @@ export function reduceKeys(track: RigTrack, posTol = 0.005, rotTol = 1 * Math.PI
     rotTol,
   );
   return removed;
+}
+
+/**
+ * Blend each key in [t0,t1] toward the time-weighted midpoint of its
+ * neighbors — a one-pass value smooth over the selected keys. Endpoints
+ * stay put. Returns how many keys moved.
+ */
+export function smoothKeys(track: RigTrack, t0 = -Infinity, t1 = Infinity, amount = 0.5): number {
+  let n = 0;
+  const posSrc = track.posKeys.map((k) => [...k.v] as Vec3);
+  for (let i = 1; i < track.posKeys.length - 1; i++) {
+    const k = track.posKeys[i];
+    if (k.time < t0 || k.time > t1) continue;
+    const prev = track.posKeys[i - 1], next = track.posKeys[i + 1];
+    const f = (k.time - prev.time) / Math.max(1e-9, next.time - prev.time);
+    for (let c = 0; c < 3; c++) {
+      const mid = posSrc[i - 1][c] + (posSrc[i + 1][c] - posSrc[i - 1][c]) * f;
+      k.v[c] += (mid - k.v[c]) * amount;
+    }
+    n++;
+  }
+  const rotSrc = track.rotKeys.map((k) => [...k.q] as Quat);
+  for (let i = 1; i < track.rotKeys.length - 1; i++) {
+    const k = track.rotKeys[i];
+    if (k.time < t0 || k.time > t1) continue;
+    const prev = track.rotKeys[i - 1], next = track.rotKeys[i + 1];
+    const f = (k.time - prev.time) / Math.max(1e-9, next.time - prev.time);
+    const mid = quatSlerp(rotSrc[i - 1], rotSrc[i + 1], f);
+    k.q = quatNormalize(quatSlerp(k.q, mid, amount));
+    n++;
+  }
+  return n;
 }
 
 /** Set the ease of the pos+rot keys at `time`. */

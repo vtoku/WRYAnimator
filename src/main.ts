@@ -10,7 +10,8 @@ import {
   makeLayer, getTrack, setPosKey, setRotKey, deleteKeysAt, keyTimes,
   applyRigLayers, nearestFrame,
   effectorDef, effectorForBone, effectorColor, retimeKeys, keyFullPose,
-  bakeRange, bakeRangeAsync, dirtyRange, unionRange, fkDragRef, setKeyEase, reduceKeys,
+  bakeRange, bakeRangeAsync, dirtyRange, unionRange, fkDragRef, setKeyEase, reduceKeys, smoothKeys,
+  sampleTrackPos, sampleTrackRot,
   stackPoseThrough, belowStackPose, clonePose, solveEffectorOnPose, captureBoneKeys, applyLayersToPose, convertLayerMode,
   capturePinTargets, distributeWristTwist,
   defaultIkfkBlend, limbForEffector, blendChainToFK, solvePoleOnPose, bodyPartBones,
@@ -673,10 +674,11 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
 
     <h4 class="group">Filters (scoped) <span class="hint-i" title="Fix just the channels you pick over just the section you pick. On the Rig timeline open the Channels view, select the bones (down to a single finger), set the trim handles around the bad section, choose a filter, then Add. Each filter is non-destructive and stacks; the colored underline on the timeline shows where it acts. Blends 0.25s at the edges.">ⓘ</span></h4>
     <div class="rig-row">
-      <select id="filterType" title="Butterworth: zero-lag low-pass (smoothest). Moving-average: quick box smooth. Despike: removes one-frame pops.">
+      <select id="filterType" title="Butterworth: zero-lag low-pass (smoothest). Moving-average: quick box smooth. Despike: removes one-frame pops. Key reduce: keeps only the frames the motion needs (within the tolerance) and interpolates between them — flattens micro-jitter and shrinks what an export has to keep.">
         <option value="butterworth" selected>Butterworth</option>
         <option value="smooth">Moving-average</option>
         <option value="despike">Despike</option>
+        <option value="reduce">Key reduce</option>
       </select>
       <input id="filterParam" type="number" step="0.5" min="0.5" value="5" title="Filter strength" style="width:4.2rem" />
       <span id="filterUnit" class="clean-stats" style="margin:0">Hz</span>
@@ -1873,37 +1875,31 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
             rebakeRig(dirtyRange(lay, tr, time)); // live — the graph redraws itself
           },
           onValueEnd: () => updateRigEditor(),
-          onEase: (_g, time, ease) => {
-            const lay = rigLayers[activeLayerIdx];
-            const tr = lay && selectedEffector ? getTrack(lay, selectedEffector) : null;
-            if (!tr || !lay) return;
-            pushHistory();
-            setKeyEase(tr, time, ease);
-            rebakeRig(dirtyRange(lay, tr, time));
-            updateRigEditor();
-          },
-          onDelete: (_g, time) => {
-            const lay = rigLayers[activeLayerIdx];
-            const tr = lay && selectedEffector ? getTrack(lay, selectedEffector) : null;
-            if (!tr || !lay) return;
-            pushHistory();
-            const dirty = dirtyRange(lay, tr, time);
-            deleteKeysAt(tr, time, 1 / 120);
-            rebakeRig(dirty);
-            updateRigEditor();
-          },
           onSeek: (t) => {
             preview?.pause();
             preview?.seek(t);
           },
-          onContext: (g, time, x, y) => {
-            const mk = (ease: CurveEase) => ({ label: `Ease: ${ease}`, action: () => curveEase(g, time, ease) });
-            showCtxMenu(x, y, [
-              mk("linear"),
-              mk("smooth"),
-              mk("step"),
-              { label: "Delete key", action: () => curveDelete(g, time) },
-            ]);
+          onContext: (info) => {
+            // Curves are per-axis but the underlying keys are whole pos/rot
+            // vectors — operations act on the unique key TIMES in play.
+            const times = [...new Set(info.keys.map((k) => k.time.toFixed(4)))].map(Number).sort((a, b) => a - b);
+            const n = times.length;
+            const items: Array<{ label: string; action?: () => void; disabled?: boolean }> = [
+              { label: `Insert key @ ${fmtTime(info.time)}`, action: () => curveInsert(info.time) },
+            ];
+            if (n) {
+              const span = { t0: info.span!.t0 - 1e-3, t1: info.span!.t1 + 1e-3 };
+              items.push(
+                { label: `Delete ${n} key${n === 1 ? "" : "s"}`, action: () => curveDeleteMany(times) },
+                { label: "Smooth keys", action: () => curveSmoothSel(span), disabled: n < 2 },
+                { label: "Reduce keys", action: () => curveReduceSel(span), disabled: n < 3 },
+                ...(["linear", "smooth", "step"] as const).map((ease) => ({
+                  label: `Ease: ${ease}`,
+                  action: () => curveEaseMany(times, ease),
+                })),
+              );
+            }
+            showCtxMenu(info.x, info.y, items);
           },
         },
       );
@@ -1912,24 +1908,61 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     }
 
     // Context-menu helpers for the curve editor (defined after use above via
-    // hoisting; they just proxy to the same handlers).
-    function curveEase(_g: "pos" | "rot", time: number, ease: CurveEase) {
+    // hoisting; they operate on the active layer's selected-effector track).
+    function curveTrackNow() {
       const lay = rigLayers[activeLayerIdx];
       const tr = lay && selectedEffector ? getTrack(lay, selectedEffector) : null;
-      if (!tr || !lay) return;
+      return tr && lay ? { lay, tr } : null;
+    }
+    function curveInsert(time: number) {
+      const c = curveTrackNow();
+      if (!c) return;
       pushHistory();
-      setKeyEase(tr, time, ease);
-      rebakeRig(dirtyRange(lay, tr, time));
+      // Sample the current curve so inserting doesn't change the motion.
+      const p = sampleTrackPos(c.tr.posKeys, time);
+      if (p) setPosKey(c.tr, time, [...p] as Vec3);
+      const q = sampleTrackRot(c.tr.rotKeys, time);
+      if (q) setRotKey(c.tr, time, [...q] as Quat);
+      rebakeRig(dirtyRange(c.lay, c.tr, time));
       updateRigEditor();
     }
-    function curveDelete(_g: "pos" | "rot", time: number) {
-      const lay = rigLayers[activeLayerIdx];
-      const tr = lay && selectedEffector ? getTrack(lay, selectedEffector) : null;
-      if (!tr || !lay) return;
+    function curveDeleteMany(times: number[]) {
+      const c = curveTrackNow();
+      if (!c || !times.length) return;
       pushHistory();
-      const dirty = dirtyRange(lay, tr, time);
-      deleteKeysAt(tr, time, 1 / 120);
+      let dirty = dirtyRange(c.lay, c.tr, times[0]);
+      for (const t of times) dirty = unionRange(dirty, dirtyRange(c.lay, c.tr, t));
+      for (const t of times) deleteKeysAt(c.tr, t, 1 / 120);
       rebakeRig(dirty);
+      updateRigEditor();
+    }
+    function curveEaseMany(times: number[], ease: CurveEase) {
+      const c = curveTrackNow();
+      if (!c || !times.length) return;
+      pushHistory();
+      let dirty = dirtyRange(c.lay, c.tr, times[0]);
+      for (const t of times) {
+        setKeyEase(c.tr, t, ease);
+        dirty = unionRange(dirty, dirtyRange(c.lay, c.tr, t));
+      }
+      rebakeRig(dirty);
+      updateRigEditor();
+    }
+    function curveReduceSel(span: { t0: number; t1: number }) {
+      const c = curveTrackNow();
+      if (!c) return;
+      pushHistory();
+      const n = reduceKeys(c.tr, undefined, undefined, span.t0, span.t1);
+      rigSelEl.textContent = `Reduced: ${n} key${n === 1 ? "" : "s"} removed.`;
+      rebakeRig();
+      updateRigEditor();
+    }
+    function curveSmoothSel(span: { t0: number; t1: number }) {
+      const c = curveTrackNow();
+      if (!c) return;
+      pushHistory();
+      smoothKeys(c.tr, span.t0, span.t1);
+      rebakeRig();
       updateRigEditor();
     }
 
@@ -2578,11 +2611,12 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
   const filterAddBtn = document.getElementById("filterAdd") as HTMLButtonElement;
   const filterHintEl = document.getElementById("filterHint") as HTMLParagraphElement;
   const filterListEl = document.getElementById("filterList") as HTMLDivElement;
-  const FILTER_COLOR: Record<CleanFilter, string> = { butterworth: "#b48cff", smooth: "#6bb1ff", despike: "#ffb020" };
+  const FILTER_COLOR: Record<CleanFilter, string> = { butterworth: "#b48cff", smooth: "#6bb1ff", despike: "#ffb020", reduce: "#59d0a0" };
   const FILTER_DEFAULT: Record<CleanFilter, { value: number; unit: string; step: number; min: number }> = {
     butterworth: { value: 5, unit: "Hz", step: 0.5, min: 0.5 },
     smooth: { value: 5, unit: "frames", step: 1, min: 1 },
     despike: { value: 35, unit: "°", step: 5, min: 5 },
+    reduce: { value: 1, unit: "°", step: 0.25, min: 0.1 },
   };
   function syncFilterParamUi() {
     const d = FILTER_DEFAULT[filterTypeSel.value as CleanFilter];
@@ -2597,10 +2631,11 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
   function opParams(filter: CleanFilter, value: number): CleanOp["params"] {
     if (filter === "butterworth") return { cutoffHz: value };
     if (filter === "smooth") return { widthFrames: value };
+    if (filter === "reduce") return { toleranceDeg: value };
     return { thresholdDeg: value };
   }
   function opLabel(op: CleanOp): string {
-    const v = op.params.cutoffHz ?? op.params.widthFrames ?? op.params.thresholdDeg ?? 0;
+    const v = op.params.cutoffHz ?? op.params.widthFrames ?? op.params.thresholdDeg ?? op.params.toleranceDeg ?? 0;
     const unit = FILTER_DEFAULT[op.filter].unit;
     return `${op.filter} ${v}${unit === "°" ? "°" : ` ${unit}`}`;
   }
@@ -2699,7 +2734,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     reduceStatsEl.innerHTML =
       `<dl class="stats reduce-table">${table}` +
       `<div><dt><b>Total</b></dt><dd><b>${after.toLocaleString()} / ${before.toLocaleString()} keys (−${pctDrop}%)</b></dd></div></dl>` +
-      `<p class="hint">Estimate at ${redBody.value}° body / ${redFinger.value}° finger. The export stays dense per frame; this shows the reduction potential.</p>`;
+      `<p class="hint">Estimate at ${redBody.value}° body / ${redFinger.value}° finger. To apply, add a "Key reduce" filter (Filters section) scoped to the bones + range you want.</p>`;
   });
 
   filterAddBtn.addEventListener("click", () => {

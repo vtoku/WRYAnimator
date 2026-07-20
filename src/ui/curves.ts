@@ -58,6 +58,26 @@ export interface CurveModel {
   channels: CurveChannel[];
 }
 
+/** A selected key, identified by channel + time (survives model rebuilds). */
+export interface CurveKeyRef {
+  group: "pos" | "rot";
+  axis: 0 | 1 | 2;
+  time: number;
+}
+
+/** Everything the host needs to build the right-click menu. */
+export interface CurveContextInfo {
+  /** Screen position for the menu. */
+  x: number;
+  y: number;
+  /** Time under the cursor. */
+  time: number;
+  /** Selected keys (the key under the cursor when nothing was selected). */
+  keys: CurveKeyRef[];
+  /** Time span of `keys`; null when nothing is selected. */
+  span: { t0: number; t1: number } | null;
+}
+
 export interface CurveCallbacks {
   /** Vertical drag started on a key (push undo history once). */
   onValueStart(): void;
@@ -65,11 +85,9 @@ export interface CurveCallbacks {
   onValue(group: "pos" | "rot", axis: number, time: number, value: number): void;
   /** Drag finished (refresh surrounding UI). */
   onValueEnd(): void;
-  onEase(group: "pos" | "rot", time: number, ease: CurveEase): void;
-  onDelete(group: "pos" | "rot", time: number): void;
   onSeek(t: number): void;
-  /** Right-click on a key: host shows its menu with these extra items. */
-  onContext(group: "pos" | "rot", time: number, x: number, y: number): void;
+  /** Right-click: host shows its menu for the selection/cursor. */
+  onContext(info: CurveContextInfo): void;
 }
 
 const HEIGHT = 150;
@@ -88,8 +106,16 @@ export class CurveView {
     pos: { min: -1, max: 1 },
     rot: { min: -1, max: 1 },
   };
-  private drag: { ch: CurveChannel; key: CurveKey; startY: number; startValue: number } | null = null;
+  private drag: {
+    targets: Array<{ ch: CurveChannel; key: CurveKey; startValue: number }>;
+    primary: { ch: CurveChannel; key: CurveKey };
+    startY: number;
+  } | null = null;
   private hover: { ch: CurveChannel; key: CurveKey } | null = null;
+  /** Selected keys as stable refs (model rebuilds swap the key objects). */
+  private selected = new Set<string>();
+  /** Marquee rectangle while band-selecting, in canvas coordinates. */
+  private band: { x0: number; y0: number; x1: number; y1: number } | null = null;
   private ro: ResizeObserver;
   /** Shared zoom/pan mapping; when set, time->x goes through the view range. */
   private tm: TimeMap | null = null;
@@ -156,6 +182,23 @@ export class CurveView {
     this.ro.observe(this.el);
 
     this.canvas.addEventListener("pointerdown", (e) => {
+      // Middle-drag (or Alt+left) pans the shared view in either mode.
+      if (this.tm && (e.button === 1 || (e.button === 0 && e.altKey))) {
+        e.preventDefault();
+        const w = Math.max(1, this.canvas.getBoundingClientRect().width);
+        let lastX = e.clientX;
+        const move = (ev: PointerEvent) => {
+          this.tm!.panByFrac(-(ev.clientX - lastX) / w);
+          lastX = ev.clientX;
+        };
+        const up = () => {
+          window.removeEventListener("pointermove", move);
+          window.removeEventListener("pointerup", up);
+        };
+        window.addEventListener("pointermove", move);
+        window.addEventListener("pointerup", up);
+        return;
+      }
       if (e.button !== 0) return;
       // Channels mode is view-only: click-empty seeks, no key editing.
       if (this.mode === "channels") {
@@ -166,13 +209,22 @@ export class CurveView {
       const hit = this.pickKey(e);
       if (hit) {
         e.preventDefault();
-        this.drag = { ch: hit.ch, key: hit.key, startY: e.clientY, startValue: hit.key.value };
+        // Clicking an unselected key focuses it (shift adds to the selection);
+        // clicking a selected key drags the whole selection together.
+        const ref = this.refOf(hit.ch, hit.key);
+        if (!this.selected.has(ref)) {
+          if (!e.shiftKey) this.selected.clear();
+          this.selected.add(ref);
+        }
+        const targets = this.selectedKeys().map((t) => ({ ...t, startValue: t.key.value }));
+        this.drag = { targets, primary: hit, startY: e.clientY };
         this.cbs.onValueStart();
         const move = (ev: PointerEvent) => {
           if (!this.drag) return;
-          const dv = (this.drag.startY - ev.clientY) * this.valuePerPx(this.drag.ch.group);
-          this.drag.key.value = this.drag.startValue + dv;
-          this.cbs!.onValue(this.drag.ch.group, this.drag.ch.axis, this.drag.key.time, this.drag.key.value);
+          for (const t of this.drag.targets) {
+            t.key.value = t.startValue + (this.drag.startY - ev.clientY) * this.valuePerPx(t.ch.group);
+            this.cbs!.onValue(t.ch.group, t.ch.axis, t.key.time, t.key.value);
+          }
           this.draw();
         };
         const up = () => {
@@ -186,12 +238,36 @@ export class CurveView {
         window.addEventListener("pointermove", move);
         window.addEventListener("pointerup", up);
       } else {
-        // Empty click = seek.
-        this.cbs.onSeek(this.timeAt(e));
+        // Empty drag = marquee select; a still click seeks instead.
+        e.preventDefault();
+        const r = this.canvas.getBoundingClientRect();
+        const x0 = e.clientX - r.left;
+        const y0 = e.clientY - r.top;
+        const additive = e.shiftKey;
+        const move = (ev: PointerEvent) => {
+          this.band = { x0, y0, x1: ev.clientX - r.left, y1: ev.clientY - r.top };
+          this.draw();
+        };
+        const up = (ev: PointerEvent) => {
+          window.removeEventListener("pointermove", move);
+          window.removeEventListener("pointerup", up);
+          const moved = Math.hypot(ev.clientX - r.left - x0, ev.clientY - r.top - y0) > 3;
+          if (moved && this.band) {
+            if (!additive) this.selected.clear();
+            for (const { ch, key } of this.keysInBand(this.band)) this.selected.add(this.refOf(ch, key));
+          } else {
+            if (!additive) this.selected.clear();
+            this.cbs?.onSeek(this.timeAt(ev));
+          }
+          this.band = null;
+          this.draw();
+        };
+        window.addEventListener("pointermove", move);
+        window.addEventListener("pointerup", up);
       }
     });
     this.canvas.addEventListener("pointermove", (e) => {
-      if (this.drag || this.mode === "channels") return;
+      if (this.drag || this.band || this.mode === "channels") return;
       const hit = this.pickKey(e);
       if (hit?.key !== this.hover?.key) {
         this.hover = hit;
@@ -199,17 +275,66 @@ export class CurveView {
         this.draw();
       }
     });
+    // Wheel = zoom the shared view around the cursor, same as the strip.
+    this.canvas.addEventListener("wheel", (e) => {
+      if (!this.tm) return;
+      e.preventDefault();
+      const r = this.canvas.getBoundingClientRect();
+      const frac = (e.clientX - r.left) / Math.max(1, r.width);
+      this.tm.zoomAt(frac, e.deltaY > 0 ? 1.2 : 1 / 1.2);
+      this.draw();
+    }, { passive: false });
     this.canvas.addEventListener("contextmenu", (e) => {
       e.preventDefault();
+      if (this.mode === "channels" || !this.model || !this.cbs) return;
+      // Right-click on an unselected key focuses it first.
       const hit = this.pickKey(e);
-      if (hit && this.cbs) this.cbs.onContext(hit.ch.group, hit.key.time, e.clientX, e.clientY);
+      if (hit && !this.selected.has(this.refOf(hit.ch, hit.key))) {
+        this.selected.clear();
+        this.selected.add(this.refOf(hit.ch, hit.key));
+        this.draw();
+      }
+      const keys: CurveKeyRef[] = this.selectedKeys().map(({ ch, key }) => ({ group: ch.group, axis: ch.axis, time: key.time }));
+      const span = keys.length
+        ? { t0: Math.min(...keys.map((k) => k.time)), t1: Math.max(...keys.map((k) => k.time)) }
+        : null;
+      this.cbs.onContext({ x: e.clientX, y: e.clientY, time: this.timeAt(e), keys, span });
     });
+  }
+
+  // ---- selection -----------------------------------------------------------
+  private refOf(ch: CurveChannel, key: CurveKey): string {
+    return `${ch.group}${ch.axis}@${key.time.toFixed(4)}`;
+  }
+  private selectedKeys(): Array<{ ch: CurveChannel; key: CurveKey }> {
+    const out: Array<{ ch: CurveChannel; key: CurveKey }> = [];
+    for (const ch of this.model?.channels ?? []) {
+      for (const key of ch.keys) if (this.selected.has(this.refOf(ch, key))) out.push({ ch, key });
+    }
+    return out;
+  }
+  private keysInBand(band: { x0: number; y0: number; x1: number; y1: number }): Array<{ ch: CurveChannel; key: CurveKey }> {
+    const lo = { x: Math.min(band.x0, band.x1), y: Math.min(band.y0, band.y1) };
+    const hi = { x: Math.max(band.x0, band.x1), y: Math.max(band.y0, band.y1) };
+    const out: Array<{ ch: CurveChannel; key: CurveKey }> = [];
+    for (const ch of this.model?.channels ?? []) {
+      for (const key of ch.keys) {
+        const kx = this.x(key.time);
+        const ky = this.y(key.value, ch.group);
+        if (kx >= lo.x && kx <= hi.x && ky >= lo.y && ky <= hi.y) out.push({ ch, key });
+      }
+    }
+    return out;
   }
 
   setModel(model: CurveModel | null, cbs: CurveCallbacks | null) {
     if (this.drag) return; // never rebuild under an active drag
     this.model = model;
     this.cbs = cbs;
+    // Drop selection refs that no longer resolve to a key (retimed/deleted).
+    const valid = new Set<string>();
+    for (const ch of model?.channels ?? []) for (const key of ch.keys) valid.add(this.refOf(ch, key));
+    for (const ref of this.selected) if (!valid.has(ref)) this.selected.delete(ref);
     this.fitScale();
     this.draw();
   }
@@ -314,7 +439,11 @@ export class CurveView {
 
   // ---- geometry ------------------------------------------------------------
   private width(): number {
-    return this.el.clientWidth || 1;
+    // The canvas's own content width, NOT el.clientWidth: the transport pads
+    // this.el to align the canvas with the timeline strip, and clientWidth
+    // includes that padding — drawing at the padded width squishes the frame
+    // against the displayed canvas and the skew grows with zoom.
+    return this.canvas.clientWidth || this.el.clientWidth || 1;
   }
   private x(t: number): number {
     if (this.tm) return (this.tm.pct(t) / 100) * this.width();
@@ -442,15 +571,36 @@ export class CurveView {
       for (const key of ch.keys) {
         const kx = this.x(key.time);
         const ky = this.y(key.value, ch.group);
-        const hot = this.hover?.key === key || this.drag?.key === key;
+        const hot = this.hover?.key === key || this.drag?.targets.some((t) => t.key === key);
+        const sel = this.selected.has(this.refOf(ch, key));
         g.fillStyle = hot ? "#fff" : ch.color;
         g.save();
         g.translate(kx, ky);
         g.rotate(Math.PI / 4);
-        const r = hot ? 4.5 : 3.5;
+        const r = hot || sel ? 4.5 : 3.5;
         g.fillRect(-r, -r, r * 2, r * 2);
+        if (sel) {
+          g.strokeStyle = "#fff";
+          g.lineWidth = 1.2;
+          g.strokeRect(-r - 1.5, -r - 1.5, (r + 1.5) * 2, (r + 1.5) * 2);
+        }
         g.restore();
       }
+    }
+
+    // Marquee band while drag-selecting.
+    if (this.band) {
+      const bx = Math.min(this.band.x0, this.band.x1);
+      const by = Math.min(this.band.y0, this.band.y1);
+      const bw = Math.abs(this.band.x1 - this.band.x0);
+      const bh = Math.abs(this.band.y1 - this.band.y0);
+      g.fillStyle = "rgba(120,170,255,0.12)";
+      g.fillRect(bx, by, bw, bh);
+      g.strokeStyle = "rgba(255,255,255,0.6)";
+      g.lineWidth = 1;
+      g.setLineDash([4, 3]);
+      g.strokeRect(bx + 0.5, by + 0.5, bw, bh);
+      g.setLineDash([]);
     }
 
     // Playhead.
@@ -460,11 +610,12 @@ export class CurveView {
     g.lineTo(this.x(this.playhead), HEIGHT);
     g.stroke();
 
-    // Title + hover readout.
+    // Title + hover readout + selection count.
     g.fillStyle = "rgba(255,255,255,0.6)";
-    const hov = this.drag ?? this.hover;
+    const hov = this.drag?.primary ?? this.hover;
     const readout = hov ? `  ·  ${hov.ch.label} @ ${hov.key.time.toFixed(2)}s = ${hov.key.value.toFixed(1)}` : "";
-    g.fillText(this.model.title + readout, 34, PAD_TOP);
+    const selCount = this.selected.size ? `  ·  ${this.selected.size} selected` : "";
+    g.fillText(this.model.title + readout + selCount, 34, PAD_TOP);
   }
 
   /** True when there's something to show: layer keys OR channels configured. */

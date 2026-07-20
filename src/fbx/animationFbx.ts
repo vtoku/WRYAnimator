@@ -23,6 +23,37 @@ function unwrapDegrees(values: number[]): void {
   }
 }
 
+// Writer-side key elimination: drop keys sitting within `tol` of the line
+// between their kept neighbors (Douglas-Peucker per channel). The tolerances
+// are tight enough to be visually lossless — this only collapses spans that
+// are already (near-)linear, e.g. holds and sections flattened by the Key
+// reduce filter — but it's what turns that filter into a smaller file.
+const ROT_KEY_EPS_DEG = 0.01;
+const POS_KEY_EPS_CM = 0.01;
+const PERCENT_KEY_EPS = 0.05; // blendshape DeformPercent, 0..100
+
+function reduceCurve(values: number[], times: number[], tol: number): { values: number[]; times: number[] } {
+  const n = values.length;
+  if (n <= 2) return { values, times };
+  const keep = [0, n - 1];
+  const stack: Array<[number, number]> = [[0, n - 1]];
+  while (stack.length) {
+    const [a, b] = stack.pop()!;
+    if (b - a < 2) continue;
+    const va = values[a], vb = values[b], ta = times[a];
+    const inv = 1 / Math.max(1, times[b] - ta);
+    let worst = -1;
+    let worstD = tol;
+    for (let i = a + 1; i < b; i++) {
+      const d = Math.abs(va + (vb - va) * (times[i] - ta) * inv - values[i]);
+      if (d > worstD) { worstD = d; worst = i; }
+    }
+    if (worst >= 0) { keep.push(worst); stack.push([a, worst], [worst, b]); }
+  }
+  keep.sort((x, y) => x - y);
+  return { values: keep.map((i) => values[i]), times: keep.map((i) => times[i]) };
+}
+
 const P = (name: string, ...rest: FbxProp[]): FbxNode => node("P", [S(name), ...rest]);
 
 /**
@@ -223,17 +254,19 @@ export function writeAnimationFbx(clip: ResampledClip, opts: WriteAnimOpts = {})
       ? [0, 0, 0]
       : [eulerX[i][0], eulerY[i][0], eulerZ[i][0]];
     objects.push(curveNode(ch.nodeId, "R", defs));
-    objects.push(curve(ch.curveIds[0], eulerX[i]));
-    objects.push(curve(ch.curveIds[1], eulerY[i]));
-    objects.push(curve(ch.curveIds[2], eulerZ[i]));
+    for (const [c, track] of [eulerX[i], eulerY[i], eulerZ[i]].entries()) {
+      const r = reduceCurve(track, keyTimes, ROT_KEY_EPS_DEG);
+      objects.push(curve(ch.curveIds[c], r.values, r.times));
+    }
   });
   const hipDefs: [number, number, number] = tposeRest
     ? [bindWorld[0][0], bindWorld[0][1], bindWorld[0][2]]
     : [transX[0], transY[0], transZ[0]];
   objects.push(curveNode(hipsTrans.nodeId, "T", hipDefs));
-  objects.push(curve(hipsTrans.curveIds[0], transX));
-  objects.push(curve(hipsTrans.curveIds[1], transY));
-  objects.push(curve(hipsTrans.curveIds[2], transZ));
+  for (const [c, track] of [transX, transY, transZ].entries()) {
+    const r = reduceCurve(track, keyTimes, POS_KEY_EPS_CM);
+    objects.push(curve(hipsTrans.curveIds[c], r.values, r.times));
+  }
 
   // ---- "TPose" take: a one-key stance take so DCC tools can characterize
   // from a guaranteed T-pose (also fixes feet/limb auto-mapping in MoBu).
@@ -464,7 +497,8 @@ export function writeAnimationFbx(clip: ResampledClip, opts: WriteAnimOpts = {})
         objects.push(node("AnimationCurveNode", [L(cnId), S(objName("DeformPercent", "AnimCurveNode")), S("")], [
           node("Properties70", [], [P("d|DeformPercent", S("Number"), S(""), S("A"), D(0))]),
         ]));
-        objects.push(curve(curveId, Array.from(percent)));
+        const rp = reduceCurve(Array.from(percent), keyTimes, PERCENT_KEY_EPS);
+        objects.push(curve(curveId, rp.values, rp.times));
         meshConns.push({ kind: "OO", a: channelId, b: blendShapeId });
         meshConns.push({ kind: "OO", a: shapeId, b: channelId });
         meshConns.push({ kind: "OO", a: cnId, b: layerId });

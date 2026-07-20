@@ -1,7 +1,7 @@
 {
   "name": "wryanimator",
   "private": true,
-  "version": "0.35.0",
+  "version": "0.36.0",
   "type": "module",
   "description": "WRYAnimator: edit and clean up Warudo motion-capture recordings in your browser, then export FBX, VRMA, or wanim. Runs entirely client-side.",
   "license": "MIT",
