@@ -645,16 +645,17 @@ export function createTransport(preview: PreviewScene, duration: number, frames 
   let view: "keys" | "curves" | "none" = "keys";
 
   const syncDopeVisibility = () => {
-    dopeEl.hidden = view !== "keys" || dopeCount === 0;
+    // Keys stays clickable even with no keys yet — a grayed segment reads as
+    // broken; the empty dope sheet explains itself instead.
+    dopeEl.hidden = view !== "keys";
     curveView.el.hidden = view !== "curves" || !curveAvailable;
     // The layers rail fills the dead zone under the right-side controls
     // whenever a panel is open (the host renders its content).
     railEl.hidden = (dopeEl.hidden && curveView.el.hidden) || railEl.childElementCount === 0;
-    segEl.hidden = dopeCount === 0 && !curveAvailable;
     for (const b of segBtns) {
       const v = b.dataset.view as typeof view;
       b.classList.toggle("active", v === view);
-      b.disabled = (v === "keys" && dopeCount === 0) || (v === "curves" && !curveAvailable);
+      b.disabled = v === "curves" && !curveAvailable;
     }
   };
   function cyclePanel() {
@@ -681,6 +682,13 @@ export function createTransport(preview: PreviewScene, duration: number, frames 
   function setDope(rows: DopeRow[], cbs?: TransportKeyCallbacks) {
     dopeCount = rows.length;
     dopeRowsEl.innerHTML = "";
+    if (!rows.length) {
+      const hint = document.createElement("p");
+      hint.className = "note";
+      hint.style.margin = "0.25rem 0.5rem";
+      hint.textContent = "No keys yet — pose a handle on the figure (Rig tab) and a key lands at the playhead.";
+      dopeRowsEl.appendChild(hint);
+    }
     for (const row of rows) {
       const r = document.createElement("div");
       r.className = "d-row";

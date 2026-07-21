@@ -726,8 +726,8 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
         <option value="despike">Despike</option>
         <option value="reduce">Key reduce</option>
       </select>
-      <input id="filterParam" type="number" step="0.5" min="0.5" value="5" title="Filter strength" style="width:4.2rem" />
-      <span id="filterUnit" class="clean-stats" style="margin:0">Hz</span>
+      <input id="filterParam" type="range" step="0.5" min="0.5" max="15" value="5" title="Filter strength" style="flex:1;min-width:5rem" />
+      <span id="filterUnit" class="clean-stats" style="margin:0;min-width:3.6rem;text-align:right">5 Hz</span>
     </div>
     <div class="rig-row">
       <button id="filterAdd" class="button ghost" title="Apply the chosen filter to the selected bones over the trim range.">Add for selection + trim</button>
@@ -1212,6 +1212,8 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
   const warpKeys: WarpKey[] = []; // time-warp speed ramp (source-time keys)
   const rangeSmooths: RangeSmooth[] = []; // user-applied range smoothing passes
   const cleanOps: CleanOp[] = []; // scoped non-destructive filter stack
+  /** cleanOps minus the dialog's live-preview op — what gets persisted. */
+  const persistOps = () => cleanOps.filter((o) => o.id !== "__preview");
   const selectionSets: SelectionSet[] = []; // named bone sets (channel tree chips)
   let loopOp: LoopOp | null = null; // make-loop cycle blend (chip-listed)
   let currentPlants: PlantSpan[] = []; // last detected plants (drawing + chips)
@@ -1400,7 +1402,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
   const rigSnapshot = () =>
     JSON.stringify({
       layers: rigLayers, mods, counter: layerCounter, active: activeLayerIdx,
-      warp: warpKeys, ranges: rangeSmooths, cleanOps, selectionSets, loop: loopOp, feetPlants: feetPlantRemoved, pipeline: pipelineSettings(),
+      warp: warpKeys, ranges: rangeSmooths, cleanOps: persistOps(), selectionSets, loop: loopOp, feetPlants: feetPlantRemoved, pipeline: pipelineSettings(),
     });
   function updateUndoUi() {
     rigUndoBtn.disabled = !undoStack.length;
@@ -2882,21 +2884,30 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
   const filterHintEl = document.getElementById("filterHint") as HTMLParagraphElement;
   const filterListEl = document.getElementById("filterList") as HTMLDivElement;
   const FILTER_COLOR: Record<CleanFilter, string> = { butterworth: "#b48cff", smooth: "#6bb1ff", despike: "#ffb020", reduce: "#59d0a0" };
-  const FILTER_DEFAULT: Record<CleanFilter, { value: number; unit: string; step: number; min: number }> = {
-    butterworth: { value: 5, unit: "Hz", step: 0.5, min: 0.5 },
-    smooth: { value: 5, unit: "frames", step: 1, min: 1 },
-    despike: { value: 35, unit: "°", step: 5, min: 5 },
-    reduce: { value: 1, unit: "°", step: 0.25, min: 0.1 },
+  const FILTER_DEFAULT: Record<CleanFilter, { value: number; unit: string; step: number; min: number; max: number }> = {
+    butterworth: { value: 5, unit: "Hz", step: 0.5, min: 0.5, max: 15 },
+    smooth: { value: 5, unit: "frames", step: 1, min: 1, max: 30 },
+    despike: { value: 35, unit: "°", step: 5, min: 5, max: 90 },
+    reduce: { value: 1, unit: "°", step: 0.25, min: 0.1, max: 5 },
+  };
+  const fmtStrength = (f: CleanFilter, v: number) => {
+    const unit = FILTER_DEFAULT[f].unit;
+    return unit === "°" ? `${v}°` : `${v} ${unit}`;
   };
   function syncFilterParamUi() {
-    const d = FILTER_DEFAULT[filterTypeSel.value as CleanFilter];
+    const f = filterTypeSel.value as CleanFilter;
+    const d = FILTER_DEFAULT[f];
     filterParamEl.value = String(d.value);
     filterParamEl.step = String(d.step);
     filterParamEl.min = String(d.min);
-    filterUnitEl.textContent = d.unit;
+    filterParamEl.max = String(d.max);
+    filterUnitEl.textContent = fmtStrength(f, d.value);
   }
   syncFilterParamUi();
   filterTypeSel.addEventListener("change", syncFilterParamUi);
+  filterParamEl.addEventListener("input", () => {
+    filterUnitEl.textContent = fmtStrength(filterTypeSel.value as CleanFilter, Number(filterParamEl.value));
+  });
 
   function opParams(filter: CleanFilter, value: number): CleanOp["params"] {
     if (filter === "butterworth") return { cutoffHz: value };
@@ -2972,6 +2983,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
   renderFilters = () => {
     filterListEl.innerHTML = "";
     for (const op of cleanOps) {
+      if (op.id === "__preview") continue; // live dialog preview, not a chip
       const row = document.createElement("span");
       row.className = "rig-key";
       const en = document.createElement("input");
@@ -3228,7 +3240,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
           rigCacheKey,
           JSON.stringify({
             v: 3, layers: rigLayers, mods, counter: layerCounter, warp: warpKeys, ranges: rangeSmooths,
-            cleanOps, selectionSets, loop: loopOp, feetPlants: feetPlantRemoved, pins: [...pinnedEffectors], fk: [...fkLimbs], ikfk: { ...ikfk },
+            cleanOps: persistOps(), selectionSets, loop: loopOp, feetPlants: feetPlantRemoved, pins: [...pinnedEffectors], fk: [...fkLimbs], ikfk: { ...ikfk },
             settings: sceneSettings(),
           }),
         );
@@ -3327,7 +3339,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
   (document.getElementById("rigSave") as HTMLButtonElement).addEventListener("click", () => {
     if (!loaded) return;
     const json = JSON.stringify(
-      { v: 3, layers: rigLayers, mods, counter: layerCounter, warp: warpKeys, ranges: rangeSmooths, cleanOps, selectionSets, loop: loopOp, feetPlants: feetPlantRemoved, pins: [...pinnedEffectors], fk: [...fkLimbs], ikfk: { ...ikfk } },
+      { v: 3, layers: rigLayers, mods, counter: layerCounter, warp: warpKeys, ranges: rangeSmooths, cleanOps: persistOps(), selectionSets, loop: loopOp, feetPlants: feetPlantRemoved, pins: [...pinnedEffectors], fk: [...fkLimbs], ikfk: { ...ikfk } },
       null,
       1,
     );
@@ -3414,7 +3426,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
       name: loaded.name,
       source: loaded.source,
       settings: sceneSettings(),
-      rig: { v: 3, layers: rigLayers, mods, counter: layerCounter, warp: warpKeys, ranges: rangeSmooths, cleanOps, selectionSets, loop: loopOp, feetPlants: feetPlantRemoved, pins: [...pinnedEffectors], fk: [...fkLimbs], ikfk: { ...ikfk } },
+      rig: { v: 3, layers: rigLayers, mods, counter: layerCounter, warp: warpKeys, ranges: rangeSmooths, cleanOps: persistOps(), selectionSets, loop: loopOp, feetPlants: feetPlantRemoved, pins: [...pinnedEffectors], fk: [...fkLimbs], ikfk: { ...ikfk } },
       // The original source bytes, so the project reopens byte-for-byte.
       wanim: loaded.source === "wanim" ? rawB64 : undefined,
       fbx: loaded.source === "fbx" ? rawB64 : undefined,
@@ -3488,34 +3500,103 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
         ["despike", "Despike"],
         ["reduce", "Key reduce"],
       ];
-      /** Small settings dialog: strength prefilled, Apply commits the op. */
+      /** Settings dialog with a strength slider and LIVE preview: the op is
+       *  applied provisionally while the dialog is open, so the curves relax
+       *  in real time as you drag. Apply keeps it; closing reverts. */
       const openFilterDialog = (f: CleanFilter, name: string) => {
         const d = FILTER_DEFAULT[f];
-        const bones = transport?.curveView.getChannelSelection().size ?? 0;
+        const scope = transport?.curveView.getChannelSelection() ?? new Set<string>();
+        if (!scope.size) {
+          showError("Select the bones first: pick channels in the tree (a group or single fingers).");
+          return;
+        }
         const body = document.createElement("div");
         body.className = "modal-body";
         body.innerHTML = `
-          <p class="note">${name} on ${bones} bone${bones === 1 ? "" : "s"} over ${fmtTime(span.t0)}–${fmtTime(span.t1)}.
-          The curves update when it lands — hold <b>Ghost</b> (top bar) to compare against the unfiltered motion.</p>
+          <p class="note">${name} on ${scope.size} bone${scope.size === 1 ? "" : "s"} over ${fmtTime(span.t0)}–${fmtTime(span.t1)}.
+          Previewing LIVE on the curves — drag the slider and watch them relax; hold <b>Ghost</b> to compare. Closing without Apply reverts.</p>
           <label class="field"><span>Strength</span>
-            <span><input id="fltVal" type="number" step="${d.step}" min="${d.min}" value="${d.value}" style="width:4.6rem" /> ${d.unit}</span>
+            <span style="display:flex;align-items:center;gap:0.5rem">
+              <input id="fltVal" type="range" step="${d.step}" min="${d.min}" max="${d.max}" value="${d.value}" style="width:9rem" />
+              <output id="fltOut" style="min-width:3.8rem;text-align:right">${fmtStrength(f, d.value)}</output>
+            </span>
           </label>
           <div class="rig-row"><button id="fltApply" class="button primary">Apply</button></div>`;
         const close = openModal(`${name} filter`, body);
         const input = body.querySelector("#fltVal") as HTMLInputElement;
+        const out = body.querySelector("#fltOut") as HTMLOutputElement;
         input.focus();
-        input.select();
+
+        // Provisional op: lives in cleanOps (so the pipeline + timeline
+        // underline see it) but stays out of undo history and the chip list.
+        const previewOp: CleanOp = {
+          id: "__preview",
+          bones: [...scope],
+          range: { t0: span.t0, t1: span.t1 },
+          filter: f,
+          params: opParams(f, d.value),
+          enabled: true,
+        };
+        let previewTimer = 0;
+        const schedulePreview = () => {
+          const v = Number(input.value);
+          previewOp.params = opParams(f, Number.isFinite(v) && v > 0 ? v : d.value);
+          if (!cleanOps.includes(previewOp)) cleanOps.push(previewOp);
+          window.clearTimeout(previewTimer);
+          previewTimer = window.setTimeout(() => { refreshTimelineRanges(); void reclean(); }, 200);
+        };
+        const dropPreview = () => {
+          window.clearTimeout(previewTimer);
+          const i = cleanOps.indexOf(previewOp);
+          if (i >= 0) cleanOps.splice(i, 1);
+        };
+        input.addEventListener("input", () => {
+          out.value = fmtStrength(f, Number(input.value));
+          schedulePreview();
+        });
+        schedulePreview(); // show the default-strength effect immediately
+
         const apply = () => {
           const v = Number(input.value);
+          dropPreview();
+          watcher && window.clearInterval(watcher);
           if (addCleanOpScoped(f, span, Number.isFinite(v) && v > 0 ? v : d.value)) close();
+          else { refreshTimelineRanges(); void reclean(); }
         };
         (body.querySelector("#fltApply") as HTMLButtonElement).addEventListener("click", apply);
         input.addEventListener("keydown", (e) => { if (e.key === "Enter") apply(); });
+        // Closed without Apply (X / Esc / backdrop): revert the preview.
+        const watcher = window.setInterval(() => {
+          if (!body.isConnected) {
+            window.clearInterval(watcher);
+            if (cleanOps.includes(previewOp)) {
+              dropPreview();
+              refreshTimelineRanges();
+              void reclean();
+            }
+          }
+        }, 250);
       };
       const items: Array<{ label: string; action?: () => void; disabled?: boolean }> = FILTER_ITEMS.map(([f, name]) => ({
         label: `${name} → ${where}…`,
         action: () => openFilterDialog(f, name),
       }));
+      // Applied filters overlapping the click are removable right here (they
+      // also live as chips in the Clean tab).
+      const lo = info.span?.t0 ?? info.time;
+      const hi = info.span?.t1 ?? info.time;
+      const overlapping = cleanOps.filter((o) => o.id !== "__preview" && o.range.t0 <= hi && o.range.t1 >= lo);
+      for (const op of overlapping.slice(0, 5)) {
+        items.push({
+          label: `Remove ${opLabel(op)} (${fmtTime(op.range.t0)}–${fmtTime(op.range.t1)})`,
+          action: () => {
+            pushHistory();
+            cleanOps.splice(cleanOps.indexOf(op), 1);
+            renderFilters();
+            void reclean();
+          },
+        });
+      }
       if (info.span) {
         const s = info.span;
         items.push(
