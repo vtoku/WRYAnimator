@@ -29,6 +29,7 @@ export interface Prefs {
   aidOnionCount: number;      // ghosts each side
   aidOnionStep: number;       // frames between ghosts
   aidOnionOpacity: number;    // nearest ghost's opacity (0-1)
+  aidSilhouette: boolean;     // two-tone pose-readability mode
   aidCleanPlay: boolean;      // hide handles/gizmo/dots while playing
   // Appearance
   uiScale: number;            // 0.85 | 1 | 1.15
@@ -62,6 +63,7 @@ const DEFAULTS: Prefs = {
   aidOnionCount: 3,
   aidOnionStep: 5,
   aidOnionOpacity: 0.45,
+  aidSilhouette: false,
   aidCleanPlay: false,
   uiScale: 1,
   dockWidth: 352,      // 22rem at scale 1

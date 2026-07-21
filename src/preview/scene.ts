@@ -21,6 +21,13 @@ const GHOST_GREEN = 0x3fd97a;
 const PATH_WINDOW_MAX = 300;
 const ONION_COOL = 0x4a9eff; // ghosts before the playhead
 const ONION_WARM = 0xffa14a; // ghosts after the playhead
+// Silhouette (two-tone readability) palette: flat dark bg, one light tone for
+// every bone/joint, the selected effector's chain in the UI accent gold.
+const SIL_BG = 0x090a0d;
+const SIL_LINE = 0xe3e7ef;
+const SIL_ACCENT = 0xf5b301; // matches the CSS --logo-accent
+const STICK_LINE = 0x7fb2ff; // normal stick-figure link color
+const STICK_JOINT = 0xffffff;
 
 export interface PlaybackState {
   time: number;
@@ -275,7 +282,7 @@ export class PreviewScene {
   /** Hide/show the facecap overlay (hidden while a user VRM keeps its own head). */
   setFaceVisible(visible: boolean) {
     this.faceVisible = visible;
-    if (this.face) this.face.group.visible = visible;
+    if (this.face) this.face.group.visible = visible && !this.aidSilhouette;
   }
 
   private clearBody() {
@@ -304,6 +311,7 @@ export class PreviewScene {
         this.body = buildBodyMeshes(data.meshes, this.boneNodes, bindWorld);
         // At the scene root: the bones' world matrices already include any
         // root transform, so the skinned mesh must not inherit it too.
+        this.body.visible = !this.aidSilhouette; // silhouette: skeleton only
         this.scene.add(this.body);
       })
       .catch((err) => console.warn("body mesh unavailable:", err));
@@ -324,7 +332,7 @@ export class PreviewScene {
     face.group.scale.setScalar(BODY_HEAD_HEIGHT_M * k);
     face.group.position.set(0, BODY_HEAD_LIFT_M * k, 0);
     face.group.rotation.set(0, 0, 0);
-    face.group.visible = this.faceVisible;
+    face.group.visible = this.faceVisible && !this.aidSilhouette;
     face.bindNames(this.clip.face.names);
     this.faceWeights = new Float32Array(this.clip.face.names.length);
   }
@@ -374,14 +382,20 @@ export class PreviewScene {
       if (p >= 0) this.links.push([p, i]);
     });
 
+    // Per-vertex colors so the silhouette mode can tint the selected chain
+    // without extra objects (uniform base colors otherwise — identical look).
     const lineGeo = new THREE.BufferGeometry();
     lineGeo.setAttribute(
       "position",
       new THREE.Float32BufferAttribute(new Float32Array(this.links.length * 6), 3),
     );
+    lineGeo.setAttribute(
+      "color",
+      new THREE.Float32BufferAttribute(new Float32Array(this.links.length * 6), 3),
+    );
     this.lines = new THREE.LineSegments(
       lineGeo,
-      new THREE.LineBasicMaterial({ color: 0x7fb2ff }),
+      new THREE.LineBasicMaterial({ vertexColors: true }),
     );
     this.lines.frustumCulled = false;
     this.scene.add(this.lines);
@@ -391,12 +405,17 @@ export class PreviewScene {
       "position",
       new THREE.Float32BufferAttribute(new Float32Array(nodes.length * 3), 3),
     );
+    jointGeo.setAttribute(
+      "color",
+      new THREE.Float32BufferAttribute(new Float32Array(nodes.length * 3), 3),
+    );
     this.joints = new THREE.Points(
       jointGeo,
-      new THREE.PointsMaterial({ color: 0xffffff, size: 6, sizeAttenuation: false }),
+      new THREE.PointsMaterial({ vertexColors: true, size: 6, sizeAttenuation: false }),
     );
     this.joints.frustumCulled = false;
     this.scene.add(this.joints);
+    this.refreshStickColors();
 
     // Allocated whenever the clip has face tracks (drives the overlay AND
     // any body-mesh morphs), even if the overlay itself failed to load.
@@ -412,6 +431,7 @@ export class PreviewScene {
     this.resetAidData(clip);
     this.applyPose(this.time);
     this.applyAidVisibility();
+    this.applySilhouette();
     if (!resume) this.frameCamera();
     this.emitState();
   }
@@ -568,6 +588,7 @@ export class PreviewScene {
     );
     this.ghostLines.renderOrder = 8;
     this.ghostLines.frustumCulled = false;
+    this.ghostLines.visible = !this.aidsSuppressed();
     this.scene.add(this.ghostLines);
     this.attachGhostBody(clip);
     this.updateGhost(this.time);
@@ -654,6 +675,7 @@ export class PreviewScene {
         for (const m of orphaned) m.dispose();
         this.ghostMats = [fill, outline];
         this.ghostBody = group;
+        group.visible = !this.aidsSuppressed();
         this.scene.add(group);
         this.updateGhost(this.time);
       })
@@ -709,6 +731,9 @@ export class PreviewScene {
   private aidPaths = false;
   private aidOnion = false;
   private aidCleanPlay = false;
+  private aidSilhouette = false;
+  /** Video capture wants the clean-playback hiding regardless of play state. */
+  private captureHide = false;
   private pathWindow = 60;   // frames each side of the playhead
   private pathDots = true;
   private onionCount = 3;    // ghosts each side
@@ -732,10 +757,18 @@ export class PreviewScene {
 
   /** Turn a preview aid on/off and/or push its parameters. Idempotent. */
   setAid(
-    name: "paths" | "onion" | "cleanPlay",
+    name: "paths" | "onion" | "cleanPlay" | "silhouette",
     on: boolean,
     params?: { pathWindow?: number; pathDots?: boolean; onionCount?: number; onionStep?: number; onionOpacity?: number },
   ) {
+    if (name === "silhouette") {
+      if (on === this.aidSilhouette) return;
+      this.aidSilhouette = on;
+      this.applySilhouette();
+      this.updateAids(this.time);
+      this.applyAidVisibility();
+      return;
+    }
     if (name === "paths") {
       const win = Math.max(10, Math.min(PATH_WINDOW_MAX, Math.round(params?.pathWindow ?? this.pathWindow)));
       const dots = params?.pathDots ?? this.pathDots;
@@ -772,9 +805,14 @@ export class PreviewScene {
     this.onionFrame = -1;
   }
 
-  /** True while clean playback is actively hiding the posing overlays. */
+  /** True while clean playback (or video capture) hides the posing overlays. */
   private overlaysHidden(): boolean {
-    return this.aidCleanPlay && this.playing;
+    return (this.aidCleanPlay && this.playing) || this.captureHide;
+  }
+
+  /** True while the path/onion/ghost aids are forced off (silhouette, capture). */
+  private aidsSuppressed(): boolean {
+    return this.aidSilhouette || this.captureHide;
   }
 
   /** Apply clean-playback visibility to handles, gizmo, and path dots. */
@@ -783,7 +821,75 @@ export class PreviewScene {
     this.restyleHandles();
     this.updateRigHandles();
     if (this.gizmo) this.gizmo.getHelper().visible = !hide;
-    if (this.pathPoints) this.pathPoints.visible = this.aidPaths && this.pathDots && !hide;
+    if (this.pathPoints) this.pathPoints.visible = this.aidPaths && this.pathDots && !hide && !this.aidsSuppressed();
+  }
+
+  /** Silhouette: two-tone scene — flat bg, light skeleton, accent chain. */
+  private applySilhouette() {
+    const on = this.aidSilhouette;
+    (this.scene.background as THREE.Color).set(on ? SIL_BG : BG);
+    if (this.grid) this.grid.visible = this.gridOn && !on; // hidden while active
+    if (this.body) this.body.visible = !on; // skeleton-only read
+    if (this.face) this.face.group.visible = this.faceVisible && !on;
+    this.refreshStickColors();
+    this.applySuppressed();
+  }
+
+  /** Hide/restore the path, onion, and ghost overlays (silhouette / capture). */
+  private applySuppressed() {
+    const sup = this.aidsSuppressed();
+    if (this.pathLine) this.pathLine.visible = this.aidPaths && !sup;
+    if (this.pathPoints) this.pathPoints.visible = this.aidPaths && this.pathDots && !sup && !this.overlaysHidden();
+    if (sup) for (const m of this.onionMeshes) m.visible = false;
+    if (this.ghostLines) this.ghostLines.visible = !sup;
+    if (this.ghostBody) this.ghostBody.visible = !sup;
+    if (!sup) {
+      // Re-drive the enabled aids: their update paths early-return on an
+      // unchanged frame, so force a refresh.
+      this.pathFrame = -1;
+      this.onionFrame = -1;
+      this.updateAids(this.time);
+    }
+  }
+
+  /** Colors for the stick figure: normal blue/white, or silhouette two-tone
+   *  with the selected effector's chain in the accent color. */
+  private refreshStickColors() {
+    if (!this.lines || !this.joints || !this.clip) return;
+    const sil = this.aidSilhouette;
+    const line = new THREE.Color(sil ? SIL_LINE : STICK_LINE);
+    const joint = new THREE.Color(sil ? SIL_LINE : STICK_JOINT);
+    const accent = new THREE.Color(SIL_ACCENT);
+    const chain = new Set<number>();
+    if (sil && this.rigSelected) {
+      const def = EFFECTORS.find((e) => e.id === this.rigSelected);
+      const bones = def ? (def.chain ? [def.chain.root, def.chain.mid, def.bone] : [def.bone]) : [];
+      for (const b of bones) {
+        const i = this.clip.names.indexOf(b);
+        if (i >= 0) chain.add(i);
+      }
+    }
+    const lineCol = this.lines.geometry.getAttribute("color") as THREE.BufferAttribute;
+    this.links.forEach(([, b], k) => {
+      const c = chain.has(b) ? accent : line; // a link belongs to its child bone
+      lineCol.setXYZ(k * 2, c.r, c.g, c.b);
+      lineCol.setXYZ(k * 2 + 1, c.r, c.g, c.b);
+    });
+    lineCol.needsUpdate = true;
+    const jointCol = this.joints.geometry.getAttribute("color") as THREE.BufferAttribute;
+    for (let i = 0; i < this.boneNodes.length; i++) {
+      const c = chain.has(i) ? accent : joint;
+      jointCol.setXYZ(i, c.r, c.g, c.b);
+    }
+    jointCol.needsUpdate = true;
+  }
+
+  /** Hide the posing/aid overlays for a video capture (D2 "hide editing aids"). */
+  setCaptureHide(on: boolean) {
+    if (this.captureHide === on) return;
+    this.captureHide = on;
+    this.applyAidVisibility();
+    this.applySuppressed();
   }
 
   /** Rebuild the FK scratch (bone order + flat buffers) for a new clip. */
@@ -849,7 +955,7 @@ export class PreviewScene {
 
   /** Drive the enabled aids for the frame under `time`. */
   private updateAids(time: number) {
-    if (!this.clip) return;
+    if (!this.clip || this.aidsSuppressed()) return;
     const f = this.locate(this.clip, time).i;
     if (this.aidPaths) this.updatePath(f);
     if (this.aidOnion) this.updateOnion(f);
@@ -1153,6 +1259,7 @@ export class PreviewScene {
       this.gizmo?.detach();
     }
     this.updateAids(this.time); // the motion path follows the selection
+    if (this.aidSilhouette) this.refreshStickColors(); // accent chain follows too
     this.rigCbs?.onSelect(effector);
   }
 
@@ -1366,14 +1473,18 @@ export class PreviewScene {
     this.frameCamera();
   }
 
+  /** The user's grid preference — silhouette overrides visibility, not this. */
+  private gridOn = true;
+
   /** View menu: show/hide the floor grid. Returns the new visibility. */
   toggleGrid(): boolean {
-    if (this.grid) this.grid.visible = !this.grid.visible;
+    this.gridOn = !this.gridOn;
+    if (this.grid) this.grid.visible = this.gridOn && !this.aidSilhouette;
     return this.isGridVisible();
   }
 
   isGridVisible(): boolean {
-    return !!this.grid?.visible;
+    return this.gridOn;
   }
 
   private frameCamera() {
@@ -1404,7 +1515,22 @@ export class PreviewScene {
     }
     this.controls.update();
     this.renderer.render(this.scene, this.camera);
+    // Post-render hook (video capture compositing). Must run here: the WebGL
+    // buffer is only readable right after render (preserveDrawingBuffer off).
+    this.frameCb?.();
   };
+
+  /** The WebGL canvas (video capture targets it via captureStream). */
+  getCanvas(): HTMLCanvasElement {
+    return this.renderer.domElement;
+  }
+
+  private frameCb: (() => void) | null = null;
+
+  /** Called after every rendered frame (null clears). One consumer at a time. */
+  setFrameCallback(cb: (() => void) | null) {
+    this.frameCb = cb;
+  }
 
   // ---- playback controls -------------------------------------------------
   /** Review-speed multiplier — affects playback only, never the clip. */

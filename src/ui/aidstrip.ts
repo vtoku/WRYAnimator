@@ -8,7 +8,7 @@
 import { ICONS } from "./icons.ts";
 import { getPref, setPref, onPrefsChange, type Prefs } from "./prefs.ts";
 
-type AidKey = "aidPaths" | "aidOnion" | "aidCleanPlay";
+type AidKey = "aidPaths" | "aidOnion" | "aidSilhouette" | "aidCleanPlay";
 
 interface ParamDef {
   key: keyof Prefs;
@@ -56,6 +56,7 @@ const AIDS: AidDef[] = [
       },
     ],
   },
+  { key: "aidSilhouette", label: "Silhouette", icon: ICONS.silhouette, params: [] },
   { key: "aidCleanPlay", label: "Clean playback", icon: ICONS.cleanplay, params: [] },
 ];
 

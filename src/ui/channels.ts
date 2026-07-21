@@ -72,6 +72,42 @@ export interface ChannelTreeCallbacks {
   onChange(selected: Set<string>): void;
 }
 
+// ---- selection sets ---------------------------------------------------------
+// User-named bone sets, shown as a chip row above the tree's search box. The
+// HOST owns the list (it persists next to cleanOps in every rig-state carrier);
+// the tree only reads/edits it through this module-level host — same pattern as
+// main.ts's rigHotkeys singleton, so curves.ts needs no plumbing changes.
+
+export interface SelectionSet {
+  name: string;
+  bones: string[];
+}
+
+export interface SelectionSetsHost {
+  get(): SelectionSet[];
+  /** The chip row saved/renamed/deleted a set — persist the new list. */
+  onChange(sets: SelectionSet[]): void;
+}
+
+let setsHost: SelectionSetsHost | null = null;
+let activeTree: ChannelTree | null = null;
+
+/** Install (or clear) the per-recording selection-set store. */
+export function setSelectionSetsHost(host: SelectionSetsHost | null): void {
+  setsHost = host;
+  activeTree?.refreshSets();
+}
+
+/** Re-render the chip row after the host's list changed (undo, scene load). */
+export function refreshSelectionSets(): void {
+  activeTree?.refreshSets();
+}
+
+/** Recall a set from outside the tree (View menu) — same onChange path. */
+export function recallSelectionSet(bones: string[], additive = false): void {
+  activeTree?.applySet(bones, additive);
+}
+
 /**
  * A compact, scrollable tree of body-part groups down to individual finger
  * bones. Rows are multi-selectable (ctrl toggles, shift is treated as ctrl for
@@ -85,10 +121,14 @@ export class ChannelTree {
   private cbs: ChannelTreeCallbacks | null = null;
   private filter = "";
   private listEl: HTMLDivElement;
+  private setsEl: HTMLDivElement;
+  private setPopClose: (() => void) | null = null;
 
   constructor() {
     this.el = document.createElement("div");
     this.el.className = "cv-tree";
+    this.setsEl = document.createElement("div");
+    this.setsEl.className = "cv-sets";
     const search = document.createElement("input");
     search.className = "cv-search";
     search.type = "text";
@@ -97,12 +137,13 @@ export class ChannelTree {
     search.addEventListener("input", () => { this.filter = search.value.trim().toLowerCase(); this.render(); });
     this.listEl = document.createElement("div");
     this.listEl.className = "cv-tree-list";
-    this.el.append(search, this.listEl);
+    this.el.append(this.setsEl, search, this.listEl);
   }
 
   setGroups(groups: ChannelGroup[], cbs: ChannelTreeCallbacks) {
     this.groups = groups;
     this.cbs = cbs;
+    activeTree = this;
     this.render();
   }
 
@@ -139,11 +180,100 @@ export class ChannelTree {
     this.emit();
   }
 
+  /** Recall a set: replace the selection, or add to it. Emits onChange. */
+  applySet(bones: string[], additive: boolean) {
+    if (!additive) this.selected.clear();
+    for (const b of bones) this.selected.add(b);
+    this.render();
+    this.emit();
+  }
+
+  /** Re-render the selection-set chips (host list changed). */
+  refreshSets() {
+    this.renderSets();
+  }
+
+  private commitSets(sets: SelectionSet[]) {
+    setsHost?.onChange(sets);
+    this.renderSets();
+  }
+
+  /** Small rename/delete popover on a chip — closes on any outside press. */
+  private openSetMenu(x: number, y: number, set: SelectionSet) {
+    this.setPopClose?.();
+    const pop = document.createElement("div");
+    pop.className = "ctx-menu cv-set-pop";
+    const item = (label: string, action: () => void) => {
+      const b = document.createElement("button");
+      b.textContent = label;
+      b.addEventListener("click", () => { this.setPopClose?.(); action(); });
+      pop.appendChild(b);
+    };
+    item("Rename…", () => {
+      const name = prompt("Rename selection set:", set.name)?.trim();
+      if (!name || name === set.name) return;
+      const sets = (setsHost?.get() ?? [])
+        .filter((s) => s.name !== name) // renaming onto an existing name replaces it
+        .map((s) => (s.name === set.name ? { name, bones: [...s.bones] } : s));
+      this.commitSets(sets);
+    });
+    item("Delete", () => {
+      this.commitSets((setsHost?.get() ?? []).filter((s) => s.name !== set.name));
+    });
+    document.body.appendChild(pop);
+    pop.style.left = `${Math.min(x, window.innerWidth - 150)}px`;
+    pop.style.top = `${Math.min(y, window.innerHeight - 80)}px`;
+    const onDown = (e: PointerEvent) => { if (!pop.contains(e.target as Node)) this.setPopClose?.(); };
+    window.addEventListener("pointerdown", onDown);
+    this.setPopClose = () => {
+      window.removeEventListener("pointerdown", onDown);
+      pop.remove();
+      this.setPopClose = null;
+    };
+  }
+
+  private renderSets() {
+    this.setsEl.innerHTML = "";
+    if (!setsHost) { this.setsEl.hidden = true; return; }
+    this.setsEl.hidden = false;
+    const sets = setsHost.get();
+    const save = document.createElement("button");
+    save.className = "cv-set-chip cv-set-save";
+    save.textContent = "+ Save";
+    save.title = "Save the current bone selection as a named set";
+    save.disabled = this.selected.size === 0;
+    save.addEventListener("click", () => {
+      const name = prompt("Selection set name:", `Set ${sets.length + 1}`)?.trim();
+      if (!name) return;
+      const bones = [...this.selected];
+      const next = sets.some((s) => s.name === name)
+        ? sets.map((s) => (s.name === name ? { name, bones } : s))
+        : [...sets, { name, bones }];
+      this.commitSets(next);
+    });
+    this.setsEl.appendChild(save);
+    for (const set of sets) {
+      const chip = document.createElement("button");
+      chip.className = "cv-set-chip";
+      chip.textContent = set.name;
+      const allOn = set.bones.length > 0 && set.bones.every((b) => this.selected.has(b));
+      chip.classList.toggle("sel", allOn);
+      chip.title = `Recall "${set.name}" (${set.bones.length} bones). Shift-click adds to the selection; right-click to rename/delete.`;
+      chip.addEventListener("click", (e) => this.applySet(set.bones, e.shiftKey));
+      chip.addEventListener("contextmenu", (e) => {
+        e.preventDefault();
+        this.openSetMenu(e.clientX, e.clientY, set);
+      });
+      this.setsEl.appendChild(chip);
+    }
+  }
+
   private matches(name: string): boolean {
     return !this.filter || name.toLowerCase().includes(this.filter) || boneLabel(name).toLowerCase().includes(this.filter);
   }
 
   private render() {
+    this.renderSets();
     this.listEl.innerHTML = "";
     for (const g of this.groups) this.renderGroup(g, 0);
   }

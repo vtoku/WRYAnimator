@@ -25,7 +25,11 @@ import { applyModifiers, defaultModifiers, applyReach, anyReach } from "./rig/mo
 import { applyTimeWarp, warpMaps, type WarpKey } from "./rig/timewarp.ts";
 import { quatMul, quatDot, quatNormalize, quatToEulerZYX, eulerZYXToQuat, RAD2DEG } from "./convert/quat.ts";
 import type { CurveEase, DenseModel, DenseChannel, ChannelsConfig } from "./ui/curves.ts";
-import { buildChannelGroups, groupBones, boneLabel } from "./ui/channels.ts";
+import {
+  buildChannelGroups, groupBones, boneLabel,
+  setSelectionSetsHost, refreshSelectionSets, recallSelectionSet as recallSetInTree,
+  type SelectionSet,
+} from "./ui/channels.ts";
 import { RigPicker } from "./ui/picker.ts";
 import type { Vec3, Quat } from "./wanim/parse.ts";
 import { writeAnimationFbx, type SkinnedMeshExport } from "./fbx/animationFbx.ts";
@@ -143,6 +147,8 @@ function showCtxMenu(x: number, y: number, items: Array<{ label: string; action?
 }
 let transport: Transport | null = null;
 let transportDuration = 0; // scale the transport was built with (warp changes it)
+/** A preview video capture is running (File menu item disables meanwhile). */
+let previewRecording = false;
 
 // ---- menu bar ---------------------------------------------------------------
 // The File/Edit/View/Help actions live inside the per-recording buildPanel
@@ -169,6 +175,11 @@ interface MenuActions {
   autoFindLoop(): void;
   insertHold(): void;
   exportRetiming(): void;
+  /** File > Export preview video… (D2). */
+  exportPreviewVideo(): void;
+  /** Selection-set names for the View menu (D1). */
+  selectionSetNames(): string[];
+  recallSelectionSet(name: string): void;
   setDockTab(t: "clean" | "rig" | "export" | "info"): void;
   cyclePanels(): void;
   toggleGhost(): void;
@@ -274,6 +285,8 @@ const menuDefs: MenuDef[] = [
       { label: "Export VRMA", enabled: hasClip, action: () => menuActions?.export("vrma") },
       { label: "Export WANIM", enabled: hasClip, action: () => menuActions?.export("wanim") },
       { label: "Export Shogun target rig", enabled: shogunAvailable, action: dispatchExportShogun },
+      { separator: true },
+      { label: "Export preview video...", enabled: () => hasClip() && !previewRecording, action: () => menuActions?.exportPreviewVideo() },
     ],
   },
   {
@@ -332,7 +345,19 @@ const menuDefs: MenuDef[] = [
       // Viewport aids — same prefs the aid strip reads, so they stay in sync.
       { label: "Motion paths", checked: () => getPref("aidPaths"), action: () => setPref("aidPaths", !getPref("aidPaths")) },
       { label: "Onion skin", checked: () => getPref("aidOnion"), action: () => setPref("aidOnion", !getPref("aidOnion")) },
+      { label: "Silhouette", checked: () => getPref("aidSilhouette"), action: () => setPref("aidSilhouette", !getPref("aidSilhouette")) },
       { label: "Clean playback", checked: () => getPref("aidCleanPlay"), action: () => setPref("aidCleanPlay", !getPref("aidCleanPlay")) },
+      { separator: true },
+      // Named bone sets saved from the channel tree — keyboard-reachable here.
+      {
+        label: "Selection sets",
+        enabled: () => (menuActions?.selectionSetNames().length ?? 0) > 0,
+        submenu: () =>
+          (menuActions?.selectionSetNames() ?? []).map((n) => ({
+            label: n,
+            action: () => menuActions?.recallSelectionSet(n),
+          })),
+      },
       { separator: true },
       { label: "Collapse dock", checked: () => getPref("dockCollapsed"), action: () => setDockCollapsed(dock, !getPref("dockCollapsed")) },
       { label: "Layout: Default", action: () => applyLayoutPreset("default") },
@@ -1175,6 +1200,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
   const warpKeys: WarpKey[] = []; // time-warp speed ramp (source-time keys)
   const rangeSmooths: RangeSmooth[] = []; // user-applied range smoothing passes
   const cleanOps: CleanOp[] = []; // scoped non-destructive filter stack
+  const selectionSets: SelectionSet[] = []; // named bone sets (channel tree chips)
   let loopOp: LoopOp | null = null; // make-loop cycle blend (chip-listed)
   let currentPlants: PlantSpan[] = []; // last detected plants (drawing + chips)
   let rawRefCache: { gen: number; clip: ConvertedClip } | null = null; // reach reference
@@ -1362,7 +1388,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
   const rigSnapshot = () =>
     JSON.stringify({
       layers: rigLayers, mods, counter: layerCounter, active: activeLayerIdx,
-      warp: warpKeys, ranges: rangeSmooths, cleanOps, loop: loopOp, feetPlants: feetPlantRemoved, pipeline: pipelineSettings(),
+      warp: warpKeys, ranges: rangeSmooths, cleanOps, selectionSets, loop: loopOp, feetPlants: feetPlantRemoved, pipeline: pipelineSettings(),
     });
   function updateUndoUi() {
     rigUndoBtn.disabled = !undoStack.length;
@@ -1385,6 +1411,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
       warp?: WarpKey[];
       ranges?: RangeSmooth[];
       cleanOps?: CleanOp[];
+      selectionSets?: SelectionSet[];
       loop?: LoopOp | null;
       feetPlants?: PlantSpan[];
       pipeline?: PipelineSettings;
@@ -1402,6 +1429,8 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     warpKeys.splice(0, warpKeys.length, ...(d.warp ?? []));
     rangeSmooths.splice(0, rangeSmooths.length, ...(d.ranges ?? []));
     cleanOps.splice(0, cleanOps.length, ...(d.cleanOps ?? []));
+    selectionSets.splice(0, selectionSets.length, ...(d.selectionSets ?? []));
+    refreshSelectionSets();
     loopOp = d.loop ?? null;
     feetPlantRemoved.splice(0, feetPlantRemoved.length, ...(d.feetPlants ?? []));
     renderFilters();
@@ -3088,6 +3117,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
         warpKeys.length ||
         rangeSmooths.length ||
         cleanOps.length ||
+        selectionSets.length ||
         !!loopOp ||
         feetPlantRemoved.length ||
         JSON.stringify(mods) !== JSON.stringify(defaultModifiers());
@@ -3096,7 +3126,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
           rigCacheKey,
           JSON.stringify({
             v: 3, layers: rigLayers, mods, counter: layerCounter, warp: warpKeys, ranges: rangeSmooths,
-            cleanOps, loop: loopOp, feetPlants: feetPlantRemoved, pins: [...pinnedEffectors], fk: [...fkLimbs], ikfk: { ...ikfk },
+            cleanOps, selectionSets, loop: loopOp, feetPlants: feetPlantRemoved, pins: [...pinnedEffectors], fk: [...fkLimbs], ikfk: { ...ikfk },
             settings: sceneSettings(),
           }),
         );
@@ -3114,6 +3144,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     warp?: WarpKey[];
     ranges?: RangeSmooth[];
     cleanOps?: CleanOp[];
+    selectionSets?: SelectionSet[];
     loop?: LoopOp | null;
     feetPlants?: PlantSpan[];
     pins?: EffectorId[];
@@ -3145,6 +3176,9 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     warpKeys.splice(0, warpKeys.length, ...(d.warp ?? []));
     rangeSmooths.splice(0, rangeSmooths.length, ...(d.ranges ?? []));
     cleanOps.splice(0, cleanOps.length, ...(d.cleanOps ?? []));
+    // Absent in docs from before selection sets existed — start empty.
+    selectionSets.splice(0, selectionSets.length, ...(d.selectionSets ?? []));
+    refreshSelectionSets();
     loopOp = d.loop ?? null; // absent in older caches/scenes — no loop
     feetPlantRemoved.splice(0, feetPlantRemoved.length, ...(d.feetPlants ?? []));
     layerCounter = d.counter ?? rigLayers.length;
@@ -3191,7 +3225,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
   (document.getElementById("rigSave") as HTMLButtonElement).addEventListener("click", () => {
     if (!loaded) return;
     const json = JSON.stringify(
-      { v: 3, layers: rigLayers, mods, counter: layerCounter, warp: warpKeys, ranges: rangeSmooths, cleanOps, loop: loopOp, feetPlants: feetPlantRemoved, pins: [...pinnedEffectors], fk: [...fkLimbs], ikfk: { ...ikfk } },
+      { v: 3, layers: rigLayers, mods, counter: layerCounter, warp: warpKeys, ranges: rangeSmooths, cleanOps, selectionSets, loop: loopOp, feetPlants: feetPlantRemoved, pins: [...pinnedEffectors], fk: [...fkLimbs], ikfk: { ...ikfk } },
       null,
       1,
     );
@@ -3278,7 +3312,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
       name: loaded.name,
       source: loaded.source,
       settings: sceneSettings(),
-      rig: { v: 3, layers: rigLayers, mods, counter: layerCounter, warp: warpKeys, ranges: rangeSmooths, cleanOps, loop: loopOp, feetPlants: feetPlantRemoved, pins: [...pinnedEffectors], fk: [...fkLimbs], ikfk: { ...ikfk } },
+      rig: { v: 3, layers: rigLayers, mods, counter: layerCounter, warp: warpKeys, ranges: rangeSmooths, cleanOps, selectionSets, loop: loopOp, feetPlants: feetPlantRemoved, pins: [...pinnedEffectors], fk: [...fkLimbs], ikfk: { ...ikfk } },
       // The original source bytes, so the project reopens byte-for-byte.
       wanim: loaded.source === "wanim" ? rawB64 : undefined,
       fbx: loaded.source === "fbx" ? rawB64 : undefined,
@@ -3311,6 +3345,8 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     transport?.onMarkersChange((m) => { sceneMarkers = m; saveRigCache(); });
     transport?.onTrimChange(() => updateRetimeInfo()); // live export readout
     wireChannels();
+    // Test hook: drive scripts set trim ranges through the transport.
+    (window as unknown as { __transport?: Transport | null }).__transport = transport;
   }
 
   // ---- Channels mode (dense f-curve view) ---------------------------------
@@ -3366,6 +3402,16 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
   function wireChannels() {
     transport?.setChannels(channelsConfig);
   }
+  // Selection sets (D1): the channel tree's chip row reads/edits this panel's
+  // list; saves/renames/deletes ride the same undo + persistence as cleanOps.
+  setSelectionSetsHost({
+    get: () => selectionSets,
+    onChange: (sets) => {
+      pushHistory(); // snapshot BEFORE the mutation, like every other edit
+      selectionSets.splice(0, selectionSets.length, ...sets);
+      saveRigCache();
+    },
+  });
   wireTransportScene();
 
   // A dropped scene file restores rig + settings over the freshly loaded clip.
@@ -3696,6 +3742,130 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     fpsSel.scrollIntoView({ block: "center" });
   }
 
+  /** File > Export preview video… (D2): play the trim range once while
+   *  MediaRecorder captures the preview canvas, then download the .webm. */
+  function openPreviewVideoDialog() {
+    if (!loaded || !preview || !transport || previewRecording) return;
+    const trim = transport.getTrim();
+    const body = document.createElement("div");
+    body.className = "modal-body";
+    body.innerHTML = `
+      <p class="note">Plays the trim range (${fmtTime(trim.start)}–${fmtTime(trim.end)}) once in real time and records the 3D preview to a .webm video.</p>
+      <label class="field"><span>Resolution</span>
+        <select id="pvRes">
+          <option value="canvas" selected>Canvas native</option>
+          <option value="1080">1920×1080 (letterboxed)</option>
+        </select>
+      </label>
+      <label class="field"><span>Hide editing aids</span><input id="pvAids" type="checkbox" checked /></label>
+      <div class="rig-row">
+        <button id="pvRecord" class="button primary">Record</button>
+        <button id="pvCancel" class="button ghost" hidden>Cancel</button>
+      </div>
+      <p id="pvStatus" class="clean-stats"></p>
+    `;
+    const close = openModal("Export preview video", body);
+    const resSel = body.querySelector("#pvRes") as HTMLSelectElement;
+    const aidsChk = body.querySelector("#pvAids") as HTMLInputElement;
+    const recordBtn = body.querySelector("#pvRecord") as HTMLButtonElement;
+    const cancelBtn = body.querySelector("#pvCancel") as HTMLButtonElement;
+    const statusEl = body.querySelector("#pvStatus") as HTMLParagraphElement;
+
+    recordBtn.addEventListener("click", () => {
+      if (!loaded || !preview || !transport || previewRecording) return;
+      const tr = transport.getTrim();
+      if (tr.end - tr.start < 0.1) { showError("Trim range is too short to record."); return; }
+      const src = preview.getCanvas();
+      let stream: MediaStream;
+      if (resSel.value === "1080") {
+        // Composite into a fixed 1920×1080 canvas right after each rendered
+        // frame — the WebGL buffer is only readable then (no preserved buffer).
+        const comp = document.createElement("canvas");
+        comp.width = 1920;
+        comp.height = 1080;
+        const ctx = comp.getContext("2d")!;
+        preview.setFrameCallback(() => {
+          ctx.fillStyle = "#000";
+          ctx.fillRect(0, 0, comp.width, comp.height);
+          const k = Math.min(comp.width / src.width, comp.height / src.height);
+          const w = src.width * k;
+          const h = src.height * k;
+          ctx.drawImage(src, (comp.width - w) / 2, (comp.height - h) / 2, w, h);
+        });
+        stream = comp.captureStream(60);
+      } else {
+        stream = src.captureStream(60);
+      }
+      const mime = ["video/webm;codecs=vp9", "video/webm;codecs=vp8", "video/webm"]
+        .find((m) => MediaRecorder.isTypeSupported(m));
+      if (!mime) {
+        preview.setFrameCallback(null);
+        for (const t of stream.getTracks()) t.stop();
+        showError("This browser can't record webm video (MediaRecorder unsupported).");
+        return;
+      }
+      const rec = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 12_000_000 });
+      const chunks: Blob[] = [];
+      rec.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
+      previewRecording = true;
+      const hideAids = aidsChk.checked;
+      if (hideAids) preview.setCaptureHide(true); // clean playback's hiding path
+      recordBtn.disabled = true;
+      resSel.disabled = true;
+      aidsChk.disabled = true;
+      cancelBtn.hidden = false;
+      const span = tr.end - tr.start;
+      let cancelled = false;
+      let lastT = tr.start;
+      preview.pause();
+      preview.seek(tr.start);
+      rec.start(200);
+      preview.play();
+      const stopAll = () => {
+        window.clearInterval(tick);
+        preview?.pause();
+        if (hideAids) preview?.setCaptureHide(false);
+        preview?.setFrameCallback(null);
+        previewRecording = false;
+      };
+      const finish = () => {
+        stopAll();
+        rec.stop();
+      };
+      const doCancel = () => {
+        cancelled = true;
+        stopAll();
+        if (rec.state !== "inactive") rec.stop();
+        recordBtn.disabled = false;
+        resSel.disabled = false;
+        aidsChk.disabled = false;
+        cancelBtn.hidden = true;
+        statusEl.textContent = "Recording cancelled.";
+      };
+      const tick = window.setInterval(() => {
+        if (!preview) { doCancel(); return; }
+        const t = preview.getTime();
+        // Done when the playhead reaches the trim end (or looped past it).
+        const done = t >= tr.end - 0.05 || t < lastT - 0.25;
+        lastT = t;
+        statusEl.textContent = `Recording… ${fmtTime(Math.min(Math.max(0, t - tr.start), span))} / ${fmtTime(span)}`;
+        if (!body.isConnected) { doCancel(); return; } // dialog closed (Esc)
+        if (done) finish();
+      }, 100);
+      cancelBtn.addEventListener("click", doCancel, { once: true });
+      rec.onstop = () => {
+        for (const t of stream.getTracks()) t.stop();
+        if (cancelled) return;
+        statusEl.textContent = "Encoding…";
+        const blob = new Blob(chunks, { type: mime });
+        void blob.arrayBuffer().then((buf) => {
+          downloadBytes(`${sanitizeFilename(loaded?.name ?? "preview")}_preview.webm`, new Uint8Array(buf));
+          close();
+        });
+      };
+    });
+  }
+
   // Expose this panel's actions to the (persistent) menu bar.
   menuActions = {
     saveScene: () => saveScene(),
@@ -3715,6 +3885,12 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     autoFindLoop: () => { void doAutoFindLoop(); },
     insertHold: openInsertHoldDialog,
     exportRetiming: focusExportRetiming,
+    exportPreviewVideo: openPreviewVideoDialog,
+    selectionSetNames: () => selectionSets.map((s) => s.name),
+    recallSelectionSet: (name) => {
+      const set = selectionSets.find((s) => s.name === name);
+      if (set) recallSetInTree(set.bones, false); // same onChange path as a chip
+    },
     setDockTab: (t) => setTab(t),
     cyclePanels: () => transport?.cyclePanel(),
     toggleGhost: () => ghostBtn.click(),
@@ -3743,6 +3919,7 @@ function showEmptyEditor() {
   rigHotkeys = null;
   transportHotkeys = null;
   menuActions = null;
+  setSelectionSetsHost(null); // the chip row hides with no recording
   transport?.dispose();
   transport = null;
   preview?.clear();
@@ -4183,6 +4360,7 @@ function applyAidPrefs() {
   const p = getPrefs();
   preview?.setAid("paths", p.aidPaths, { pathWindow: p.aidPathWindow, pathDots: p.aidPathDots });
   preview?.setAid("onion", p.aidOnion, { onionCount: p.aidOnionCount, onionStep: p.aidOnionStep, onionOpacity: p.aidOnionOpacity });
+  preview?.setAid("silhouette", p.aidSilhouette);
   preview?.setAid("cleanPlay", p.aidCleanPlay);
 }
 createAidStrip(viewport);

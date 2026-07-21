@@ -956,6 +956,52 @@ main:has(.loaded-state:not([hidden])) {
   flex: 1;
 }
 
+/* Selection-set chips above the channel-tree search box. */
+.cv-sets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+}
+
+.cv-set-chip {
+  background: rgba(40, 46, 56, 0.9);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 0.62rem;
+  line-height: 1;
+  padding: 3px 8px;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cv-set-chip:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+.cv-set-chip.sel {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.cv-set-save {
+  border-style: dashed;
+  color: var(--text-dim);
+}
+
+.cv-set-chip:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* Rename/delete popover for a set chip (shares the ctx-menu look). */
+.cv-set-pop {
+  min-width: 130px;
+}
+
 .cv-tree-list {
   overflow-y: auto;
   font-size: 0.7rem;

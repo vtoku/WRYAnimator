@@ -32,7 +32,8 @@ console.log("boot: editor", bootEditor, "· canvas", bootCanvas, "· prompt", bo
   "· menus", bootMenus, "· no dropzone", noDropzone, "· transport disabled", transportDisabledEmpty);
 
 // 1b. Help > Keyboard shortcuts overlay lists every shared-table entry.
-await page.click("#menubar .menu-btn:nth-child(4)");
+// By label, not index — menu count changes as menus are added (Time, etc.).
+await page.click("#menubar .menu-btn:has-text('Help')");
 await page.waitForSelector(".menu-panel");
 await page.click(".menu-panel .menu-item"); // first Help item = Keyboard shortcuts
 await page.waitForSelector(".shortcuts-body");
