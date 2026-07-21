@@ -135,12 +135,13 @@ buttons in labeled groups with separators, every button also a menu item and
 a shortcut (toolbar = fast path, never the only path):
 
 ```
-[Open][Save] | [Undo][Redo] | [Move][Rotate][Local] | [Key pose][Auto-key] |
-[Hold][Ghost] | ······························ [name] [FBX ▾] [Download]
+[Move][Rotate][Local] | [Key pose][Auto-key] | [Hold][Ghost] |
+······························ [name] [FBX ▾] [Download]
 ```
 
-- **File group** — Open, Save scene.
-- **History group** — Undo, Redo (enabled state live).
+File and history actions stay in the File/Edit menus + shortcuts — the
+toolbar is for EDITING tools you reach for constantly, not menu duplicates.
+
 - **Manipulate group** — Move (W), Rotate (E), Local/World (Q); the active
   tool is accent-highlighted.
 - **Keying group** — Key full pose at playhead, Auto-key toggle (moves out
