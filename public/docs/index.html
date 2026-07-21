@@ -90,7 +90,7 @@
 <p>Your edits are cached automatically per recording. If the tab closes or reloads while you're working, the session comes right back; an older session isn't reopened silently — a small "Restore last session" bar offers it instead. <span class="menu">File → New scene</span> starts fresh and forgets the cached session, and <span class="menu">File → Save scene</span> writes everything to a file you can share or archive.</p>
 <figure>
   <img src="img/overview.png" alt="The WRYAnimator editor: 3D preview, dock panels on the right, transport at the bottom." loading="lazy" />
-  <figcaption>The editor: 3D preview with the viewport aid strip (top right of the canvas), the Clean / Rig / Export / Info dock, and the zoomable transport.</figcaption>
+  <figcaption>The editor: the toolbar (manipulation, keying, compare), the 3D preview with the viewport aid strip, the Clip / Rig inspector, and the zoomable transport with the layers rail.</figcaption>
 </figure>
 <p>You can also open a <code>.fbx</code> animation, or start an <em>asset-only</em> session from a VRM/FBX body with no recording at all — useful for authoring poses and short clips from scratch.</p>
 
@@ -118,8 +118,8 @@
 <ul>
   <li><strong>Trim handles</strong> (yellow) set the playback loop and the export range. <strong>In</strong>/<strong>Out</strong> set them at the playhead; <strong>Reset</strong> clears.</li>
   <li>The <strong>frame box</strong> jumps to an exact frame; the magnet snaps drags to keys and the playhead.</li>
-  <li><strong>Keys ▾ / Curves ▾</strong> cycles the under-strip panel between the dope sheet and the curve editor.</li>
-  <li>Ruler markers, filter-range underlines, and cleaning tick marks show where things happened on the timeline.</li>
+  <li>The <strong>Keys | Curves | Hide</strong> switcher picks the under-strip panel; the <strong>layers rail</strong> beside it manages your animation layers (add, select, mute, weight — the active layer expands with mode and fade controls).</li>
+  <li><strong>Strip objects</strong>: everything time-scoped — scoped filters, range smooths, the loop, speed keys, foot plants — lives on lanes under the track as clickable pills. Click one to open its properties on the Clip page (live-editing sliders, Zoom, Delete); press <kbd>Delete</kbd> to remove it.</li>
 </ul>
 
 <h2 id="cleaning">Cleaning &amp; scoped filters</h2>
@@ -137,8 +137,8 @@
   <figcaption>Band-select a span on the Channels curves, right-click, and apply any filter to exactly those bones over exactly that span. "Set trim to selection" moves the trim handles to the band.</figcaption>
 </figure>
 <figure>
-  <img src="img/filters.png" alt="The scoped filter stack with a Butterworth chip." loading="lazy" />
-  <figcaption>Each filter becomes a chip in the Clean tab — click to zoom the timeline to its range, untick to bypass, × to delete. Colored underlines on the timeline show where each acts.</figcaption>
+  <img src="img/filters.png" alt="Strip objects on the timeline lanes with the selected filter's properties panel." loading="lazy" />
+  <figcaption>Every filter is a strip object on the timeline lanes — click to select it and edit its strength live in the properties panel; Delete removes it.</figcaption>
 </figure>
 
 <h2 id="curves">Curve editor</h2>
@@ -184,9 +184,10 @@
 </figure>
 
 <h2 id="export">Exporting</h2>
+<p>Everything lives in one dialog: <span class="menu">File → Export…</span> (<kbd>Ctrl+E</kbd>) — output name, format, and Download on top, all settings beneath.</p>
 <figure>
-  <img src="img/export.png" alt="The Export tab." loading="lazy" />
-  <figcaption>The Export tab: frame rate + speed with a live frame-count readout, bone naming, rest pose, proportions, face blendshapes, body mesh, and key-reduction tolerances.</figcaption>
+  <img src="img/export.png" alt="The Export dialog." loading="lazy" />
+  <figcaption>The Export dialog: name/format/Download, frame rate + speed with a live frame-count readout, bone naming, rest pose, proportions, face blendshapes, body mesh, and key-reduction tolerances.</figcaption>
 </figure>
 <ul>
   <li><strong>FBX</strong> — binary FBX 7.5 (DCC-compatible): skeleton, animation take, a one-key T-pose take for characterization, optional skinned body mesh and face blendshapes. Redundant keys are dropped at write time within a visually lossless tolerance, so files stay lean — pair with the Key reduce filter for the biggest savings.</li>
