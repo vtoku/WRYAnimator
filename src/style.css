@@ -1927,3 +1927,22 @@ kbd {
   margin-bottom: 0.5rem;
 }
 .export-actions .eb-name { flex: 1; min-width: 8rem; }
+
+/* Active layer's expanded properties in the rail. */
+.rail-detail {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 6px 4px 18px;
+}
+
+.rail-detail select {
+  font-size: 0.68rem;
+  padding: 1px 2px;
+  background: rgba(40, 46, 56, 0.9);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+}
+
+.rail-detail input[type="range"] { width: 44px; }

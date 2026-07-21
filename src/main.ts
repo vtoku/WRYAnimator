@@ -743,10 +743,8 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
 
     <div class="tab" id="tab-rig">
     <div id="pickerMount"></div>
-    <h4 class="group">Layers <span class="hint-i" title="FK/IK adjustment layers, DCC-style: additive nudges the motion, override replaces it. Add a layer, pause, then drag a handle on the figure; a key lands at the playhead. Spheres (hips, hands, feet) move with IK and rotate; the small diamonds on the body bones rotate FK-style. On the timeline: right-click a key for copy/paste/delete, shift-drag to select several, ctrl-click to add one, drag a key to retime it. Edits auto-save for this recording.">ⓘ</span></h4>
-    <div id="rigLayers" class="rig-layers"></div>
+    <h4 class="group">Rig <span class="hint-i" title="Layers live in the LAYERS rail beside the timeline panels (add, select, mute, weight; the active layer expands with mode/fade controls). Drag a handle on the figure and a key lands at the playhead on the active layer. On the timeline: right-click a key for copy/paste/delete, shift-drag to select several, drag to retime. Edits auto-save for this recording.">ⓘ</span></h4>
     <div class="rig-row">
-      <button id="rigAdd" class="button ghost">Add layer</button>
       <button id="rigSave" class="button ghost" title="Download the layers + modifiers as a .rig.json file you can reload later or on another machine.">Save…</button>
       <button id="rigLoadBtn" class="button ghost" title="Load a saved .rig.json onto this recording.">Load…</button>
     </div>
@@ -1360,8 +1358,8 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
   // ---- control rig -------------------------------------------------------
   // (rigLayers/rigBaseClip are declared with the pipeline state above the
   // compare block; the closures in buildDisplay/export read them.)
-  const rigLayersEl = document.getElementById("rigLayers") as HTMLDivElement;
-  const rigAddBtn = document.getElementById("rigAdd") as HTMLButtonElement;
+  const rigLayersEl = document.getElementById("rigLayers") as HTMLDivElement | null;
+  const rigAddBtn = document.getElementById("rigAdd") as HTMLButtonElement | null;
   const gizmoMoveBtn = document.getElementById("gizmoMove") as HTMLButtonElement;
   const gizmoRotateBtn = document.getElementById("gizmoRotate") as HTMLButtonElement;
   function setGizmoModeUi(m: "translate" | "rotate") {
@@ -2229,7 +2227,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
       add.className = "rail-btn";
       add.textContent = "+";
       add.title = "Add a layer";
-      add.addEventListener("click", () => rigAddBtn.click());
+      add.addEventListener("click", addRigLayer);
       head.append(title, add);
       rail.appendChild(head);
       for (let i = rigLayers.length - 1; i >= 0; i--) {
@@ -2267,138 +2265,89 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
         });
         row.append(name, weight, mute);
         rail.appendChild(row);
+        if (i === activeLayerIdx) {
+          // The active layer expands with its full properties.
+          const detail = document.createElement("div");
+          detail.className = "rail-detail";
+          const mode = document.createElement("select");
+          mode.title = "Additive nudges the motion by a delta; override replaces it with the keyed pose (scaled by weight).";
+          for (const m of ["additive", "override"] as const) {
+            const o = document.createElement("option");
+            o.value = m; o.textContent = m;
+            if (layer.mode === m) o.selected = true;
+            mode.appendChild(o);
+          }
+          mode.addEventListener("change", () => {
+            pushHistory();
+            // Convert existing keys so the pose survives the mode switch.
+            if (rigBaseClip) convertLayerMode(rigBaseClip, rigLayers, i, mode.value as RigLayer["mode"]);
+            else layer.mode = mode.value as RigLayer["mode"];
+            rebakeRig();
+            renderRigLayers();
+          });
+          const extent = document.createElement("select");
+          extent.title = "Fade: keys ease in/out around the keyed range. Hold: the first/last key extends across the whole clip.";
+          for (const x of ["fade", "hold"] as const) {
+            const o = document.createElement("option");
+            o.value = x; o.textContent = x;
+            if (layer.extent === x) o.selected = true;
+            extent.appendChild(o);
+          }
+          extent.addEventListener("change", () => {
+            pushHistory();
+            layer.extent = extent.value as RigLayer["extent"];
+            rebakeRig();
+            renderRigLayers();
+          });
+          detail.append(mode, extent);
+          if (layer.extent === "fade") {
+            const fade = document.createElement("input");
+            fade.type = "range";
+            fade.min = "0.1"; fade.max = "2"; fade.step = "0.1";
+            fade.value = String(layer.fadeS);
+            fade.title = `Fade ${layer.fadeS.toFixed(1)}s — how long a correction eases in/out around its keys`;
+            fade.addEventListener("input", () => {
+              layer.fadeS = Number(fade.value);
+              fade.title = `Fade ${layer.fadeS.toFixed(1)}s`;
+              rebakeRig();
+            });
+            fade.addEventListener("change", () => saveRigCache());
+            detail.appendChild(fade);
+          }
+          const del = document.createElement("button");
+          del.className = "rail-btn";
+          del.textContent = "×";
+          del.title = "Delete this layer and its keys";
+          del.addEventListener("click", () => {
+            pushHistory();
+            rigLayers.splice(i, 1);
+            if (activeLayerIdx >= rigLayers.length) activeLayerIdx = rigLayers.length - 1;
+            renderRigLayers();
+            rebakeRig();
+            updateRigEditor();
+          });
+          detail.appendChild(del);
+          rail.appendChild(detail);
+        }
       }
     }
     transport?.syncRail();
   }
 
   function renderRigLayers() {
+    // The rail beside the timeline panels is THE layers UI now.
     renderLayerRail();
-    rigLayersEl.innerHTML = "";
-    rigLayers.forEach((layer, i) => {
-      const row = document.createElement("div");
-      row.className = "rig-layer" + (i === activeLayerIdx ? " active" : "");
-      row.addEventListener("click", () => {
-        if (activeLayerIdx !== i) { activeLayerIdx = i; renderRigLayers(); }
-      });
-
-      const en = document.createElement("input");
-      en.type = "checkbox";
-      en.checked = layer.enabled;
-      en.title = "Mute/unmute this layer";
-      en.addEventListener("click", (e) => e.stopPropagation());
-      en.addEventListener("change", () => { pushHistory(); layer.enabled = en.checked; rebakeRig(); });
-
-      const name = document.createElement("span");
-      name.className = "rig-name";
-      name.textContent = layer.name;
-
-      const mode = document.createElement("select");
-      mode.title = "Additive nudges the motion by a delta; override replaces it with the keyed pose (scaled by weight).";
-      for (const m of ["additive", "override"] as const) {
-        const o = document.createElement("option");
-        o.value = m;
-        o.textContent = m;
-        if (layer.mode === m) o.selected = true;
-        mode.appendChild(o);
-      }
-      mode.addEventListener("click", (e) => e.stopPropagation());
-      mode.addEventListener("change", () => {
-        pushHistory();
-        // Convert existing keys so the pose survives the mode switch.
-        if (rigBaseClip) convertLayerMode(rigBaseClip, rigLayers, i, mode.value as RigLayer["mode"]);
-        else layer.mode = mode.value as RigLayer["mode"];
-        rebakeRig();
-      });
-
-      const extent = document.createElement("select");
-      extent.title = "Fade: keys ease in/out around the keyed range, so one key is a local correction. Hold: the first/last key extends across the whole clip, DCC hold style.";
-      for (const x of ["fade", "hold"] as const) {
-        const o = document.createElement("option");
-        o.value = x;
-        o.textContent = x;
-        if (layer.extent === x) o.selected = true;
-        extent.appendChild(o);
-      }
-      extent.addEventListener("click", (e) => e.stopPropagation());
-      extent.addEventListener("change", () => {
-        pushHistory();
-        layer.extent = extent.value as RigLayer["extent"];
-        renderRigLayers(); // fade slider visibility
-        rebakeRig();
-      });
-
-      const weight = document.createElement("input");
-      weight.type = "range";
-      weight.min = "0"; weight.max = "100"; weight.step = "5";
-      weight.value = String(Math.round(layer.weight * 100));
-      weight.title = "Layer weight";
-      weight.addEventListener("click", (e) => e.stopPropagation());
-      let weightSnap: string | null = null; // pre-drag state, captured on first input
-      weight.addEventListener("input", () => {
-        weightSnap ??= rigSnapshot();
-        layer.weight = Number(weight.value) / 100;
-      });
-      weight.addEventListener("change", () => {
-        if (weightSnap) { pushHistorySnap(weightSnap); weightSnap = null; }
-        rebakeRig();
-      });
-
-      // Second line: weight + (for fade layers) the fade-time slider.
-      const sub = document.createElement("div");
-      sub.className = "rig-sub";
-      const wLabel = document.createElement("span");
-      wLabel.textContent = "weight";
-      sub.append(wLabel, weight);
-      if (layer.extent === "fade") {
-        const fLabel = document.createElement("span");
-        fLabel.textContent = `fade ${layer.fadeS.toFixed(1)}s`;
-        const fade = document.createElement("input");
-        fade.type = "range";
-        fade.min = "0.1"; fade.max = "2"; fade.step = "0.1";
-        fade.value = String(layer.fadeS);
-        fade.title = "How long a correction eases in/out around its keys";
-        fade.addEventListener("click", (e) => e.stopPropagation());
-        let fadeSnap: string | null = null;
-        fade.addEventListener("input", () => {
-          fadeSnap ??= rigSnapshot();
-          layer.fadeS = Number(fade.value);
-          fLabel.textContent = `fade ${layer.fadeS.toFixed(1)}s`;
-        });
-        fade.addEventListener("change", () => {
-          if (fadeSnap) { pushHistorySnap(fadeSnap); fadeSnap = null; }
-          rebakeRig();
-        });
-        sub.append(fLabel, fade);
-      }
-
-      const del = document.createElement("button");
-      del.className = "rig-del";
-      del.textContent = "×";
-      del.title = "Delete this layer and its keys";
-      del.addEventListener("click", (e) => {
-        e.stopPropagation();
-        pushHistory();
-        rigLayers.splice(i, 1);
-        if (activeLayerIdx >= rigLayers.length) activeLayerIdx = rigLayers.length - 1;
-        renderRigLayers();
-        rebakeRig();
-      });
-
-      row.append(en, name, mode, extent, del, sub);
-      rigLayersEl.appendChild(row);
-    });
-    syncRigVisibility();
-    updateRigEditor();
+    if (rigLayersEl) rigLayersEl.innerHTML = "";
   }
 
-  rigAddBtn.addEventListener("click", () => {
+  function addRigLayer() {
     pushHistory();
     rigLayers.push(makeLayer(`Layer ${++layerCounter}`));
     activeLayerIdx = rigLayers.length - 1;
     renderRigLayers();
     saveRigCache();
-  });
+  }
+  rigAddBtn?.addEventListener("click", addRigLayer);
 
   // Auto-build: every import gets a working rig with zero clicks — an empty
   // Layer 1 ready to receive keys. Effectors for absent bones are dropped by
