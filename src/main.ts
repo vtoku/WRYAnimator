@@ -2868,13 +2868,19 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
 
   const plantHintEl = document.getElementById("plantHint") as HTMLParagraphElement;
   const plantListEl = document.getElementById("plantList") as HTMLDivElement;
-  /** Chips for the detected foot plants; × removes one (per-plant control). */
+  /** Chips for the detected foot plants; × removes one (per-plant control).
+   *  Long recordings detect dozens — cap the list behind a "+N more" toggle
+   *  so the panel isn't dominated by plant chips. */
+  let plantsExpanded = false;
+  const PLANT_CHIP_CAP = 6;
   function renderPlants() {
     plantListEl.innerHTML = "";
     const show = fixFeetChk.checked && currentPlants.length > 0;
     plantHintEl.hidden = !show;
     if (!show) return;
-    for (const p of [...currentPlants].sort((a, b) => a.t0 - b.t0)) {
+    const sorted = [...currentPlants].sort((a, b) => a.t0 - b.t0);
+    const visible = plantsExpanded ? sorted : sorted.slice(0, PLANT_CHIP_CAP);
+    for (const p of visible) {
       const chip = document.createElement("span");
       chip.className = "rig-key";
       const label = document.createElement("button");
@@ -2893,6 +2899,16 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
       });
       chip.append(label, del);
       plantListEl.appendChild(chip);
+    }
+    if (sorted.length > PLANT_CHIP_CAP) {
+      const more = document.createElement("button");
+      more.className = "button ghost";
+      more.textContent = plantsExpanded ? "Show fewer" : `+${sorted.length - PLANT_CHIP_CAP} more`;
+      more.addEventListener("click", () => {
+        plantsExpanded = !plantsExpanded;
+        renderPlants();
+      });
+      plantListEl.appendChild(more);
     }
   }
 
@@ -2953,7 +2969,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
 
   /** Push a scoped CleanOp for the current channel selection over `span`.
    * Shared by the Filters panel button and the Channels-mode band menu. */
-  function addCleanOpScoped(filter: CleanFilter, span: { t0: number; t1: number }): boolean {
+  function addCleanOpScoped(filter: CleanFilter, span: { t0: number; t1: number }, explicit?: number): boolean {
     if (!loaded) return false;
     // Read the scope from the TREE, not the cached copy — viewport/picker
     // selection syncs the tree without firing onSelect, so the copy can be
@@ -2964,9 +2980,9 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
       showError("Select the bones first: open the Rig timeline's Channels view and pick channels (a group or single fingers).");
       return false;
     }
-    // The band menu applies whatever the param input holds when its type
-    // matches, else that filter's default.
-    const value = filterTypeSel.value === filter ? Number(filterParamEl.value) : FILTER_DEFAULT[filter].value;
+    // Explicit value (settings dialog) wins; else the param input when its
+    // type matches; else that filter's default.
+    const value = explicit ?? (filterTypeSel.value === filter ? Number(filterParamEl.value) : FILTER_DEFAULT[filter].value);
     pushHistory();
     cleanOps.push({
       id: `op${Date.now().toString(36)}`,
@@ -3415,9 +3431,33 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
         ["despike", "Despike"],
         ["reduce", "Key reduce"],
       ];
+      /** Small settings dialog: strength prefilled, Apply commits the op. */
+      const openFilterDialog = (f: CleanFilter, name: string) => {
+        const d = FILTER_DEFAULT[f];
+        const bones = transport?.curveView.getChannelSelection().size ?? 0;
+        const body = document.createElement("div");
+        body.className = "modal-body";
+        body.innerHTML = `
+          <p class="note">${name} on ${bones} bone${bones === 1 ? "" : "s"} over ${fmtTime(span.t0)}–${fmtTime(span.t1)}.
+          The curves update when it lands — hold <b>Ghost</b> (top bar) to compare against the unfiltered motion.</p>
+          <label class="field"><span>Strength</span>
+            <span><input id="fltVal" type="number" step="${d.step}" min="${d.min}" value="${d.value}" style="width:4.6rem" /> ${d.unit}</span>
+          </label>
+          <div class="rig-row"><button id="fltApply" class="button primary">Apply</button></div>`;
+        const close = openModal(`${name} filter`, body);
+        const input = body.querySelector("#fltVal") as HTMLInputElement;
+        input.focus();
+        input.select();
+        const apply = () => {
+          const v = Number(input.value);
+          if (addCleanOpScoped(f, span, Number.isFinite(v) && v > 0 ? v : d.value)) close();
+        };
+        (body.querySelector("#fltApply") as HTMLButtonElement).addEventListener("click", apply);
+        input.addEventListener("keydown", (e) => { if (e.key === "Enter") apply(); });
+      };
       const items: Array<{ label: string; action?: () => void; disabled?: boolean }> = FILTER_ITEMS.map(([f, name]) => ({
-        label: `${name} → ${where}`,
-        action: () => { addCleanOpScoped(f, span); },
+        label: `${name} → ${where}…`,
+        action: () => openFilterDialog(f, name),
       }));
       if (info.span) {
         const s = info.span;

@@ -658,8 +658,29 @@ main:has(.loaded-state:not([hidden])) {
   cursor: pointer;
 }
 
-/* Cleaning tick marks: passive canvas under the interactive strip layers. */
-.t-marks {
+/* The strip column: a dedicated ruler row (numbers stay readable — nothing
+   else draws there) above the track row (trim/keys/ranges). One shared
+   width, so the playhead can span both. */
+.t-strip {
+  position: relative;
+  flex: 1;
+  min-width: 220px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  touch-action: none;
+}
+
+.t-ruler {
+  position: relative;
+  height: 20px;
+  overflow-x: clip;
+  overflow-y: visible;
+  cursor: pointer;
+}
+
+.t-marks,
+.t-track {
   position: absolute;
   inset: 0;
   width: 100%;
@@ -670,9 +691,7 @@ main:has(.loaded-state:not([hidden])) {
 
 .t-timeline {
   position: relative;
-  flex: 1;
-  min-width: 220px;
-  height: 22px;
+  height: 26px;
   /* Zoomed-off-view keys/handles position past 0-100% — clip horizontally
      only (the trim handles + playhead overhang vertically on purpose). */
   overflow-x: clip;
@@ -681,6 +700,12 @@ main:has(.loaded-state:not([hidden])) {
   border-radius: 4px;
   cursor: pointer;
   touch-action: none;
+}
+
+/* Disabled placeholder keeps the old single-strip look. */
+.t-main > .t-timeline {
+  flex: 1;
+  min-width: 220px;
 }
 
 .t-region {
@@ -698,7 +723,7 @@ main:has(.loaded-state:not([hidden])) {
   position: absolute;
   top: -3px;
   width: 10px;
-  height: 28px;
+  height: 32px;
   margin-left: -5px;
   background: var(--accent);
   border-radius: 3px;
@@ -708,12 +733,22 @@ main:has(.loaded-state:not([hidden])) {
 
 .t-playhead {
   position: absolute;
-  top: -3px;
+  top: 0;
+  bottom: 0;
   width: 2px;
-  height: 28px;
   margin-left: -1px;
   background: #ff5a5a;
   pointer-events: none;
+  z-index: 3;
+}
+
+.t-playhead::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: -4px;
+  border: 5px solid transparent;
+  border-top: 7px solid #ff5a5a;
 }
 
 .t-keys {
@@ -899,6 +934,47 @@ main:has(.loaded-state:not([hidden])) {
   overflow: hidden;
   z-index: 2;
 }
+
+/* Channels mode: the side becomes a REAL column — the bone tree was
+   unusable squeezed into the label gutter. It overlays the canvas's left
+   edge (zoom/pan reaches anything under it); the chevron collapses it. */
+.cv-side.open {
+  width: 216px;
+  min-width: 216px;
+  background: rgba(16, 19, 24, 0.96);
+  border-right: 1px solid var(--border);
+  border-radius: 0 6px 6px 0;
+  padding: 4px 8px 6px 6px;
+}
+
+.cv-side.open.min {
+  width: 18px;
+  min-width: 18px;
+  padding: 0;
+  background: transparent;
+  border-right: none;
+}
+
+.cv-side.open.min > :not(.cv-collapse) { display: none; }
+
+.cv-collapse {
+  position: absolute;
+  right: 0;
+  top: 2px;
+  width: 16px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  background: rgba(40, 46, 56, 0.9);
+  border-radius: 4px;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 0.7rem;
+  line-height: 1;
+  z-index: 3;
+}
+
+.cv-collapse:hover { color: var(--text); }
 
 .cv-mode,
 .cv-tools {

@@ -226,7 +226,16 @@ export class CurveView {
     });
     this.tree = new ChannelTree();
     this.tree.el.hidden = true;
-    this.side.append(this.modeRow, this.toolRow, this.axisRow, this.tree.el);
+    // Collapse chevron: the channels column is wide — let it fold away.
+    const collapse = document.createElement("button");
+    collapse.className = "cv-collapse";
+    collapse.textContent = "‹";
+    collapse.title = "Collapse/expand the channel panel";
+    collapse.addEventListener("click", () => {
+      const min = this.side.classList.toggle("min");
+      collapse.textContent = min ? "›" : "‹";
+    });
+    this.side.append(collapse, this.modeRow, this.toolRow, this.axisRow, this.tree.el);
     this.el.appendChild(this.side);
 
     // Esc leaves the current tool / clears the selection; holding R is a

@@ -122,12 +122,15 @@ export function createTransport(preview: PreviewScene, duration: number, frames 
         <option value="1" selected>1×</option>
         <option value="2">2×</option>
       </select>
-      <div class="t-timeline" role="slider" tabindex="0" aria-label="Timeline and trim">
-        <canvas class="t-marks"></canvas>
-        <div class="t-region"></div>
-        <div class="t-keys"></div>
-        <div class="t-handle t-in" aria-label="Trim start"></div>
-        <div class="t-handle t-out" aria-label="Trim end"></div>
+      <div class="t-strip">
+        <div class="t-ruler" aria-hidden="true"><canvas class="t-marks"></canvas></div>
+        <div class="t-timeline" role="slider" tabindex="0" aria-label="Timeline and trim">
+          <canvas class="t-track"></canvas>
+          <div class="t-region"></div>
+          <div class="t-keys"></div>
+          <div class="t-handle t-in" aria-label="Trim start"></div>
+          <div class="t-handle t-out" aria-label="Trim end"></div>
+        </div>
         <div class="t-playhead"></div>
       </div>
       <button class="t-btn t-magnet" title="Snap key drags to other keys and the playhead">🧲</button>
@@ -151,7 +154,10 @@ export function createTransport(preview: PreviewScene, duration: number, frames 
   el.appendChild(curveView.el);
 
   const playBtn = el.querySelector(".t-play") as HTMLButtonElement;
+  const strip = el.querySelector(".t-strip") as HTMLElement;
+  const ruler = el.querySelector(".t-ruler") as HTMLElement;
   const timeline = el.querySelector(".t-timeline") as HTMLElement;
+  const trackCanvas = el.querySelector(".t-track") as HTMLCanvasElement;
   const region = el.querySelector(".t-region") as HTMLElement;
   const inH = el.querySelector(".t-in") as HTMLElement;
   const outH = el.querySelector(".t-out") as HTMLElement;
@@ -289,14 +295,14 @@ export function createTransport(preview: PreviewScene, duration: number, frames 
   outH.addEventListener("pointerdown", (e) => startDrag("out", e));
 
   // Wheel = zoom around the cursor.
-  timeline.addEventListener("wheel", (e) => {
+  strip.addEventListener("wheel", (e) => {
     e.preventDefault();
     const r = timeline.getBoundingClientRect();
     const frac = (e.clientX - r.left) / r.width;
     tm.zoomAt(frac, e.deltaY > 0 ? 1.2 : 1 / 1.2);
   }, { passive: false });
 
-  timeline.addEventListener("pointerdown", (e) => {
+  strip.addEventListener("pointerdown", (e) => {
     if (e.target === inH || e.target === outH) return;
     // Middle-drag anywhere = pan the view.
     if (e.button === 1 || (e.button === 0 && e.altKey)) {
@@ -369,47 +375,95 @@ export function createTransport(preview: PreviewScene, duration: number, frames 
   // ruler markers (flags). Everything positions through the shared TimeMap.
   const marksCanvas = el.querySelector(".t-marks") as HTMLCanvasElement;
   let marks: TransportMark[] = [];
-  function drawMarks() {
-    const r = timeline.getBoundingClientRect();
+
+  /** Size a canvas to its box; returns a dpr-normalized context (or null). */
+  function canvasCtx(canvas: HTMLCanvasElement, box: HTMLElement): { g: CanvasRenderingContext2D; w: number; h: number } | null {
+    const r = box.getBoundingClientRect();
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
-    marksCanvas.width = Math.max(1, Math.round(r.width * dpr));
-    marksCanvas.height = Math.max(1, Math.round(r.height * dpr));
-    const g = marksCanvas.getContext("2d");
-    if (!g) return;
+    canvas.width = Math.max(1, Math.round(r.width * dpr));
+    canvas.height = Math.max(1, Math.round(r.height * dpr));
+    const g = canvas.getContext("2d");
+    if (!g) return null;
     g.setTransform(dpr, 0, 0, dpr, 0, 0);
     g.clearRect(0, 0, r.width, r.height);
-    if (duration <= 0 || r.width < 2) return;
+    return duration <= 0 || r.width < 2 ? null : { g, w: r.width, h: r.height };
+  }
 
-    // Ruler ticks + faint grid.
-    const secPerPx = tm.span / r.width;
-    const { step, asFrames } = chooseTickStep(secPerPx, tm.fps);
+  function tickStep() {
+    const w = Math.max(1, ruler.getBoundingClientRect().width);
+    return { ...chooseTickStep(tm.span / w, tm.fps), w };
+  }
+
+  /** The ruler row: readable tick labels + marker flags, nothing else. */
+  function drawRuler() {
+    const c = canvasCtx(marksCanvas, ruler);
+    if (!c) return;
+    const { g, w, h } = c;
+    const { step, asFrames } = tickStep();
     const first = Math.ceil(tm.viewStart / step) * step;
-    g.font = "9px system-ui, sans-serif";
-    g.textBaseline = "top";
+    g.font = "11px system-ui, sans-serif";
+    g.textBaseline = "alphabetic";
     for (let t = first; t <= tm.viewEnd + 1e-6; t += step) {
-      const x = pct(t) / 100 * r.width;
-      g.strokeStyle = "rgba(255,255,255,0.09)";
+      const x = pct(t) / 100 * w;
+      g.strokeStyle = "rgba(230,236,244,0.35)";
       g.lineWidth = 1;
       g.beginPath();
-      g.moveTo(x + 0.5, 0);
-      g.lineTo(x + 0.5, r.height);
+      g.moveTo(x + 0.5, h - 5);
+      g.lineTo(x + 0.5, h);
       g.stroke();
-      g.fillStyle = "rgba(230,236,244,0.5)";
+      g.fillStyle = "rgba(230,236,244,0.78)";
       const label = asFrames ? String(Math.round(t * tm.fps)) : `${t.toFixed(step < 1 ? 2 : step < 10 ? 1 : 0)}s`;
-      g.fillText(label, x + 2, 1);
+      g.fillText(label, x + 4, h - 7);
+    }
+    // Marker flags live in the ruler; their hairline continues in the track.
+    for (const mk of markers) {
+      const x = pct(mk.time) / 100 * w;
+      if (x < -2 || x > w + 2) continue;
+      g.fillStyle = "#ffd24a";
+      g.beginPath();
+      g.moveTo(x, 0);
+      g.lineTo(x + 8, 4);
+      g.lineTo(x, 8);
+      g.closePath();
+      g.fill();
+      g.fillRect(x, 0, 1, h);
+      if (mk.label) {
+        g.font = "10px system-ui, sans-serif";
+        g.fillStyle = "rgba(255,210,74,0.95)";
+        g.fillText(mk.label, x + 10, 9);
+        g.font = "11px system-ui, sans-serif";
+      }
+    }
+  }
+
+  /** The track row's canvas: faint grid, range lanes, cleaning marks. */
+  function drawTrack() {
+    const c = canvasCtx(trackCanvas, timeline);
+    if (!c) return;
+    const { g, w, h } = c;
+    const { step } = tickStep();
+    const first = Math.ceil(tm.viewStart / step) * step;
+    g.strokeStyle = "rgba(255,255,255,0.08)";
+    g.lineWidth = 1;
+    for (let t = first; t <= tm.viewEnd + 1e-6; t += step) {
+      const x = pct(t) / 100 * w;
+      g.beginPath();
+      g.moveTo(x + 0.5, 0);
+      g.lineTo(x + 0.5, h);
+      g.stroke();
     }
 
     // Filter/plant range underlines (lanes stacked from the bottom).
     for (const rg of ranges) {
-      const x0 = pct(rg.t0) / 100 * r.width;
-      const x1 = pct(rg.t1) / 100 * r.width;
+      const x0 = pct(rg.t0) / 100 * w;
+      const x1 = pct(rg.t1) / 100 * w;
       const lane = rg.lane ?? 0;
-      const y = r.height - 3 - lane * 3;
+      const y = h - 3 - lane * 3;
       g.strokeStyle = rg.color;
       g.lineWidth = 2;
       g.beginPath();
       g.moveTo(Math.max(0, x0), y);
-      g.lineTo(Math.min(r.width, x1), y);
+      g.lineTo(Math.min(w, x1), y);
       g.stroke();
     }
 
@@ -418,29 +472,22 @@ export function createTransport(preview: PreviewScene, duration: number, frames 
       g.globalAlpha = 0.55;
       for (const m of marks) {
         g.fillStyle = m.color;
-        g.fillRect(pct(m.time) / 100 * r.width, r.height * 0.55, 1, r.height * 0.45);
+        g.fillRect(pct(m.time) / 100 * w, h * 0.5, 1, h * 0.5);
       }
       g.globalAlpha = 1;
     }
 
-    // Ruler markers (small flags with labels).
+    // Marker hairlines (flags are in the ruler above).
+    g.fillStyle = "rgba(255,210,74,0.65)";
     for (const mk of markers) {
-      const x = pct(mk.time) / 100 * r.width;
-      if (x < -2 || x > r.width + 2) continue;
-      g.fillStyle = "#ffd24a";
-      g.beginPath();
-      g.moveTo(x, 0);
-      g.lineTo(x + 8, 3);
-      g.lineTo(x, 6);
-      g.closePath();
-      g.fill();
-      g.fillStyle = "rgba(255,210,74,0.9)";
-      g.fillRect(x, 0, 1, r.height);
-      if (mk.label) {
-        g.font = "9px system-ui, sans-serif";
-        g.fillText(mk.label, x + 9, 0);
-      }
+      const x = pct(mk.time) / 100 * w;
+      if (x >= -1 && x <= w + 1) g.fillRect(x, 0, 1, h);
     }
+  }
+
+  function drawMarks() {
+    drawRuler();
+    drawTrack();
   }
   function setMarks(next: TransportMark[]) {
     marks = next;
@@ -451,10 +498,11 @@ export function createTransport(preview: PreviewScene, duration: number, frames 
     drawMarks();
   }
   const marksRo = new ResizeObserver(drawMarks);
-  marksRo.observe(timeline);
+  marksRo.observe(strip);
+  marksRo.observe(ruler);
 
   // Right-click ruler = add/remove marker.
-  timeline.addEventListener("contextmenu", (e) => {
+  strip.addEventListener("contextmenu", (e) => {
     e.preventDefault();
     const t = timeAt(e.clientX);
     // If close to an existing marker, offer to remove it; else add.
@@ -471,7 +519,7 @@ export function createTransport(preview: PreviewScene, duration: number, frames 
     // Also expose a lightweight add-marker affordance: double-right adds.
   });
   // Double-click ruler adds a marker with an editable label.
-  timeline.addEventListener("dblclick", (e) => {
+  strip.addEventListener("dblclick", (e) => {
     const t = timeAt(e.clientX);
     const label = prompt("Marker label (blank to cancel):", "");
     if (label === null) return;
