@@ -31,7 +31,8 @@ await page.screenshot({ path: "scripts/plants-shot.png" });
 console.log("screenshot: scripts/plants-shot.png");
 
 // Export tab -> key reduction analysis.
-await page.click('.dock-tab[data-tab="export"]');
+await page.click("#menubar .menu-btn:has-text('File')");
+await page.click(".menu-panel .menu-item:has-text('Export...')");
 await page.waitForTimeout(200);
 await page.click("#reduceAnalyze");
 await page.waitForTimeout(500);

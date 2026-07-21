@@ -1914,3 +1914,16 @@ kbd {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* Export dialog: the adopted export panel gets breathing room. */
+.export-modal { max-height: 70vh; overflow-y: auto; }
+.export-actions {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: #1c212b;
+  padding: 0.4rem 0;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 0.5rem;
+}
+.export-actions .eb-name { flex: 1; min-width: 8rem; }

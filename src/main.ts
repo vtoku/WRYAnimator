@@ -98,6 +98,7 @@ document.addEventListener("keydown", (e) => {
     else if (k === "y" || (k === "z" && e.shiftKey)) { e.preventDefault(); rigHotkeys.redo(); }
     else if (k === "c") rigHotkeys.copy();
     else if (k === "v") rigHotkeys.paste();
+    else if (k === "e") { e.preventDefault(); menuActions?.openExport(); }
   } else if (!inField) {
     // Standard DCC manipulation keys: Q space, W move, E rotate; standard
     // transport keys: Space play/pause, ←/→ frame step (shift = ×10).
@@ -162,6 +163,8 @@ interface MenuActions {
   saveScene(): void;
   saveSceneAs(): void;
   export(fmt: "fbx" | "vrma" | "wanim" | "shogun"): void;
+  /** File > Export… — the target-preset export dialog. */
+  openExport(): void;
   openBody(): void;
   /** Swap the body of a live session in place (drop VRM / File > Open body). */
   loadBodyBytes(name: string, data: ArrayBuffer): Promise<void>;
@@ -184,7 +187,7 @@ interface MenuActions {
   /** Selection-set names for the View menu (D1). */
   selectionSetNames(): string[];
   recallSelectionSet(name: string): void;
-  setDockTab(t: "clip" | "rig" | "export"): void;
+  setDockTab(t: "clip" | "rig"): void;
   cyclePanels(): void;
   toggleGhost(): void;
   ghostOn(): boolean;
@@ -295,6 +298,7 @@ const menuDefs: MenuDef[] = [
       { label: "Save scene", hotkey: keyFor("save"), enabled: hasSession, action: dispatchSaveScene },
       { label: "Save scene as...", enabled: hasSession, action: dispatchSaveSceneAs },
       { separator: true },
+      { label: "Export...", hotkey: "Ctrl+E", enabled: hasClip, action: () => menuActions?.openExport() },
       { label: "Export FBX", enabled: hasClip, action: () => menuActions?.export("fbx") },
       { label: "Export VRMA", enabled: hasClip, action: () => menuActions?.export("vrma") },
       { label: "Export WANIM", enabled: hasClip, action: () => menuActions?.export("wanim") },
@@ -345,7 +349,6 @@ const menuDefs: MenuDef[] = [
     items: () => [
       { label: "Clip panel", enabled: hasClip, action: () => menuActions?.setDockTab("clip") },
       { label: "Rig panel", enabled: hasClip, action: () => menuActions?.setDockTab("rig") },
-      { label: "Export panel", enabled: hasClip, action: () => menuActions?.setDockTab("export") },
       { separator: true },
       { label: "Cycle keys / curves / hidden", enabled: hasClip, action: () => menuActions?.cyclePanels() },
       { label: "Ghost overlay", checked: () => !!menuActions?.ghostOn(), enabled: hasClip, action: () => menuActions?.toggleGhost() },
@@ -625,26 +628,19 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
   ];
 
   // ---- editor-suite toolbar: global actions, always visible ---------------
+  // The app TOOLBAR: editing tools only. File/history/export live in menus.
   editbar.innerHTML = `
-    <div class="eb-group">
-      <button id="rigUndo" class="eb-btn eb-ico" disabled title="Undo the last rig or modifier edit (Ctrl+Z)">${ICONS.undo}<span class="eb-lbl">Undo</span></button>
-      <button id="rigRedo" class="eb-btn eb-ico" disabled title="Redo (Ctrl+Y)">${ICONS.redo}<span class="eb-lbl">Redo</span></button>
-    </div>
     <div class="eb-group">
       <button id="gizmoMove" class="eb-btn eb-ico active" title="Move (W). Pulling an FK diamond swings the bone toward the drag.">${ICONS.move}</button>
       <button id="gizmoRotate" class="eb-btn eb-ico" title="Rotate (E)">${ICONS.rotate}</button>
       <button id="rigSpace" class="eb-btn eb-ico" title="Gizmo axes: Local follows the bone, World uses the scene axes (Q toggles).">${ICONS.local}<span class="eb-lbl">Local</span></button>
     </div>
+    <div class="eb-group">
+      <button id="tbKeyPose" class="eb-btn eb-ico" title="Key the pose at the playhead (selected handle, limb, or body — per the keying mode in the Rig panel).">${ICONS.key}<span class="eb-lbl">Key pose</span></button>
+      <button id="tbAutoKey" class="eb-btn eb-ico" title="Auto-key: every handle drag also keys the whole body at that frame.">${ICONS.autokey}<span class="eb-lbl">Auto</span></button>
+    </div>
     <button id="compare" class="eb-btn eb-ico compare" title="Press and hold to see the recording without any cleaning or rig edits, so you can judge what changed.">${ICONS.eye}<span class="eb-lbl">Hold: original</span></button>
     <button id="ghostBtn" class="eb-btn eb-ico" title="Overlay the original (uncleaned) recording as a translucent ghost, so you can see what the cleanup changed while you edit.">${ICONS.ghost}<span class="eb-lbl">Ghost</span></button>
-    <span class="eb-spacer"></span>
-    <input id="outName" class="eb-name" type="text" spellcheck="false" title="Base name for exported files (e.g. myclip-clean → myclip-clean.fbx)" />
-    <select id="format" aria-label="Export format" title="FBX for DCC pipelines; VRMA for Warudo/VSeeFace/Unity; WANIM back into Warudo.">
-      <option value="fbx" selected>FBX</option>
-      <option value="vrma">VRMA</option>
-      <option value="wanim">WANIM</option>
-    </select>
-    <button id="download" class="button primary">Download</button>
   `;
 
   // ---- dock: task panels in tabs ------------------------------------------
@@ -652,7 +648,6 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     <nav class="dock-tabs" role="tablist">
       <button class="dock-tab active" data-tab="clip">Clip</button>
       <button class="dock-tab" data-tab="rig">Rig</button>
-      <button class="dock-tab" data-tab="export">Export</button>
     </nav>
     <div class="dock-body">
 
@@ -852,7 +847,16 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     </div>
     </div>
 
-    <div class="tab" id="tab-export">
+    <div id="exportContent" hidden>
+    <div class="rig-row export-actions">
+      <input id="outName" class="eb-name" type="text" spellcheck="false" title="Base name for exported files (e.g. myclip-clean → myclip-clean.fbx)" />
+      <select id="format" aria-label="Export format" title="FBX for DCC pipelines; VRMA for Warudo/VSeeFace/Unity; WANIM back into Warudo.">
+        <option value="fbx" selected>FBX</option>
+        <option value="vrma">VRMA</option>
+        <option value="wanim">WANIM</option>
+      </select>
+      <button id="download" class="button primary">Download</button>
+    </div>
     <label class="field">
       <span>Frame rate</span>
       <select id="fps">
@@ -957,7 +961,6 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     for (const el of dock.querySelectorAll(".tab")) el.classList.toggle("active", el.id === `tab-${t}`);
     syncRigVisibility();
     updateRigEditor();
-    if (t === "export") updateRetimeInfo();
   }
   for (const b of tabBtns) b.addEventListener("click", () => setTab(b.dataset.tab!));
 
@@ -1390,8 +1393,8 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     updateRigEditor();
   });
   const rigDelKeyBtn = document.getElementById("rigDelKey") as HTMLButtonElement;
-  const rigUndoBtn = document.getElementById("rigUndo") as HTMLButtonElement;
-  const rigRedoBtn = document.getElementById("rigRedo") as HTMLButtonElement;
+  const rigUndoBtn = document.getElementById("rigUndo") as HTMLButtonElement | null;
+  const rigRedoBtn = document.getElementById("rigRedo") as HTMLButtonElement | null;
 
   let activeLayerIdx = -1;
   let selectedEffector: EffectorId | null = null;
@@ -1406,8 +1409,8 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
       warp: warpKeys, ranges: rangeSmooths, cleanOps: persistOps(), selectionSets, loop: loopOp, feetPlants: feetPlantRemoved, pipeline: pipelineSettings(),
     });
   function updateUndoUi() {
-    rigUndoBtn.disabled = !undoStack.length;
-    rigRedoBtn.disabled = !redoStack.length;
+    if (rigUndoBtn) rigUndoBtn.disabled = !undoStack.length;
+    if (rigRedoBtn) rigRedoBtn.disabled = !redoStack.length;
   }
   function pushHistorySnap(snap: string) {
     undoStack.push(snap);
@@ -1469,8 +1472,20 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     restoreSnapshot(redoStack.pop()!);
     updateUndoUi();
   }
-  rigUndoBtn.addEventListener("click", rigUndo);
-  rigRedoBtn.addEventListener("click", rigRedo);
+  rigUndoBtn?.addEventListener("click", rigUndo);
+  rigRedoBtn?.addEventListener("click", rigRedo);
+  // Toolbar keying group: mirrors the Rig panel's Key pose + auto-key.
+  (document.getElementById("tbKeyPose") as HTMLButtonElement | null)?.addEventListener("click", () => {
+    (document.getElementById("rigKeyAll") as HTMLButtonElement | null)?.click();
+  });
+  const tbAutoKeyBtn = document.getElementById("tbAutoKey") as HTMLButtonElement | null;
+  tbAutoKeyBtn?.addEventListener("click", () => {
+    const chk = document.getElementById("autoKey") as HTMLInputElement | null;
+    if (!chk) return;
+    chk.checked = !chk.checked;
+    chk.dispatchEvent(new Event("change", { bubbles: true }));
+    tbAutoKeyBtn.classList.toggle("active", chk.checked);
+  });
 
   // ---- key multi-selection + clipboard ------------------------------------
   interface PickedKey { effector: EffectorId; time: number; }
@@ -4034,11 +4049,38 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     });
   }
 
-  /** Time > Export retiming…: open the Export tab focused on the fps/speed. */
+  /** File > Export… — the dialog ADOPTS the export panel (ids + listeners
+   *  survive the move) and returns it to the dock on close. */
+  let exportDialogOpen = false;
+  function openExportDialog(focusRetime = false) {
+    if (!loaded || exportDialogOpen) return;
+    const content = document.getElementById("exportContent") as HTMLDivElement | null;
+    if (!content) return;
+    const home = content.parentElement!;
+    const body = document.createElement("div");
+    body.className = "modal-body export-modal";
+    content.hidden = false;
+    body.appendChild(content);
+    openModal("Export", body, { wide: true });
+    exportDialogOpen = true;
+    updateRetimeInfo();
+    if (focusRetime) {
+      fpsSel.focus();
+      fpsSel.scrollIntoView({ block: "center" });
+    }
+    const watcher = window.setInterval(() => {
+      if (!body.isConnected) {
+        window.clearInterval(watcher);
+        content.hidden = true;
+        home.appendChild(content);
+        exportDialogOpen = false;
+      }
+    }, 250);
+  }
+
+  /** Time > Export retiming…: the Export dialog, focused on fps/speed. */
   function focusExportRetiming() {
-    setTab("export");
-    fpsSel.focus();
-    fpsSel.scrollIntoView({ block: "center" });
+    openExportDialog(true);
   }
 
   /** File > Export preview video… (D2): play the trim range once while
@@ -4173,6 +4215,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
 
   // Expose this panel's actions to the (persistent) menu bar.
   menuActions = {
+    openExport: () => openExportDialog(),
     saveScene: () => saveScene(),
     saveSceneAs,
     export: (fmt) => { void doExport(fmt); },
@@ -4243,7 +4286,6 @@ function showEmptyEditor() {
   const emptyTabs: [string, string, string][] = [
     ["clip", "Clip", "Open a <code>.wanim</code>/<code>.fbx</code> recording, a VRM/GLB body, or a saved <code>.scene.json</code>."],
     ["rig", "Rig", "Open a recording to pose and layer edits."],
-    ["export", "Export", "Open a recording, or a VRM/GLB body for a Shogun target rig."],
   ];
   dock.innerHTML = `
     <nav class="dock-tabs" role="tablist">
@@ -4534,7 +4576,16 @@ function buildBodyPanel(name: string, bytes: ArrayBuffer, mappedBones: number, s
         </div>
       </div>
       <div class="tab" id="tab-rig"><p class="note">Needs a recording. Drop a <code>.wanim</code> or <code>.fbx</code> to pose this body.</p></div>
-      <div class="tab" id="tab-export">
+      <div id="exportContent" hidden>
+    <div class="rig-row export-actions">
+      <input id="outName" class="eb-name" type="text" spellcheck="false" title="Base name for exported files (e.g. myclip-clean → myclip-clean.fbx)" />
+      <select id="format" aria-label="Export format" title="FBX for DCC pipelines; VRMA for Warudo/VSeeFace/Unity; WANIM back into Warudo.">
+        <option value="fbx" selected>FBX</option>
+        <option value="vrma">VRMA</option>
+        <option value="wanim">WANIM</option>
+      </select>
+      <button id="download" class="button primary">Download</button>
+    </div>
         <h4 class="group">Shogun target rig <span class="hint-i" title="A static, world-aligned skeleton plus skinned mesh built straight from your loaded VRM body, for use as a Vicon Shogun retarget target. No animation is baked in.">ⓘ</span></h4>
         <label class="field">
           <span>Export name</span>

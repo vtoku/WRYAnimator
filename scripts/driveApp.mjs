@@ -45,9 +45,12 @@ await page.screenshot({ path: "scripts/preview-shot.png" });
 console.log("screenshot: scripts/preview-shot.png");
 
 // Test the download button.
+await page.click("#menubar .menu-btn:has-text('File')");
+await page.click(".menu-panel .menu-item:has-text('Export...')");
+await page.waitForSelector(".modal #download", { timeout: 10000 });
 const [download] = await Promise.all([
   page.waitForEvent("download", { timeout: 30000 }),
-  page.click("#download"),
+  page.click(".modal #download"),
 ]);
 const fname = download.suggestedFilename();
 const path = "scripts/downloaded.fbx";
