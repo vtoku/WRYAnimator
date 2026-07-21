@@ -58,7 +58,7 @@ context menu (its verbs). Delete always deletes the selected thing.
 
 ```
 ┌ topbar ──────────────────────────────────────────────────────────────────┐
-│ WRYAnimator   File Edit Select Time View Help        name [FBX] Download │
+│ WRYAnimator   File Edit Select Time View Help                            │
 ├──────────────────────────────────────────────┬───────────────────────────┤
 │ ┌ viewport toolbar (overlay, left) ┐         │  INSPECTOR (contextual)   │
 │ │ move/rotate · local · hold · ghost         │                           │
@@ -120,10 +120,9 @@ panel (collapsible as today).
 
 Everything on the Export tab (format, bone names, rest pose, proportions,
 spine, face/body mesh, fps + speed + live readout, reduction tolerances +
-analyze) consolidates into an Export dialog opened by the Download button
-(and File → Export…). The topbar keeps name + format + Download for the
-one-click path; Download uses last-confirmed settings, the dialog is where
-you change them.
+analyze) consolidates into an Export dialog opened from File → Export… (Ctrl+E).
+The dialog owns the output name, format, all settings, and the Download
+action — one place, remembered between opens.
 
 Retires: the Export tab; the Rig-tab key-reduction analyzer (it moves into
 the Export dialog next to the tolerances it informs).
@@ -135,19 +134,19 @@ buttons in labeled groups with separators, every button also a menu item and
 a shortcut (toolbar = fast path, never the only path):
 
 ```
-[Move][Rotate][Local] | [Key pose][Auto-key] | [Hold][Ghost] |
-······························ [name] [FBX ▾] [Download]
+[Move][Rotate][Local] | [Key pose][Auto-key] | [Hold][Ghost]
 ```
 
-File and history actions stay in the File/Edit menus + shortcuts — the
+File, history, and EXPORT actions all stay in the menus + shortcuts — the
 toolbar is for EDITING tools you reach for constantly, not menu duplicates.
+Export lives entirely in File → Export… (the dialog owns name, format,
+settings, and the Download action; Ctrl+E reopens it).
 
 - **Manipulate group** — Move (W), Rotate (E), Local/World (Q); the active
   tool is accent-highlighted.
 - **Keying group** — Key full pose at playhead, Auto-key toggle (moves out
   of the Rig tab where it's currently buried).
 - **Compare group** — Hold-original, Ghost overlay.
-- **Export cluster** (right-aligned) — output name, format, Download.
 
 The viewport keeps only the AID strip (view aids are stage furniture); all
 ACTION tools live on the toolbar. Version text moves to Help → About.
