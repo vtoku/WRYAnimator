@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>WRYAnimator — Documentation</title>
+<meta name="description" content="How to clean up, edit, and export Warudo motion-capture recordings with WRYAnimator. Every feature explained, with screenshots." />
+<link rel="icon" type="image/svg+xml" href="../favicon.svg" />
+<style>
+  :root {
+    --bg: #101216; --raise: #181b21; --line: #262b33;
+    --text: #e8eaee; --dim: #9aa1ad; --accent: #f5b301;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    line-height: 1.55;
+  }
+  header {
+    position: sticky; top: 0; z-index: 5; background: rgba(16,18,22,0.92);
+    backdrop-filter: blur(6px); border-bottom: 1px solid var(--line);
+    display: flex; align-items: center; gap: 1rem; padding: 0.7rem 1.2rem;
+  }
+  .logo { font-weight: 800; font-size: 1.05rem; letter-spacing: 0.02em; }
+  .logo .wry { color: var(--accent); }
+  header a { color: var(--dim); text-decoration: none; font-size: 0.9rem; }
+  header a:hover { color: var(--text); }
+  header .app-link { margin-left: auto; color: var(--accent); font-weight: 600; }
+  .wrap { max-width: 60rem; margin: 0 auto; padding: 1.5rem 1.2rem 5rem; }
+  h1 { font-size: 1.9rem; margin: 1rem 0 0.3rem; }
+  .sub { color: var(--dim); margin: 0 0 2rem; }
+  h2 {
+    font-size: 1.25rem; margin: 3rem 0 0.6rem; padding-top: 1rem;
+    border-top: 1px solid var(--line);
+  }
+  h3 { font-size: 1rem; margin: 1.6rem 0 0.3rem; }
+  p, li { color: var(--text); font-size: 0.95rem; }
+  li { margin: 0.25rem 0; }
+  .note { color: var(--dim); font-size: 0.88rem; }
+  kbd {
+    background: var(--raise); border: 1px solid var(--line); border-bottom-width: 2px;
+    border-radius: 4px; padding: 0.05rem 0.4rem; font-size: 0.85em; font-family: inherit;
+  }
+  .menu { color: var(--accent); font-weight: 600; }
+  figure { margin: 1.2rem 0; }
+  figure img {
+    width: 100%; border: 1px solid var(--line); border-radius: 8px; display: block;
+  }
+  figcaption { color: var(--dim); font-size: 0.84rem; margin-top: 0.4rem; }
+  .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+  @media (max-width: 720px) { .cols { grid-template-columns: 1fr; } }
+  .toc { background: var(--raise); border: 1px solid var(--line); border-radius: 8px; padding: 1rem 1.4rem; }
+  .toc a { color: var(--text); text-decoration: none; }
+  .toc a:hover { color: var(--accent); }
+  .toc ul { margin: 0.3rem 0 0; padding-left: 1.1rem; }
+  .pill {
+    display: inline-block; background: var(--raise); border: 1px solid var(--line);
+    border-radius: 99px; padding: 0 0.55rem; font-size: 0.8rem; color: var(--dim);
+  }
+</style>
+</head>
+<body>
+<header>
+  <span class="logo"><span class="wry">WRY</span>Animator docs</span>
+  <a class="app-link" href="../">Open the app →</a>
+</header>
+<div class="wrap">
+
+<h1>WRYAnimator documentation</h1>
+<p class="sub">Clean up, edit, and export Warudo motion-capture recordings — entirely in your browser. Nothing is uploaded; every step below runs locally.</p>
+
+<div class="toc">
+  <strong>Contents</strong>
+  <ul>
+    <li><a href="#start">Getting started</a></li>
+    <li><a href="#viewport">Viewport &amp; preview aids</a></li>
+    <li><a href="#timeline">Timeline, trim &amp; zoom</a></li>
+    <li><a href="#cleaning">Cleaning &amp; scoped filters</a></li>
+    <li><a href="#curves">Curve editor</a></li>
+    <li><a href="#rig">Rig layers &amp; corrections</a></li>
+    <li><a href="#time">Time tools: loops, holds, retiming</a></li>
+    <li><a href="#sets">Selection sets</a></li>
+    <li><a href="#export">Exporting</a></li>
+  </ul>
+</div>
+
+<h2 id="start">Getting started</h2>
+<p>Drop a <code>.wanim</code> recording (from Warudo's animation recorder) anywhere on the page, or use <span class="menu">File → Open</span>. The recording converts in the browser and appears in the 3D preview with the full editing UI. Your session — including trims, filters, rig edits, and settings — is saved automatically and restored when you come back; <span class="menu">File → Save scene</span> writes it to a file you can share or archive.</p>
+<figure>
+  <img src="img/overview.png" alt="The WRYAnimator editor: 3D preview, dock panels on the right, transport at the bottom." loading="lazy" />
+  <figcaption>The editor: 3D preview with the viewport aid strip (top right of the canvas), the Clean / Rig / Export / Info dock, and the zoomable transport.</figcaption>
+</figure>
+<p>You can also open a <code>.fbx</code> animation, or start an <em>asset-only</em> session from a VRM/FBX body with no recording at all — useful for authoring poses and short clips from scratch.</p>
+
+<h2 id="viewport">Viewport &amp; preview aids</h2>
+<p>Orbit with the left mouse button, pan with the middle button, zoom with the wheel. <span class="menu">View → Frame character</span> re-centers the camera on the character wherever they've walked. The slim icon strip in the top-right corner of the viewport toggles the preview aids (each also lives in the <span class="menu">View</span> menu, and the chevron on each button opens its settings):</p>
+<ul>
+  <li><strong>Motion paths</strong> — draws the world-space trajectory of the selected control (or the hips) over a window around the playhead, with per-frame dots. The path updates live as you edit, so you can watch an arc clean up as filters land.</li>
+  <li><strong>Onion skin</strong> — ghost skeletons at configurable frame steps around the current time: cool-tinted before, warm-tinted after, fading with distance.</li>
+  <li><strong>Silhouette</strong> — two-tone skeleton readability mode: flat background, light bones, the selected chain in gold. Meshes, grid, and other overlays hide while it's on.</li>
+  <li><strong>Clean playback</strong> — hides handles and gizmos while playing, restores them when you pause.</li>
+</ul>
+<div class="cols">
+  <figure>
+    <img src="img/aids.png" alt="Motion paths and onion-skin ghosts drawn over the character." loading="lazy" />
+    <figcaption>Motion paths + onion skin. Ghosts draw through the body so they stay visible.</figcaption>
+  </figure>
+  <figure>
+    <img src="img/silhouette.png" alt="Silhouette mode: skeleton-only two-tone view." loading="lazy" />
+    <figcaption>Silhouette mode strips everything to the skeleton for pose readability.</figcaption>
+  </figure>
+</div>
+
+<h2 id="timeline">Timeline, trim &amp; zoom</h2>
+<p>The transport at the bottom is shared by the strip, the dope sheet, and the curve editor — one zoomable time mapping for all three. Wheel-zoom around the cursor, middle-drag (or <kbd>Alt</kbd>+drag) to pan, and <strong>Fit</strong> to frame the clip or trim. The ruler adapts from seconds to frames as you zoom in.</p>
+<ul>
+  <li><strong>Trim handles</strong> (yellow) set the playback loop and the export range. <strong>In</strong>/<strong>Out</strong> set them at the playhead; <strong>Reset</strong> clears.</li>
+  <li>The <strong>frame box</strong> jumps to an exact frame; the magnet snaps drags to keys and the playhead.</li>
+  <li><strong>Keys ▾ / Curves ▾</strong> cycles the under-strip panel between the dope sheet and the curve editor.</li>
+  <li>Ruler markers, filter-range underlines, and cleaning tick marks show where things happened on the timeline.</li>
+</ul>
+
+<h2 id="cleaning">Cleaning &amp; scoped filters</h2>
+<p>The <span class="menu">Clean</span> tab has one-click whole-clip fixes: foot-plant pinning, wrist/forearm limits, pop removal (despike), and zero-lag jitter smoothing. Hold <strong>Ghost</strong> in the top bar to compare against the uncleaned recording at any time.</p>
+<p>For surgical work, <strong>scoped filters</strong> apply one filter to <em>chosen bones</em> over <em>a chosen time range</em>, non-destructively stacked and each removable:</p>
+<ul>
+  <li><strong>Butterworth</strong> — zero-lag low-pass, the smoothest general cleaner (cutoff in Hz).</li>
+  <li><strong>Moving-average</strong> — quick box smoothing (width in frames).</li>
+  <li><strong>Despike</strong> — removes single-frame pops (threshold in degrees).</li>
+  <li><strong>Key reduce</strong> — keeps only the frames the motion needs within a tolerance and interpolates between them: flattens micro-jitter and collapses what the exporter has to keep.</li>
+</ul>
+<p>The fastest way to scope a filter is directly on the curves: open <strong>Curves ▾ → Channels</strong>, pick bones in the tree, <strong>drag a band</strong> across the bad section, and right-click:</p>
+<figure>
+  <img src="img/channels-band.png" alt="A band selection on the dense curves with the right-click filter menu open." loading="lazy" />
+  <figcaption>Band-select a span on the Channels curves, right-click, and apply any filter to exactly those bones over exactly that span. "Set trim to selection" moves the trim handles to the band.</figcaption>
+</figure>
+<figure>
+  <img src="img/filters.png" alt="The scoped filter stack with a Butterworth chip." loading="lazy" />
+  <figcaption>Each filter becomes a chip in the Clean tab — click to zoom the timeline to its range, untick to bypass, × to delete. Colored underlines on the timeline show where each acts.</figcaption>
+</figure>
+
+<h2 id="curves">Curve editor</h2>
+<p>The curve editor (under the timeline, <strong>Curves ▾</strong>) has two modes, chosen at the left:</p>
+<ul>
+  <li><strong>Channels</strong> — the dense baked motion of any bones you pick in the tree (exactly what exports). View, band-select, and scope filters here; hold Ghost to overlay the uncleaned source.</li>
+  <li><strong>Corrections</strong> — the editable keys of the active rig layer for the selected control, as per-axis position (cm) and rotation (°) curves.</li>
+</ul>
+<h3>Working with keys (Corrections mode)</h3>
+<ul>
+  <li><strong>Marquee-drag</strong> over empty space to select keys (<kbd>Shift</kbd> adds); drag any selected key to move the whole selection vertically. A still click seeks.</li>
+  <li>With 2+ keys selected, a <strong>transform box</strong> appears — drag its top/bottom edges to scale values, drag inside it to offset them.</li>
+  <li>The <strong>Select / Brush / Retime</strong> tool row switches drag behavior: <strong>Brush</strong> paints smoothing onto the exact curves under the circle (dwell = stronger; in Channels mode a stroke becomes one scoped smoothing filter), and <strong>Retime</strong> (or holding <kbd>R</kbd>) slides selected keys in time, frame-snapped, never crossing other keys.</li>
+  <li><strong>Right-click</strong> for the full menu: Insert key, Delete, Smooth, Reduce, Match previous/next, Flatten to first, Blend toward neighbors, and per-key easing (linear / smooth / step).</li>
+  <li>Wheel-zoom and pan work here too, locked to the timeline strip above.</li>
+</ul>
+
+<h2 id="rig">Rig layers &amp; corrections</h2>
+<p>The <span class="menu">Rig</span> tab is a control-rig layer system: click a colored handle on the figure, pose it (IK for hands/feet with pole targets, FK for spine/head/fingers), and key it on a layer. Additive layers nudge the motion ("elbow +20° here"); override layers pin it. Layers stack with weights and per-layer fade, and everything bakes into the export. Finger posing works from the channel tree — selecting a finger row pops a gizmo on that chain.</p>
+<p class="note">The Key reduction panel in the Rig tab estimates how many keys each body part could drop at a chosen tolerance — use it to pick tolerances before adding a Key reduce filter.</p>
+
+<h2 id="time">Time tools: loops, holds, retiming</h2>
+<figure>
+  <img src="img/time-menu.png" alt="The Time menu." loading="lazy" />
+  <figcaption>The Time menu collects the timing tools.</figcaption>
+</figure>
+<ul>
+  <li><strong>Make loop…</strong> — turns the trim range into a seamless cycle by blending the tail toward the start (value <em>and</em> velocity match at the seam). <em>In-place</em> removes root travel drift so walk loops don't teleport. Applied non-destructively as a removable chip.</li>
+  <li><strong>Auto-find loop point</strong> — scans the trim range for the most similar pose pair at least a second apart and moves the trim handles there.</li>
+  <li><strong>Insert hold…</strong> — freezes the playhead pose across a span (whole body or the selected control's chain) on a dedicated "Holds" layer, releasing cleanly at the end. Delete the keys to remove it.</li>
+  <li><strong>Export retiming…</strong> — jumps to the frame-rate and speed controls in the Export tab.</li>
+</ul>
+<figure>
+  <img src="img/loop-dialog.png" alt="The Make loop dialog." loading="lazy" />
+  <figcaption>Make loop: blend seconds, in-place option, and auto-find in one dialog.</figcaption>
+</figure>
+
+<h2 id="sets">Selection sets</h2>
+<p>Above the channel tree's search box, <strong>+ Save</strong> stores the current bone selection under a name. Click a chip to recall it (<kbd>Shift</kbd>-click adds it to the selection), right-click to rename or delete. Sets persist with the session and scene file, and are also available under <span class="menu">View → Selection sets</span> — handy for jumping between "fingers", "left arm", or "everything but hips" scopes while filtering.</p>
+<figure>
+  <img src="img/sets.png" alt="A saved selection set chip above the channel tree." loading="lazy" />
+  <figcaption>Selection sets live above the channel tree; the same selection scopes curves and filters.</figcaption>
+</figure>
+
+<h2 id="export">Exporting</h2>
+<figure>
+  <img src="img/export.png" alt="The Export tab." loading="lazy" />
+  <figcaption>The Export tab: frame rate + speed with a live frame-count readout, bone naming, rest pose, proportions, face blendshapes, body mesh, and key-reduction tolerances.</figcaption>
+</figure>
+<ul>
+  <li><strong>FBX</strong> — binary FBX 7.5 (MotionBuilder-compatible): skeleton, animation take, a one-key T-pose take for characterization, optional skinned body mesh and face blendshapes. Redundant keys are dropped at write time within a visually lossless tolerance, so files stay lean — pair with the Key reduce filter for the biggest savings.</li>
+  <li><strong>VRMA</strong> — VRM animation with humanoid tracks and expression curves.</li>
+  <li><strong>WANIM</strong> — re-export the cleaned recording for Warudo itself.</li>
+  <li><strong>Shogun FBX</strong> — a Vicon-Shogun-style target rig export when a VRM body is loaded.</li>
+  <li><strong>Frame rate &amp; speed</strong> — export at 30/50/60/120 or a custom rate, and bake a 0.25×–4× speed change; the readout shows the resulting frame count and duration live.</li>
+  <li><strong>Preview video</strong> — <span class="menu">File → Export preview video…</span> plays the trim range once in real time and records the 3D preview to a <code>.webm</code> (canvas-native or 1080p letterboxed, with editing aids hidden).</li>
+</ul>
+<figure>
+  <img src="img/video-dialog.png" alt="The preview video export dialog." loading="lazy" />
+  <figcaption>Preview video export — an in-browser screen recording of the preview over the trim range.</figcaption>
+</figure>
+
+<p class="note" style="margin-top:3rem">Everything runs client-side — recordings never leave your machine. Keyboard shortcuts are listed under <span class="menu">Help → Keyboard shortcuts</span>. WRYAnimator is an unofficial tool, not affiliated with or endorsed by Warudo / HakuyaLabs. Only edit motion you own the rights to.</p>
+
+</div>
+</body>
+</html>

@@ -368,6 +368,7 @@ const menuDefs: MenuDef[] = [
   {
     label: "Help",
     items: () => [
+      { label: "Documentation", action: () => window.open("docs/index.html", "_blank") },
       { label: "Keyboard shortcuts", action: openShortcuts },
       { label: "About", action: () => openAbout(APP_VERSION) },
     ],

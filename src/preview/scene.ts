@@ -1495,8 +1495,11 @@ export class PreviewScene {
     const center = box.getCenter(new THREE.Vector3());
     const maxDim = Math.max(size.x, size.y, size.z) || 1;
     const dist = (maxDim / (2 * Math.tan((this.camera.fov * Math.PI) / 360))) * 1.6;
-    this.controls.target.set(0, center.y, 0);
-    this.camera.position.set(0, center.y, dist);
+    // Aim at the character's ACTUAL center — root travel moves it away from
+    // the world origin, and an origin-locked target frames empty space (or
+    // the inside of the body) once the character has walked off.
+    this.controls.target.copy(center);
+    this.camera.position.set(center.x, center.y, center.z + dist);
     this.camera.near = maxDim / 100;
     this.camera.far = maxDim * 100;
     this.camera.updateProjectionMatrix();
