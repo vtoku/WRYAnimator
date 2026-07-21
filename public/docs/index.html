@@ -86,7 +86,8 @@
 </div>
 
 <h2 id="start">Getting started</h2>
-<p>Drop a <code>.wanim</code> recording (from Warudo's animation recorder) anywhere on the page, or use <span class="menu">File → Open</span>. The recording converts in the browser and appears in the 3D preview with the full editing UI. Your session — including trims, filters, rig edits, and settings — is saved automatically and restored when you come back; <span class="menu">File → Save scene</span> writes it to a file you can share or archive.</p>
+<p>The editor opens with the bundled body on stage. Drop a <code>.wanim</code> recording (from Warudo's animation recorder) anywhere on the page, or use <span class="menu">File → Open</span>. The recording converts in the browser and appears in the 3D preview with the full editing UI.</p>
+<p>Your edits are cached automatically per recording. If the tab closes or reloads while you're working, the session comes right back; an older session isn't reopened silently — a small "Restore last session" bar offers it instead. <span class="menu">File → New scene</span> starts fresh and forgets the cached session, and <span class="menu">File → Save scene</span> writes everything to a file you can share or archive.</p>
 <figure>
   <img src="img/overview.png" alt="The WRYAnimator editor: 3D preview, dock panels on the right, transport at the bottom." loading="lazy" />
   <figcaption>The editor: 3D preview with the viewport aid strip (top right of the canvas), the Clean / Rig / Export / Info dock, and the zoomable transport.</figcaption>
@@ -94,21 +95,21 @@
 <p>You can also open a <code>.fbx</code> animation, or start an <em>asset-only</em> session from a VRM/FBX body with no recording at all — useful for authoring poses and short clips from scratch.</p>
 
 <h2 id="viewport">Viewport &amp; preview aids</h2>
-<p>Orbit with the left mouse button, pan with the middle button, zoom with the wheel. <span class="menu">View → Frame character</span> re-centers the camera on the character wherever they've walked. The slim icon strip in the top-right corner of the viewport toggles the preview aids (each also lives in the <span class="menu">View</span> menu, and the chevron on each button opens its settings):</p>
+<p>Orbit with the left mouse button, pan with the middle button, zoom with the wheel. Press <kbd>C</kbd> (or the top button on the viewport strip, also <span class="menu">View → Frame character</span>) to frame the character wherever they've walked. Below it, the strip toggles the preview aids (each also lives in the <span class="menu">View</span> menu, and the chevron on each button opens its settings):</p>
 <ul>
   <li><strong>Motion paths</strong> — draws the world-space trajectory of the selected control (or the hips) over a window around the playhead, with per-frame dots. The path updates live as you edit, so you can watch an arc clean up as filters land.</li>
-  <li><strong>Onion skin</strong> — ghost skeletons at configurable frame steps around the current time: cool-tinted before, warm-tinted after, fading with distance.</li>
-  <li><strong>Silhouette</strong> — two-tone skeleton readability mode: flat background, light bones, the selected chain in gold. Meshes, grid, and other overlays hide while it's on.</li>
+  <li><strong>Onion skin</strong> — ghost skeletons with joint dots at configurable frame steps around the current time: cool-tinted before, warm-tinted after, fading with distance. They draw through the body so they stay readable.</li>
+  <li><strong>Silhouette</strong> — pose-readability mode: the character becomes a single flat light shape against a dark stage, with the selected chain overlaid in gold. Grid and other overlays hide while it's on.</li>
   <li><strong>Clean playback</strong> — hides handles and gizmos while playing, restores them when you pause.</li>
 </ul>
 <div class="cols">
   <figure>
-    <img src="img/aids.png" alt="Motion paths and onion-skin ghosts drawn over the character." loading="lazy" />
-    <figcaption>Motion paths + onion skin. Ghosts draw through the body so they stay visible.</figcaption>
+    <img src="img/aids.png" alt="Motion path of the right hand plus onion-skin ghosts drawn over the character." loading="lazy" />
+    <figcaption>Motion paths (the selected control's arc — here the right hand) + onion-skin ghosts with joint dots.</figcaption>
   </figure>
   <figure>
-    <img src="img/silhouette.png" alt="Silhouette mode: skeleton-only two-tone view." loading="lazy" />
-    <figcaption>Silhouette mode strips everything to the skeleton for pose readability.</figcaption>
+    <img src="img/silhouette.png" alt="Silhouette mode: flat two-tone figure." loading="lazy" />
+    <figcaption>Silhouette flattens the character to a two-tone shape for pose readability.</figcaption>
   </figure>
 </div>
 

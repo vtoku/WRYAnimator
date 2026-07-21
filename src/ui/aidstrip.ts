@@ -60,10 +60,25 @@ const AIDS: AidDef[] = [
   { key: "aidCleanPlay", label: "Clean playback", icon: ICONS.cleanplay, params: [] },
 ];
 
-export function createAidStrip(host: HTMLElement): { dispose(): void } {
+export function createAidStrip(host: HTMLElement, opts?: { onFrame?: () => void }): { dispose(): void } {
   const strip = document.createElement("div");
   strip.className = "aidstrip";
   host.appendChild(strip);
+
+  // Frame character: an ACTION (not a toggle) — camera recovery has to be one
+  // click away when root travel walks the character out of view.
+  if (opts?.onFrame) {
+    const wrap = document.createElement("div");
+    wrap.className = "aid-wrap";
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "aid-btn";
+    btn.title = "Frame character (C)";
+    btn.innerHTML = ICONS.frame;
+    btn.addEventListener("click", () => opts.onFrame!());
+    wrap.appendChild(btn);
+    strip.appendChild(wrap);
+  }
 
   let openPop: HTMLElement | null = null;
   const closePop = () => { openPop?.remove(); openPop = null; };

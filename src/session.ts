@@ -37,6 +37,7 @@ function tx(db: IDBDatabase, mode: IDBTransactionMode, run: (store: IDBObjectSto
 
 /** Remember this recording as the last session (fire-and-forget from callers). */
 export async function saveLastSession(name: string, bytes: ArrayBuffer): Promise<void> {
+  touchLastSession();
   try {
     const db = await openDb();
     await tx(db, "readwrite", (s) => s.put({ name, bytes }, KEY));
@@ -63,4 +64,26 @@ export async function clearLastSession(): Promise<void> {
     await tx(db, "readwrite", (s) => s.delete(KEY));
     db.close();
   } catch { /* nothing to clear */ }
+  try { localStorage.removeItem(AT_KEY); } catch { /* blocked storage */ }
+}
+
+// "Was this session live moments ago?" — cheap localStorage timestamp, kept
+// OUTSIDE the multi-MB IndexedDB record so touching it costs nothing. The
+// boot flow auto-restores only recent sessions (refresh / accidental close);
+// older ones are offered, not forced.
+const AT_KEY = "wanim:lastSessionAt";
+
+/** Mark the last session as live right now (load + tab close). */
+export function touchLastSession(): void {
+  try { localStorage.setItem(AT_KEY, String(Date.now())); } catch { /* blocked */ }
+}
+
+/** Milliseconds since the last session was live; Infinity when unknown. */
+export function lastSessionAgeMs(): number {
+  try {
+    const t = Number(localStorage.getItem(AT_KEY));
+    return Number.isFinite(t) && t > 0 ? Date.now() - t : Infinity;
+  } catch {
+    return Infinity;
+  }
 }

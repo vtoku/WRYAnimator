@@ -21,6 +21,7 @@ export const ICONS = {
   onionskin: '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="8.5" cy="12" r="6.5" stroke="currentColor" stroke-width="1.5"/><circle cx="12" cy="12" r="6.5" stroke="currentColor" stroke-width="1.5" opacity=".55"/><circle cx="15.5" cy="12" r="6.5" stroke="currentColor" stroke-width="1.5" opacity=".3"/></svg>',
   silhouette: '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 22c5.52 0 10-4.48 10-10S17.52 2 12 2 2 6.48 2 12s4.48 10 10 10Z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M12 2a10 10 0 0 1 0 20Z" fill="currentColor"/></svg>',
   cleanplay: '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 22c5.52 0 10-4.48 10-10S17.52 2 12 2 2 6.48 2 12s4.48 10 10 10Z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M9.75 12v-1.52c0-1.89 1.34-2.66 2.97-1.72l1.32.76 1.32.76c1.63.94 1.63 2.48 0 3.42l-1.32.76-1.32.76c-1.63.94-2.97.17-2.97-1.72V12Z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  frame: '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M3 8V5a2 2 0 0 1 2-2h3M16 3h3a2 2 0 0 1 2 2v3M21 16v3a2 2 0 0 1-2 2h-3M8 21H5a2 2 0 0 1-2-2v-3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><circle cx="12" cy="12" r="3.25" stroke="currentColor" stroke-width="1.5"/></svg>',
 } as const;
 
 export type IconName = keyof typeof ICONS;

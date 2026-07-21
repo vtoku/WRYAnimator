@@ -62,7 +62,7 @@ const DEFAULTS: Prefs = {
   aidOnion: false,
   aidOnionCount: 3,
   aidOnionStep: 5,
-  aidOnionOpacity: 0.45,
+  aidOnionOpacity: 0.6,
   aidSilhouette: false,
   aidCleanPlay: false,
   uiScale: 1,

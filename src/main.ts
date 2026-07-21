@@ -43,7 +43,7 @@ import { PreviewScene } from "./preview/scene.ts";
 import { loadFaceMeshData } from "./preview/face.ts";
 import { createTransport, type Transport, type TransportKeyMarker } from "./ui/transport.ts";
 import type { Marker } from "./ui/timemap.ts";
-import { saveLastSession, loadLastSession, clearLastSession } from "./session.ts";
+import { saveLastSession, loadLastSession, clearLastSession, touchLastSession, lastSessionAgeMs } from "./session.ts";
 import { ICONS } from "./ui/icons.ts";
 import { buildMenuBar, type MenuDef, type MenuItem } from "./ui/menu.ts";
 import { keyFor, SHORTCUTS } from "./ui/shortcuts.ts";
@@ -111,6 +111,7 @@ document.addEventListener("keydown", (e) => {
     else if (e.key === "ArrowRight") { e.preventDefault(); transportHotkeys?.step(e.shiftKey ? 10 : 1); }
     else if (e.key === "Home") { e.preventDefault(); transportHotkeys?.home(); }
     else if (e.key === "End") { e.preventDefault(); transportHotkeys?.end(); }
+    else if (k === "c") preview?.frameCharacter();
     else if (k === "f") {
       // Fit the timeline view to the trim range (if set) else the whole clip.
       const tm = transport?.getTimeMap();
@@ -273,6 +274,10 @@ const menuDefs: MenuDef[] = [
   {
     label: "File",
     items: () => [
+      // New = forget the cached session and reboot to the default stage; a
+      // reload guarantees no state leaks from the previous session.
+      { label: "New scene", action: () => { void clearLastSession().then(() => window.location.reload()); } },
+      { separator: true },
       { label: "Open recording...", hotkey: keyFor("open"), action: openRecordingPicker },
       { label: "Open scene...", action: openScenePicker },
       { label: "Open body (VRM/GLB)...", action: openBodyPicker },
@@ -339,7 +344,7 @@ const menuDefs: MenuDef[] = [
       { label: "Lock hold-to-compare", checked: () => !!menuActions?.compareLocked(), enabled: hasClip, action: () => menuActions?.toggleCompareLock() },
       { separator: true },
       { label: "Reset camera", action: () => preview?.resetCamera() },
-      { label: "Frame character", enabled: hasClip, action: () => preview?.frameCharacter() },
+      { label: "Frame character", hotkey: keyFor("frame"), enabled: hasClip, action: () => preview?.frameCharacter() },
       { label: "Toggle grid", checked: () => !!preview?.isGridVisible(), action: () => preview?.toggleGrid() },
       { separator: true },
       // Viewport aids — same prefs the aid strip reads, so they stay in sync.
@@ -3936,6 +3941,14 @@ function showEmptyEditor() {
   transport?.dispose();
   transport = null;
   preview?.clear();
+  // Default stage: the bundled body in T-pose so the editor opens with a
+  // character on set instead of a void. Dropping any file replaces it.
+  if (preview) {
+    preview.setRigEnabled(false);
+    preview.setClip(defaultRestClip());
+    preview.setBodyMode("human");
+    preview.pause();
+  }
   emptyState.hidden = false;
   editbar.innerHTML = `<span class="eb-hint">Nothing loaded. Open a recording or a VRM/FBX from File, or press Ctrl+O</span>`;
   const emptyTabs: [string, string, string][] = [
@@ -3978,6 +3991,7 @@ let userOpenedFile = false;
 let restoredSessionName: string | null = null;
 
 async function handleFile(file: File) {
+  document.querySelector(".restore-bar")?.remove(); // opening supersedes the offer
   // Preference: confirm before dropping the current session for a new file
   // (edits stay cached per recording, so nothing is truly lost). A VRM/GLB
   // dropped onto a live session just swaps the body, so it never prompts.
@@ -4376,13 +4390,46 @@ function applyAidPrefs() {
   preview?.setAid("silhouette", p.aidSilhouette);
   preview?.setAid("cleanPlay", p.aidCleanPlay);
 }
-createAidStrip(viewport);
+createAidStrip(viewport, { onFrame: () => preview?.frameCharacter() });
 applyAidPrefs();
 onPrefsChange(applyAidPrefs);
 showEmptyEditor();
+// A session that was live moments ago (refresh, accidental close) restores
+// seamlessly; anything older is OFFERED, not forced — with proper open/save
+// in place, silently reopening an old session reads as losing your new one.
+const AUTO_RESTORE_MS = 15 * 60_000;
+window.addEventListener("beforeunload", () => { if (loaded) touchLastSession(); });
 void (async () => {
   const last = await loadLastSession();
   if (!last || userOpenedFile || loaded) return;
-  restoredSessionName = last.name;
-  await loadWanim(last.name, last.bytes, true);
+  if (lastSessionAgeMs() < AUTO_RESTORE_MS) {
+    restoredSessionName = last.name;
+    await loadWanim(last.name, last.bytes, true);
+  } else {
+    offerSessionRestore(last);
+  }
 })();
+
+/** Unobtrusive bar offering to reopen an older cached session. */
+function offerSessionRestore(last: { name: string; bytes: ArrayBuffer }) {
+  const bar = document.createElement("div");
+  bar.className = "restore-bar";
+  const label = document.createElement("span");
+  label.textContent = `Last session: ${last.name}`;
+  const restore = document.createElement("button");
+  restore.className = "button ghost";
+  restore.textContent = "Restore";
+  restore.addEventListener("click", () => {
+    bar.remove();
+    if (userOpenedFile || loaded) return;
+    restoredSessionName = last.name;
+    void loadWanim(last.name, last.bytes, true);
+  });
+  const x = document.createElement("button");
+  x.className = "restore-x";
+  x.textContent = "×";
+  x.title = "Dismiss — File > Recent keeps it";
+  x.addEventListener("click", () => bar.remove());
+  bar.append(label, restore, x);
+  document.body.appendChild(bar);
+}

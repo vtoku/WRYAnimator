@@ -33,6 +33,7 @@ export const SHORTCUTS: Shortcut[] = [
   { id: "end", keys: "End", label: "Jump to trim end", group: "Playback" },
 
   { id: "fit", keys: "F", label: "Fit the timeline to the clip", group: "View" },
+  { id: "frame", keys: "C", label: "Frame the character in view", group: "View" },
 
   { id: "move", keys: "W", label: "Gizmo: move", group: "Rig" },
   { id: "rotate", keys: "E", label: "Gizmo: rotate", group: "Rig" },

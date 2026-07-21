@@ -25,6 +25,7 @@ const ONION_WARM = 0xffa14a; // ghosts after the playhead
 // every bone/joint, the selected effector's chain in the UI accent gold.
 const SIL_BG = 0x090a0d;
 const SIL_LINE = 0xe3e7ef;
+const SIL_MESH = 0xd7dbe3; // flat unlit body while silhouette is on
 const SIL_ACCENT = 0xf5b301; // matches the CSS --logo-accent
 const STICK_LINE = 0x7fb2ff; // normal stick-figure link color
 const STICK_JOINT = 0xffffff;
@@ -282,7 +283,7 @@ export class PreviewScene {
   /** Hide/show the facecap overlay (hidden while a user VRM keeps its own head). */
   setFaceVisible(visible: boolean) {
     this.faceVisible = visible;
-    if (this.face) this.face.group.visible = visible && !this.aidSilhouette;
+    if (this.face) this.face.group.visible = visible;
   }
 
   private clearBody() {
@@ -311,8 +312,8 @@ export class PreviewScene {
         this.body = buildBodyMeshes(data.meshes, this.boneNodes, bindWorld);
         // At the scene root: the bones' world matrices already include any
         // root transform, so the skinned mesh must not inherit it too.
-        this.body.visible = !this.aidSilhouette; // silhouette: skeleton only
         this.scene.add(this.body);
+        if (this.aidSilhouette) this.applySilhouette(); // flat-swap the new meshes
       })
       .catch((err) => console.warn("body mesh unavailable:", err));
   }
@@ -332,8 +333,9 @@ export class PreviewScene {
     face.group.scale.setScalar(BODY_HEAD_HEIGHT_M * k);
     face.group.position.set(0, BODY_HEAD_LIFT_M * k, 0);
     face.group.rotation.set(0, 0, 0);
-    face.group.visible = this.faceVisible && !this.aidSilhouette;
+    face.group.visible = this.faceVisible;
     face.bindNames(this.clip.face.names);
+    if (this.aidSilhouette) this.applySilhouette(); // flat-swap the face meshes
     this.faceWeights = new Float32Array(this.clip.face.names.length);
   }
 
@@ -738,7 +740,7 @@ export class PreviewScene {
   private pathDots = true;
   private onionCount = 3;    // ghosts each side
   private onionStep = 5;     // frames between ghosts
-  private onionOpacity = 0.45;
+  private onionOpacity = 0.6;
 
   private pathLine: THREE.Line | null = null;
   private pathPoints: THREE.Points | null = null;
@@ -748,6 +750,9 @@ export class PreviewScene {
   private pathBone = -1;
   private pathFrame = -1; // window center the geometry currently shows
   private onionMeshes: THREE.LineSegments[] = []; // [before...:cool, after...:warm]
+  /** Joint dots per ghost (share the line geometry) — 1px ghost lines alone
+   *  are near-invisible over a bright body mesh. */
+  private onionDots: THREE.Points[] = [];
   private onionFrame = -1;
   // Zero-alloc FK scratch: bone order (parents first — the Unity array is NOT
   // topologically sorted) + flat world pos/quat, rebuilt per setClip.
@@ -824,13 +829,41 @@ export class PreviewScene {
     if (this.pathPoints) this.pathPoints.visible = this.aidPaths && this.pathDots && !hide && !this.aidsSuppressed();
   }
 
-  /** Silhouette: two-tone scene — flat bg, light skeleton, accent chain. */
+  /** Original mesh materials, swapped out while silhouette is on. */
+  private silMats = new Map<THREE.Mesh, THREE.Material | THREE.Material[]>();
+  private silMat: THREE.MeshBasicMaterial | null = null;
+
+  /** Silhouette: two-tone scene — flat bg, the character as a single flat
+   *  light shape (unlit mesh), the selected chain in accent. Hiding the mesh
+   *  outright read as "everything disappeared"; a flat swap keeps the pose
+   *  silhouette itself, which is the point of the mode. */
   private applySilhouette() {
     const on = this.aidSilhouette;
     (this.scene.background as THREE.Color).set(on ? SIL_BG : BG);
     if (this.grid) this.grid.visible = this.gridOn && !on; // hidden while active
-    if (this.body) this.body.visible = !on; // skeleton-only read
-    if (this.face) this.face.group.visible = this.faceVisible && !on;
+    const groups = [this.body, this.face?.group ?? null];
+    if (on) {
+      this.silMat ??= new THREE.MeshBasicMaterial({ color: SIL_MESH });
+      for (const g of groups) {
+        g?.traverse((o) => {
+          const mesh = o as THREE.Mesh;
+          if (mesh.isMesh && !this.silMats.has(mesh)) {
+            this.silMats.set(mesh, mesh.material);
+            mesh.material = this.silMat!;
+          }
+        });
+      }
+    } else {
+      for (const [mesh, mat] of this.silMats) mesh.material = mat;
+      this.silMats.clear();
+    }
+    // The accent chain must read OVER the flat mesh; normal-mode lines keep
+    // depth so the figure doesn't x-ray through the body.
+    for (const obj of [this.lines, this.joints]) {
+      const mat = obj?.material as THREE.Material | undefined;
+      if (mat) { mat.depthTest = !on; mat.depthWrite = !on; }
+      if (obj) obj.renderOrder = on ? 8 : 0;
+    }
     this.refreshStickColors();
     this.applySuppressed();
   }
@@ -840,7 +873,10 @@ export class PreviewScene {
     const sup = this.aidsSuppressed();
     if (this.pathLine) this.pathLine.visible = this.aidPaths && !sup;
     if (this.pathPoints) this.pathPoints.visible = this.aidPaths && this.pathDots && !sup && !this.overlaysHidden();
-    if (sup) for (const m of this.onionMeshes) m.visible = false;
+    if (sup) {
+      for (const m of this.onionMeshes) m.visible = false;
+      for (const d of this.onionDots) d.visible = false;
+    }
     if (this.ghostLines) this.ghostLines.visible = !sup;
     if (this.ghostBody) this.ghostBody.visible = !sup;
     if (!sup) {
@@ -961,11 +997,21 @@ export class PreviewScene {
     if (this.aidOnion) this.updateOnion(f);
   }
 
-  /** The bone the motion path follows: selected effector, else the hips. */
+  /** Remembered across deselects so the path doesn't snap back to the hips. */
+  private lastRigSelected: EffectorId | null = null;
+
+  /** The effector the motion path follows: current selection, else the last
+   *  one, else a hand — the hips barely move relative to the body, so a
+   *  hips default made the toggle look broken on first use. */
+  private pathEffectorId(): EffectorId {
+    if (this.rigSelected) return this.rigSelected;
+    if (this.lastRigSelected) return this.lastRigSelected;
+    return this.clip?.names.includes("RightHand") ? "rightHand" : "hips";
+  }
+
   private pathBoneIndex(): number {
     if (!this.clip) return -1;
-    const id = this.rigSelected ?? "hips";
-    const def = EFFECTORS.find((e) => e.id === id);
+    const def = EFFECTORS.find((e) => e.id === this.pathEffectorId());
     let idx = def ? this.clip.names.indexOf(def.bone) : -1;
     if (idx < 0) idx = this.clip.names.indexOf("Hips");
     return idx < 0 ? 0 : idx;
@@ -1021,7 +1067,7 @@ export class PreviewScene {
     if (f === this.pathFrame) return;
     this.pathFrame = f;
     if (this.ensurePathObjects() || boneChanged) {
-      const c = effectorColor(this.rigSelected ?? "hips");
+      const c = effectorColor(this.pathEffectorId());
       (this.pathLine!.material as THREE.LineBasicMaterial).color.set(c);
       (this.pathPoints!.material as THREE.PointsMaterial).color.set(c);
     }
@@ -1070,6 +1116,22 @@ export class PreviewScene {
         mesh.frustumCulled = false;
         this.scene.add(mesh);
         this.onionMeshes.push(mesh);
+        const dots = new THREE.Points(
+          geo, // shared with the lines — one position write drives both
+          new THREE.PointsMaterial({
+            color: side === 0 ? ONION_COOL : ONION_WARM,
+            size: 3.5,
+            sizeAttenuation: false,
+            transparent: true,
+            opacity: this.onionOpacity * (1 - (k - 1) / this.onionCount),
+            depthTest: false,
+            depthWrite: false,
+          }),
+        );
+        dots.renderOrder = 7;
+        dots.frustumCulled = false;
+        this.scene.add(dots);
+        this.onionDots.push(dots);
       }
     }
     this.onionFrame = -1;
@@ -1081,7 +1143,12 @@ export class PreviewScene {
       m.geometry.dispose();
       (m.material as THREE.Material).dispose();
     }
+    for (const d of this.onionDots) {
+      this.scene.remove(d); // geometry is shared with the lines — already disposed
+      (d.material as THREE.Material).dispose();
+    }
     this.onionMeshes = [];
+    this.onionDots = [];
     this.onionFrame = -1;
   }
 
@@ -1097,8 +1164,14 @@ export class PreviewScene {
       const k = (m % this.onionCount) + 1;
       const g = before ? f - k * this.onionStep : f + k * this.onionStep;
       const mesh = this.onionMeshes[m];
-      if (g < 0 || g > last) { mesh.visible = false; continue; }
+      const dots = this.onionDots[m];
+      if (g < 0 || g > last) {
+        mesh.visible = false;
+        if (dots) dots.visible = false;
+        continue;
+      }
       mesh.visible = true;
+      if (dots) dots.visible = true;
       this.fkFrame(clip, g);
       const attr = mesh.geometry.getAttribute("position") as THREE.BufferAttribute;
       const arr = attr.array as Float32Array;
@@ -1251,6 +1324,7 @@ export class PreviewScene {
   selectEffector(effector: EffectorId | null) {
     if (this.rigSelected === effector) return;
     this.rigSelected = effector;
+    if (effector) this.lastRigSelected = effector; // motion-path fallback
     this.restyleHandles();
     if (effector && this.gizmo) {
       this.syncProxy();
@@ -1488,20 +1562,35 @@ export class PreviewScene {
   }
 
   private frameCamera() {
-    if (!this.boneRoot) return;
-    const box = new THREE.Box3().setFromObject(this.boneRoot);
+    if (!this.boneRoot || !this.boneNodes.length) return;
+    // Bounds from the bone WORLD positions: bone nodes are geometry-less
+    // Object3Ds, so Box3.setFromObject sees nothing and framed a degenerate
+    // box (chest-up, hands cropped). A small pad covers mesh volume.
+    const box = new THREE.Box3();
+    const v = new THREE.Vector3();
+    this.boneRoot.updateWorldMatrix(true, true);
+    for (const n of this.boneNodes) box.expandByPoint(n.getWorldPosition(v));
     if (box.isEmpty()) return;
+    box.expandByScalar(0.18);
     const size = box.getSize(new THREE.Vector3());
     const center = box.getCenter(new THREE.Vector3());
-    const maxDim = Math.max(size.x, size.y, size.z) || 1;
-    const dist = (maxDim / (2 * Math.tan((this.camera.fov * Math.PI) / 360))) * 1.6;
+    // Fit BOTH axes of the frustum, not just the vertical fov — a T-pose is
+    // wider than tall on a narrow viewport.
+    const vFov = (this.camera.fov * Math.PI) / 180;
+    const hFov = 2 * Math.atan(Math.tan(vFov / 2) * this.camera.aspect);
+    const dist = Math.max(
+      size.y / (2 * Math.tan(vFov / 2)),
+      size.x / (2 * Math.tan(hFov / 2)),
+      size.z,
+      0.5,
+    ) * 1.35;
     // Aim at the character's ACTUAL center — root travel moves it away from
     // the world origin, and an origin-locked target frames empty space (or
     // the inside of the body) once the character has walked off.
     this.controls.target.copy(center);
     this.camera.position.set(center.x, center.y, center.z + dist);
-    this.camera.near = maxDim / 100;
-    this.camera.far = maxDim * 100;
+    this.camera.near = Math.max(0.01, dist / 100);
+    this.camera.far = Math.max(1000, dist * 100);
     this.camera.updateProjectionMatrix();
     this.controls.update();
   }
