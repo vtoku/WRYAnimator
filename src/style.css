@@ -645,13 +645,14 @@ main:has(.loaded-state:not([hidden])) {
   padding: 0 2px;
 }
 
-/* Right group: timecode row over the trim/tools/panel row. */
+/* Right group: timecode row over the trim/tools/panel row — the rows PIN to
+   the ruler (20px) and track (26px) heights so they stay aligned even when
+   the object lanes grow the strip taller. */
 .t-side {
   display: flex;
   flex-direction: column;
-  justify-content: space-between;
-  gap: 3px;
-  padding: 1px 0;
+  justify-content: flex-start;
+  gap: 2px;
 }
 
 .t-side-row {
@@ -659,6 +660,9 @@ main:has(.loaded-state:not([hidden])) {
   align-items: center;
   gap: 0.5rem;
 }
+
+.t-side-row:first-child { height: 20px; }
+.t-side-row:last-child { height: 26px; }
 
 .t-time {
   font-size: 0.95rem; /* timecode stays >=14px, tabular so digits don't dance */
