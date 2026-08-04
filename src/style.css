@@ -579,6 +579,10 @@ main:has(.loaded-state:not([hidden])) {
   min-height: var(--timeline-height, 0);
   border-top: 1px solid var(--border);
   background: var(--bg-raise);
+  /* Column so the transport stretches: a taller dock grows the panels area
+     (and the layers rail reaches the dock bottom), not dead space. */
+  display: flex;
+  flex-direction: column;
 }
 
 /* Top-edge grip: drag to resize the timeline dock height (layout.ts hot-zone). */
@@ -615,12 +619,15 @@ main:has(.loaded-state:not([hidden])) {
 
 /* Transport bar (bottom timeline dock) */
 .transport-overlay {
+  flex: 1;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   padding: 0.45rem 0.9rem;
 }
 
 .t-main {
+  flex: none;
   display: flex;
   align-items: stretch;
   gap: 0.75rem; /* between the three groups; tighter gaps live inside them */
@@ -893,12 +900,12 @@ main:has(.loaded-state:not([hidden])) {
   pointer-events: none;
 }
 
-/* Mini dope sheet under the strip */
+/* Mini dope sheet under the strip (flex sibling of the layers rail) */
 .t-dope {
+  flex: 1;
+  min-width: 0;
   max-height: var(--dope-height, 260px);
   overflow-y: auto;
-  margin-top: 0.35rem;
-  border-top: 1px solid var(--border);
   padding-top: 0.25rem;
 }
 
@@ -1009,6 +1016,8 @@ main:has(.loaded-state:not([hidden])) {
 /* ---- f-curve editor: Channels mode ---- */
 .t-curves {
   position: relative;
+  flex: 1;
+  min-width: 0;
 }
 
 .t-curves canvas {
@@ -1787,26 +1796,34 @@ kbd {
 }
 .restore-bar .restore-x:hover { color: var(--text); }
 
-/* Animation-layers rail: fills the dead zone under the right-side transport
-   controls while a dope/curves panel is open (DCC-style stack:
-   newest on top, active highlighted, mute + weight per layer). */
-.t-panels { position: relative; }
+/* Animation-layers rail: a real column under the right-side transport
+   controls, beside the dope/curves panel (DCC-style stack: newest on top,
+   active highlighted, mute + weight per layer). It's an in-flow flex item so
+   its content sets the panels height — the full stack shows without a
+   scrollbar by default — and it stretches to the dock bottom when the
+   timeline dock is dragged taller. */
+.t-panels {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: stretch;
+}
 
-/* Keys view can be a single short hint row — keep room for the layers rail
-   whenever it's visible so the stack doesn't collapse to a sliver. */
-.t-panels:has(.t-rail:not([hidden])) { min-height: 150px; }
+/* Separator above whichever panel is open (dope, curves, or just the rail). */
+.t-panels:has(> :not([hidden])) {
+  margin-top: 0.35rem;
+  border-top: 1px solid var(--border);
+}
 
 .t-rail {
-  position: absolute;
-  top: 2px;
-  right: 0;
-  bottom: 2px;
+  flex: none;
   width: 224px;
   display: flex;
   flex-direction: column;
   gap: 2px;
-  overflow-y: auto;
-  padding: 2px 2px 2px 8px;
+  overflow-y: auto; /* safety valve only — content normally fits */
+  padding: 4px 2px 2px 8px;
   border-left: 1px solid var(--border);
   background: rgba(16, 19, 24, 0.92);
 }

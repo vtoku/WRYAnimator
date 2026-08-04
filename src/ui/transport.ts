@@ -829,7 +829,9 @@ export function createTransport(preview: PreviewScene, duration: number, frames 
     setChannels,
     curveView,
     layerRail: railEl,
-    syncRail: syncDopeVisibility,
+    // The rail is an in-flow column now: toggling it changes the dope/curves
+    // width, so re-run the strip alignment along with the visibility pass.
+    syncRail: () => { syncDopeVisibility(); alignDope(); },
     dispose: () => {
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
