@@ -25,6 +25,9 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
+      # The template scene is generated, not committed (*.wanim is ignored) —
+      # without this the deployed boot 404s and falls back to an empty editor.
+      - run: node scripts/makeSampleWanim.mjs
       - run: npm run build
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
