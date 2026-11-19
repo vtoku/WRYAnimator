@@ -65,7 +65,14 @@ export function initAgentLink(host: AgentHost): AgentLink {
     pill.textContent = text;
   };
   pill.addEventListener("click", () => {
-    if (window.confirm("Disconnect from the local agent? The recording stays open here.")) api.disconnect();
+    const stuck = pill.dataset.state === "err"
+      ? "Can't reach the local agent. Check that:\n" +
+        "  • the agent (or `wry`) is still running on this computer;\n" +
+        "  • this site is allowed to reach local devices — if the browser asked and it was blocked, open the site " +
+        "settings (the icon left of the address) and allow \"Local network access\", then reload;\n" +
+        "  • you are using Chrome, Edge or Firefox (Safari blocks this).\n\n"
+      : "";
+    if (window.confirm(`${stuck}Disconnect from the local agent? The recording stays open here.`)) api.disconnect();
   });
 
   async function sync(state: LinkState): Promise<void> {
@@ -119,7 +126,7 @@ export function initAgentLink(host: AgentHost): AgentLink {
       });
       es.onerror = () => {
         // EventSource retries by itself; say so rather than going silent.
-        show(live ? "Agent: connection lost — retrying…" : "Agent: can't reach the local agent — is it running? (retrying…)", "err");
+        show(live ? "Agent: connection lost — retrying…" : "Agent: can't connect — click for help (retrying…)", "err");
         live = false;
       };
       return true;
