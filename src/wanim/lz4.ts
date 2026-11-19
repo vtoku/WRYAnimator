@@ -20,6 +20,62 @@ export function lz4CompressBlockLiteral(src: Uint8Array): Uint8Array {
   return out.subarray(0, o);
 }
 
+/**
+ * Real LZ4 block compression (greedy, single hash probe — the reference
+ * "fast" scheme). Output is a standard LZ4 block: offsets ≤ 65535, the last 5
+ * bytes are literals and no match starts within the last 12 bytes. Used by the
+ * timing-exact .wanim writer so its files stay near the size of Warudo's own.
+ */
+export function lz4CompressBlock(src: Uint8Array): Uint8Array {
+  const n = src.length;
+  if (n < 13) return lz4CompressBlockLiteral(src);
+  const out = new Uint8Array(n + Math.ceil(n / 255) + 16);
+  const table = new Int32Array(1 << 16).fill(-1);
+  const mfLimit = n - 12;
+  const matchLimit = n - 5;
+  let o = 0;
+  let anchor = 0;
+  let i = 0;
+  const writeLen = (len: number): void => {
+    let rem = len;
+    while (rem >= 255) { out[o++] = 255; rem -= 255; }
+    out[o++] = rem;
+  };
+  while (i < mfLimit) {
+    const seq = src[i] | (src[i + 1] << 8) | (src[i + 2] << 16) | (src[i + 3] << 24);
+    const h = Math.imul(seq, 2654435761) >>> 16;
+    const ref = table[h];
+    table[h] = i;
+    if (
+      ref < 0 || i - ref > 65535 ||
+      src[ref] !== src[i] || src[ref + 1] !== src[i + 1] || src[ref + 2] !== src[i + 2] || src[ref + 3] !== src[i + 3]
+    ) {
+      i++;
+      continue;
+    }
+    let ml = 4;
+    while (i + ml < matchLimit && src[ref + ml] === src[i + ml]) ml++;
+    const lit = i - anchor;
+    const token = o++;
+    out[token] = (Math.min(lit, 15) << 4) | Math.min(ml - 4, 15);
+    if (lit >= 15) writeLen(lit - 15);
+    out.set(src.subarray(anchor, i), o);
+    o += lit;
+    const offset = i - ref;
+    out[o++] = offset & 0xff;
+    out[o++] = offset >> 8;
+    if (ml - 4 >= 15) writeLen(ml - 4 - 15);
+    i += ml;
+    anchor = i;
+  }
+  const lit = n - anchor;
+  out[o++] = Math.min(lit, 15) << 4;
+  if (lit >= 15) writeLen(lit - 15);
+  out.set(src.subarray(anchor, n), o);
+  o += lit;
+  return out.subarray(0, o);
+}
+
 export function lz4DecompressBlock(src: Uint8Array, dstLen: number): Uint8Array {
   const dst = new Uint8Array(dstLen);
   let s = 0;

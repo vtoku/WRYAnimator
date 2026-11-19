@@ -53,7 +53,7 @@ const LZ4_BLOCK_EXT = 99;
  * Unwrap MessagePack-CSharp LZ4 compression (LZ4BlockArray ext 98 / LZ4Block
  * ext 99) and return the decompressed msgpack payload.
  */
-function decompressPayload(file: Uint8Array): Uint8Array {
+export function decompressPayload(file: Uint8Array): Uint8Array {
   const reader = new MsgpackReader(file);
   const head = file[0];
 

@@ -364,7 +364,11 @@ function butterRange(track: Quat[], times: number[], f0: number, f1: number, cut
       track[f0 + i][comp] = x[i] + (y[i] - x[i]) * w;
     }
   }
-  for (let f = f0; f <= f1; f++) track[f] = quatNormalize(track[f]);
+  // Renormalize only frames the blend actually touched: the padded frames
+  // outside the edge blend (weight 0) must stay bit-identical.
+  for (let f = f0; f <= f1; f++) {
+    if (edgeWeight(times[f] - off, t0, t1) > 0) track[f] = quatNormalize(track[f]);
+  }
 }
 
 /** Moving-average (box) smoothing on one quat track over [f0,f1] w/ blend. */

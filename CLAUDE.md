@@ -63,6 +63,38 @@ npm run rigCheck   -- [file.wanim]           # control-rig layers + modifiers: a
 
 No unit-test framework yet — the three `npm run` scripts above are the regression checks (they import the real `src/` modules). `node --experimental-strip-types` runs the TS directly: see the gotcha below.
 
+## Headless API, CLI and MCP (`src/api/`, `cli/`)
+
+The editor's core also runs without a browser, for AI agents and scripts. **One core, several front ends** — keep it that way:
+
+- `src/api/session.ts` — `openSession(bytes, opts)` → a `Session`: the numeric editing API (layers, `key.set`, `hold.insert`, `limit.apply`, scoped filters, `evaluate`, `diff`, `scan`, undo/redo, `.rig.json` save/load, `exportWanim`). Pure TS, no DOM, strip-types safe.
+- `src/api/ops.ts` — **the operation table**: every operation's name, description, JSON-schema arguments and implementation. The MCP server turns each entry into a tool (`limit.apply` → `wry_limit_apply`), the CLI runs them from flags or edit scripts. Add an operation HERE and it appears in both. A future `window.wry` should expose the same table.
+- `src/api/anatomy.ts` — wrist `flex / deviation / twist` and finger `curl / splay` ⇄ quaternion. The sign convention is documented at the top of that file (flex + = palm-ward, deviation + = thumb side, twist + = supination, same meaning on both sides). `compose(decompose(q)) === q`.
+- `src/api/scan.ts` — problem detection (`wrist_hyperbend`, `wrist_axis_flip`, `twist_excess`, finger kinds, `pop`, `jitter`, `foot_slide`, `floor_penetration`, `root_pop`); thresholds are parameters (`DEFAULT_THRESHOLDS`).
+- `src/api/pipeline.ts` — `runPipeline()`: the edit stack in the same order as `main.ts` `buildDisplay()` / `doExport()`, with inputs passed as data. **`main.ts` does not call it yet** — if a stage is added or reordered in `main.ts`, mirror it here.
+- `src/wanim/exactWanim.ts` — **timing-exact `.wanim` export**. It patches the ORIGINAL decompressed payload in place, overwriting only cells where the edited clip differs from the base by more than 1e-6 rad; timestamps (float64), untouched bones, root tracks, blendshapes and fields 7–9 are the source's own bytes. A no-edit export returns the source file byte for byte. Edited quats are un-mirrored and written in the original hemisphere (never q → −q). `writeWanim.ts` remains the RESAMPLING writer (used by the web app's WANIM download and `wry convert --resample`).
+- `cli/wry.mjs` (CLI), `cli/mcp.mjs` (hand-rolled stdio MCP server, no dependencies), `cli/core.mjs` (file I/O shared by both), `cli/options.mjs` (flags of the one-shot `info` / `convert` / `unpack` commands).
+
+```bash
+npm run wry -- scan take.wanim            # or: node cli/wry.mjs …   (JSON on stdout; exit 0 ok / 1 failed / 2 usage)
+npm run mcp                                # MCP server on stdio
+npm run apiCheck -- [--ptid ptid_excerpt.wanim] [--ab ab_excerpt.wanim]   # API + exact export + CLI + MCP acceptance
+```
+
+Invariants (all covered by `apiCheck`):
+
+- **Sessions never change timing.** No resample, no time warp; an edit changes only the bones and frames it names (plus its blend). Operations refuse while a rig with a time warp is loaded.
+- **Scope guard.** `allowBones` / `denyBones` per session; any operation that would write a bone outside scope throws `ApiError` and leaves the session unchanged. Files named `*TWISTFIX*` get `protectForearmTwist` (no twist limits / twist keys on a LowerArm). Nothing in the API writes face blendshapes. Programmatic hand edits never redistribute twist onto the forearm (the UI's `WRIST_TWIST_SHARE` is not applied).
+- **Times** in the API are playback seconds + the session's `timeOffset` (default 0; an excerpt's sidecar `<file>.json` `sourceTimeStart` is picked up by the CLI/MCP so excerpts answer to source-take times). Rig files always store playback time.
+- **Span operations are layers.** `hold.insert` and `limit.apply` each add their own override layer (dense per-frame keys with a near-zero fade, or two sparse keys for a symmetric hold), so they are undoable, serialised in `.rig.json`, and visible in the web editor.
+- **MCP stdout is protocol only.** `cli/core.mjs` never prints; `serve()` reroutes `console.log` to stderr.
+
+**Local link (site ⇄ local agent).** `cli/link.mjs` is a tiny HTTP server on `127.0.0.1` that the MCP server starts on `wry_view`; `src/agentLink.ts` is the page side. The page opened as `https://wryanimator.com/#agent=<port>-<token>` (or File → Connect to local agent…) subscribes to `/<token>/events` (SSE), fetches the recording and the current `.rig.json`, and replays them through the normal paths (`loadWanim`, then `agentPanel.applyRig` = `adoptRigState` + `reclean`), re-fetching the rig after every mutating tool call. Rules: the site stays static (the PAGE connects out to loopback, never the reverse); the link is **read-only** (GET only), token-gated, origin-checked (site origin + localhost; `WRY_SITE` / `WRY_LINK_ORIGINS` override for dev), and the token rides in the URL fragment so it never reaches the web host. The session loads under the name `[agent] <name>` so it cannot overwrite the browser's own cached edits for that recording. `npm run build && npm run linkCheck` drives it in Chromium against `vite preview`.
+
+**Layers rail** (`renderLayerRail` in `main.ts`): header always shows `+ Additive` / `+ Override` (first button keeps class `rail-btn` — `railProbe.mjs` clicks it); rows carry a mode chip, key count, weight, mute; the active layer expands with segmented Mode / Extent toggles (`railSeg`, no `<select>`s), fade, and ↑ ↓ Rename Duplicate Delete. Inline rename stops key events from reaching the editor hotkeys. `npm run build && npm run layersCheck` covers it.
+
+Not built yet (from the agent handoff): headless `render` (before/after images), and the rest of the web-app side — a full `window.wry` API, typed numeric fields in the inspector, a Scan panel. The local link is one-way (agent → page); edits made in the page do not flow back to the agent's session. `matchKeys` / `blendKeysToward` are not exposed as operations.
+
 ## Build / runtime gotchas
 
 - **TS imports MUST carry the `.ts` extension** (`import { x } from "./foo.ts"`). The smoke scripts run under Node's `--experimental-strip-types`, which does no path resolution; `tsconfig` has `allowImportingTsExtensions: true` and Vite handles it for the browser build.

@@ -19,7 +19,18 @@
     "shogunCheck": "node scripts/shogunCheck.mjs",
     "fbxImportCheck": "node scripts/fbxImportCheck.mjs",
     "drive": "node scripts/driveApp.mjs",
-    "bootcheck": "node scripts/bootCheck.mjs"
+    "bootcheck": "node scripts/bootCheck.mjs",
+    "wry": "node cli/wry.mjs",
+    "mcp": "node cli/wry.mjs mcp",
+    "apiCheck": "node scripts/apiCheck.mjs",
+    "linkCheck": "node scripts/linkCheck.mjs",
+    "layersCheck": "node scripts/layersCheck.mjs"
+  },
+  "bin": {
+    "wry": "cli/wry.mjs"
+  },
+  "engines": {
+    "node": ">=22.18"
   },
   "dependencies": {
     "three": "^0.169.0"

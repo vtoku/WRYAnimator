@@ -35,6 +35,8 @@
     border-top: 1px solid var(--line);
   }
   h3 { font-size: 1rem; margin: 1.6rem 0 0.3rem; }
+  pre { overflow-x: auto; padding: 0.7rem 0.9rem; border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 8px; background: rgba(0, 0, 0, 0.3); font-size: 0.85rem; line-height: 1.5; }
+  pre code { background: none; padding: 0; border: none; }
   p, li { color: var(--text); font-size: 0.95rem; }
   li { margin: 0.25rem 0; }
   .note { color: var(--dim); font-size: 0.88rem; }
@@ -82,6 +84,7 @@
     <li><a href="#time">Time tools: loops, holds, retiming</a></li>
     <li><a href="#sets">Selection sets</a></li>
     <li><a href="#export">Exporting</a></li>
+    <li><a href="#agent">AI agents: MCP, command line &amp; the local link</a></li>
   </ul>
 </div>
 
@@ -158,6 +161,13 @@
 
 <h2 id="rig">Rig layers &amp; corrections</h2>
 <p>The <span class="menu">Rig</span> tab is a control-rig layer system: click a colored handle on the figure, pose it (IK for hands/feet with pole targets, FK for spine/head/fingers), and key it on a layer. Additive layers nudge the motion ("elbow +20° here"); override layers pin it. Layers stack with weights and per-layer fade, and everything bakes into the export. Finger posing works from the channel tree — selecting a finger row pops a gizmo on that chain.</p>
+<p>Layers live in the <strong>Layers rail</strong> at the bottom right, newest on top:</p>
+<ul>
+  <li><strong>+ Additive</strong> / <strong>+ Override</strong> add a layer of that kind in one click; it becomes the active layer, which is where new keys land.</li>
+  <li>Each row shows the layer's kind (<em>ADD</em> / <em>OVR</em>), its key count, a weight slider and <strong>M</strong> to mute it. Click a row to make it active; double-click its name to rename it.</li>
+  <li>The active layer opens up: <strong>Mode</strong> (Additive / Override — existing keys are converted so the pose survives) and <strong>Extent</strong> (Fade = a local correction that eases in and out; Hold = the first/last key extends across the clip) are one-click toggles, with the fade time below.</li>
+  <li><strong>↑ ↓</strong> reorder the stack (higher layers apply on top), <strong>Duplicate</strong> copies a layer with its keys, <strong>Delete</strong> removes it. All of it is undoable.</li>
+</ul>
 <p class="note">The Key reduction panel in the Rig tab estimates how many keys each body part could drop at a chosen tolerance — use it to pick tolerances before adding a Key reduce filter.</p>
 
 <h2 id="time">Time tools: loops, holds, retiming</h2>
@@ -201,6 +211,26 @@
   <img src="img/video-dialog.png" alt="The preview video export dialog." loading="lazy" />
   <figcaption>Preview video export — an in-browser screen recording of the preview over the trim range.</figcaption>
 </figure>
+
+<h2 id="agent">AI agents: MCP, command line &amp; the local link</h2>
+<p>WRYAnimator's editing core also runs on your own computer without the browser, so an AI agent (for example Claude Code) or a script can find and fix problems in a take with exact numbers instead of dragging handles. It needs the project checked out locally and Node 22.18 or newer:</p>
+<pre><code>git clone https://github.com/vtoku/WRYAnimator.git
+cd WRYAnimator
+npm install
+claude mcp add wry -- node /full/path/to/WRYAnimator/cli/wry.mjs mcp</code></pre>
+<p>The agent then has tools to open a recording by its file path (any size), <strong>scan</strong> it for problems (a wrist bent back too far, tracking flips, clawed fingers, pops, jitter, sliding feet), read exact joint values, apply scoped fixes (joint limits over a time range, holding a clean pose across a glitch, typed keys, filters), and export. The same operations are available from the command line as <code>node cli/wry.mjs scan take.wanim</code> and friends — see the project README.</p>
+<ul>
+  <li><strong>Timing is never changed.</strong> The exported <code>.wanim</code> has the original frame count and timestamps; only the bones and frames an edit names are different, and face blendshapes are untouched. A take that is synced to music and lip-sync stays in sync.</li>
+  <li><strong>Protected bones.</strong> A session can be opened with a deny list (say, the left hand while it holds a microphone); any edit that would touch a listed bone is refused.</li>
+  <li><strong>Every edit is a layer</strong>, so the agent's work can be saved as a <code>.rig.json</code>, undone, and opened here to review.</li>
+</ul>
+<h3>The local link: watch the agent work in this editor</h3>
+<p>Ask the agent to show its session (the <code>wry_view</code> tool). It opens this site with a link ending in <code>#agent=…</code>, and the editor then follows the agent live: it loads the recording, shows the agent's layers in the Layers rail, and moves the playhead to wherever the agent is working. A pill at the top right shows the connection (<em>Agent: live</em>). You can also connect by hand with <span class="menu">File → Connect to local agent…</span> and pasting the link or its code.</p>
+<ul>
+  <li><strong>Nothing is uploaded.</strong> The page reads the recording from the agent's program on your own machine (<code>127.0.0.1</code>). The code in the link never leaves your computer, and it changes every time the agent starts.</li>
+  <li><strong>The page is a viewer.</strong> It can look at the agent's session but cannot change it; edits you make here stay in this tab.</li>
+  <li><strong>Browsers.</strong> Works in Chrome, Edge and Firefox. Chrome may ask once for permission to reach devices on your local network — that is this link. Safari blocks secure pages from talking to local programs, so it cannot connect.</li>
+</ul>
 
 <p class="note" style="margin-top:3rem">Everything runs client-side — recordings never leave your machine. Keyboard shortcuts are listed under <span class="menu">Help → Keyboard shortcuts</span>.</p>
 

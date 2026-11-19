@@ -52,6 +52,7 @@ import { getPref, getPrefs, setPref, onPrefsChange, applyAppearance } from "./ui
 import { createAidStrip } from "./ui/aidstrip.ts";
 import { initLayout, setDockCollapsed, setLayoutSizes } from "./ui/layout.ts";
 import * as recent from "./ui/recent.ts";
+import { initAgentLink } from "./agentLink.ts";
 
 const emptyState = document.getElementById("empty-state") as HTMLElement; // dim prompt over the viewport grid
 const menubarEl = document.getElementById("menubar") as HTMLElement;
@@ -294,6 +295,7 @@ const menuDefs: MenuDef[] = [
       { label: "Open scene...", action: openScenePicker },
       { label: "Open body (VRM/GLB)...", action: openBodyPicker },
       { label: "Recent", submenu: recentSubmenu, hidden: () => !recentSupported() },
+      { label: "Connect to local agent...", action: openAgentConnect },
       { separator: true },
       { label: "Save scene", hotkey: keyFor("save"), enabled: hasSession, action: dispatchSaveScene },
       { label: "Save scene as...", enabled: hasSession, action: dispatchSaveSceneAs },
@@ -430,6 +432,8 @@ interface BodyPanel {
   isVrm(): boolean;
 }
 let bodyPanel: BodyPanel | null = null;
+/** Live-session hook for the local agent link (src/agentLink.ts); set per recording by buildPanel. */
+let agentPanel: { applyRig(doc: Record<string, unknown>): Promise<void> } | null = null;
 
 function bytesToBase64(bytes: Uint8Array): string {
   let out = "";
@@ -2212,154 +2216,262 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     }
   }
 
-  /** Compact layers stack in the transport rail (DCC convention: newest on top,
-   *  click = active, M = mute, slider = weight). Mirrors the Rig tab list. */
+  /** Layer whose name is being edited inline in the rail (-1 = none). */
+  let renamingLayer = -1;
+
+  /** A two-option segmented toggle: one click, no dropdown to open. */
+  function railSeg<T extends string>(options: Array<{ value: T; label: string; tip: string }>, current: T, onPick: (v: T) => void): HTMLElement {
+    const seg = document.createElement("div");
+    seg.className = "rail-seg";
+    for (const o of options) {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.textContent = o.label;
+      b.title = o.tip;
+      if (o.value === current) b.className = "on";
+      b.addEventListener("click", (e) => {
+        e.stopPropagation();
+        if (o.value !== current) onPick(o.value);
+      });
+      seg.appendChild(b);
+    }
+    return seg;
+  }
+
+  /** Layers stack in the transport rail (DCC convention: newest on top). One
+   *  click adds a layer of either kind; the active layer expands with
+   *  segmented Mode/Extent toggles (no dropdowns) and its actions. Double-click
+   *  a name to rename it. */
   function renderLayerRail() {
     const rail = transport?.layerRail;
     if (!rail) return;
     rail.innerHTML = "";
-    if (rigLayers.length) {
-      const head = document.createElement("div");
-      head.className = "t-rail-head";
-      const title = document.createElement("span");
-      title.textContent = "Layers";
-      const add = document.createElement("button");
-      add.className = "rail-btn";
-      add.textContent = "+";
-      add.title = "Add a layer";
-      add.addEventListener("click", addRigLayer);
-      head.append(title, add);
-      rail.appendChild(head);
-      for (let i = rigLayers.length - 1; i >= 0; i--) {
-        const layer = rigLayers[i];
-        const row = document.createElement("div");
-        row.className = "rail-layer" + (i === activeLayerIdx ? " active" : "");
-        row.addEventListener("click", () => {
-          if (activeLayerIdx !== i) { activeLayerIdx = i; renderRigLayers(); updateRigEditor(); }
-          // Router: a layer's properties live on the Rig page (until the
-          // dedicated layer inspector page lands in U3).
-          if (activeTab !== "rig") setTab("rig");
+    const head = document.createElement("div");
+    head.className = "t-rail-head";
+    const title = document.createElement("span");
+    title.textContent = "Layers";
+    const adds = document.createElement("span");
+    adds.className = "rail-adds";
+    const mkAdd = (label: string, mode: RigLayer["mode"], tip: string) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "rail-btn rail-add";
+      b.textContent = label;
+      b.title = tip;
+      b.addEventListener("click", () => addRigLayer(mode));
+      return b;
+    };
+    adds.append(
+      mkAdd("+ Additive", "additive", "New additive layer: keys nudge the motion, which keeps playing underneath"),
+      mkAdd("+ Override", "override", "New override layer: keys replace the motion with the pose you set"),
+    );
+    head.append(title, adds);
+    rail.appendChild(head);
+    if (!rigLayers.length) {
+      const empty = document.createElement("p");
+      empty.className = "rail-empty";
+      empty.textContent = "No layers yet. Add one, then pose a handle on the figure — the key lands on the active layer.";
+      rail.appendChild(empty);
+    }
+    for (let i = rigLayers.length - 1; i >= 0; i--) {
+      const layer = rigLayers[i];
+      const keyCount = layer.tracks.reduce((n, tr) => n + keyTimes(tr).length, 0);
+      const row = document.createElement("div");
+      row.className = "rail-layer" + (i === activeLayerIdx ? " active" : "") + (layer.enabled ? "" : " off");
+      row.addEventListener("click", () => {
+        if (activeLayerIdx !== i) { activeLayerIdx = i; renderRigLayers(); updateRigEditor(); }
+        // Router: a layer's keys are edited on the Rig page.
+        if (activeTab !== "rig") setTab("rig");
+      });
+      // Mode at a glance, without opening the layer.
+      const chip = document.createElement("span");
+      chip.className = `rail-chip ${layer.mode}`;
+      chip.textContent = layer.mode === "additive" ? "ADD" : "OVR";
+      chip.title = layer.mode === "additive" ? "Additive: nudges the motion" : "Override: replaces the motion with the keyed pose";
+      let name: HTMLElement;
+      if (renamingLayer === i) {
+        const input = document.createElement("input");
+        input.className = "rail-rename";
+        input.value = layer.name;
+        input.maxLength = 40;
+        let done = false;
+        const finish = (commit: boolean) => {
+          if (done) return;
+          done = true;
+          renamingLayer = -1;
+          const v = input.value.trim();
+          if (commit && v && v !== layer.name) { pushHistory(); layer.name = v; saveRigCache(); }
+          renderRigLayers();
+        };
+        input.addEventListener("click", (e) => e.stopPropagation());
+        input.addEventListener("keydown", (e) => {
+          e.stopPropagation(); // typing a name must not trigger editor hotkeys
+          if (e.key === "Enter") finish(true);
+          else if (e.key === "Escape") finish(false);
         });
-        const name = document.createElement("button");
-        name.className = "rail-name";
-        name.textContent = layer.name;
-        name.title = `${layer.name} — ${layer.mode}, ${Math.round(layer.weight * 100)}%`;
-        const weight = document.createElement("input");
-        weight.type = "range";
-        weight.min = "0"; weight.max = "100"; weight.step = "1";
-        weight.value = String(Math.round(layer.weight * 100));
-        weight.title = "Layer weight";
-        const wOut = document.createElement("output");
-        wOut.className = "rail-out";
-        wOut.value = `${Math.round(layer.weight * 100)}%`;
-        weight.addEventListener("click", (e) => e.stopPropagation());
-        weight.addEventListener("input", () => {
-          layer.weight = Number(weight.value) / 100;
-          wOut.value = `${Math.round(layer.weight * 100)}%`;
-          rebakeRig();
-        });
-        weight.addEventListener("change", () => { saveRigCache(); renderRigLayers(); });
-        const mute = document.createElement("button");
-        mute.className = "rail-btn" + (layer.enabled ? "" : " muted");
-        mute.textContent = "M";
-        mute.title = layer.enabled ? "Mute this layer" : "Unmute this layer";
-        mute.addEventListener("click", (e) => {
+        input.addEventListener("blur", () => finish(true));
+        queueMicrotask(() => { input.focus(); input.select(); });
+        name = input;
+      } else {
+        const btn = document.createElement("button");
+        btn.className = "rail-name";
+        btn.textContent = layer.name;
+        btn.title = `${layer.name} — ${layer.mode}, ${Math.round(layer.weight * 100)}%, ${keyCount} key${keyCount === 1 ? "" : "s"}. Double-click to rename.`;
+        btn.addEventListener("dblclick", (e) => {
           e.stopPropagation();
-          pushHistory();
-          layer.enabled = !layer.enabled;
-          rebakeRig();
+          renamingLayer = i;
           renderRigLayers();
         });
-        row.append(name, weight, wOut, mute);
-        rail.appendChild(row);
-        if (i === activeLayerIdx) {
-          // The active layer expands with its full properties.
-          const detail = document.createElement("div");
-          detail.className = "rail-detail";
-          const field = (labelText: string, control: HTMLElement) => {
-            const f = document.createElement("label");
-            f.className = "rail-field";
-            const l = document.createElement("span");
-            l.textContent = labelText;
-            f.append(l, control);
-            return f;
-          };
-          const mode = document.createElement("select");
-          mode.title = "Additive nudges the motion by a delta; override replaces it with the keyed pose (scaled by weight).";
-          for (const m of ["additive", "override"] as const) {
-            const o = document.createElement("option");
-            o.value = m; o.textContent = m;
-            if (layer.mode === m) o.selected = true;
-            mode.appendChild(o);
-          }
-          mode.addEventListener("change", () => {
-            pushHistory();
-            // Convert existing keys so the pose survives the mode switch.
-            if (rigBaseClip) convertLayerMode(rigBaseClip, rigLayers, i, mode.value as RigLayer["mode"]);
-            else layer.mode = mode.value as RigLayer["mode"];
-            rebakeRig();
-            renderRigLayers();
-          });
-          const extent = document.createElement("select");
-          extent.title = "Fade: keys ease in/out around the keyed range. Hold: the first/last key extends across the whole clip.";
-          for (const x of ["fade", "hold"] as const) {
-            const o = document.createElement("option");
-            o.value = x; o.textContent = x;
-            if (layer.extent === x) o.selected = true;
-            extent.appendChild(o);
-          }
-          extent.addEventListener("change", () => {
-            pushHistory();
-            layer.extent = extent.value as RigLayer["extent"];
-            rebakeRig();
-            renderRigLayers();
-          });
-          const rowA = document.createElement("div");
-          rowA.className = "rail-frow";
-          rowA.append(field("Mode", mode), field("Extent", extent));
-          detail.appendChild(rowA);
-          if (layer.extent === "fade") {
-            const rowB = document.createElement("div");
-            rowB.className = "rail-frow";
-            const wrap = document.createElement("span");
-            wrap.className = "rail-fade";
-            const fade = document.createElement("input");
-            fade.type = "range";
-            fade.min = "0.1"; fade.max = "2"; fade.step = "0.1";
-            fade.value = String(layer.fadeS);
-            fade.title = "How long a correction eases in/out around its keys";
-            const fOut = document.createElement("output");
-            fOut.className = "rail-out";
-            fOut.value = `${layer.fadeS.toFixed(1)}s`;
-            fade.addEventListener("input", () => {
-              layer.fadeS = Number(fade.value);
-              fOut.value = `${layer.fadeS.toFixed(1)}s`;
-              rebakeRig();
-            });
-            fade.addEventListener("change", () => saveRigCache());
-            wrap.append(fade, fOut);
-            rowB.append(field("Fade", wrap));
-            detail.appendChild(rowB);
-          }
-          const del = document.createElement("button");
-          del.className = "button ghost rail-del";
-          del.textContent = "Delete";
-          del.title = "Delete this layer and its keys";
-          del.addEventListener("click", () => {
-            pushHistory();
-            rigLayers.splice(i, 1);
-            if (activeLayerIdx >= rigLayers.length) activeLayerIdx = rigLayers.length - 1;
-            renderRigLayers();
-            rebakeRig();
-            updateRigEditor();
-          });
-          const rowC = document.createElement("div");
-          rowC.className = "rail-frow rail-actions";
-          rowC.appendChild(del);
-          detail.appendChild(rowC);
-          rail.appendChild(detail);
-        }
+        name = btn;
       }
+      const keys = document.createElement("span");
+      keys.className = "rail-keys";
+      keys.textContent = keyCount ? String(keyCount) : "";
+      keys.title = `${keyCount} key${keyCount === 1 ? "" : "s"} on this layer`;
+      const weight = document.createElement("input");
+      weight.type = "range";
+      weight.min = "0"; weight.max = "100"; weight.step = "1";
+      weight.value = String(Math.round(layer.weight * 100));
+      weight.title = "Layer weight";
+      const wOut = document.createElement("output");
+      wOut.className = "rail-out";
+      wOut.value = `${Math.round(layer.weight * 100)}%`;
+      weight.addEventListener("click", (e) => e.stopPropagation());
+      weight.addEventListener("input", () => {
+        layer.weight = Number(weight.value) / 100;
+        wOut.value = `${Math.round(layer.weight * 100)}%`;
+        rebakeRig();
+      });
+      weight.addEventListener("change", () => { saveRigCache(); renderRigLayers(); });
+      const mute = document.createElement("button");
+      mute.className = "rail-btn" + (layer.enabled ? "" : " muted");
+      mute.textContent = "M";
+      mute.title = layer.enabled ? "Mute this layer" : "Unmute this layer";
+      mute.addEventListener("click", (e) => {
+        e.stopPropagation();
+        pushHistory();
+        layer.enabled = !layer.enabled;
+        rebakeRig();
+        renderRigLayers();
+      });
+      row.append(chip, name, keys, weight, wOut, mute);
+      rail.appendChild(row);
+      if (i !== activeLayerIdx) continue;
+
+      // The active layer expands with its full properties.
+      const detail = document.createElement("div");
+      detail.className = "rail-detail";
+      const field = (labelText: string, control: HTMLElement) => {
+        const f = document.createElement("div");
+        f.className = "rail-field";
+        const l = document.createElement("span");
+        l.textContent = labelText;
+        f.append(l, control);
+        return f;
+      };
+      const mode = railSeg(
+        [
+          { value: "additive", label: "Additive", tip: "Nudges the motion by a delta; the motion keeps playing underneath" },
+          { value: "override", label: "Override", tip: "Replaces the motion with the keyed pose (scaled by weight)" },
+        ],
+        layer.mode,
+        (v) => {
+          pushHistory();
+          // Convert existing keys so the pose survives the mode switch.
+          if (rigBaseClip) convertLayerMode(rigBaseClip, rigLayers, i, v);
+          else layer.mode = v;
+          rebakeRig();
+          renderRigLayers();
+        },
+      );
+      const extent = railSeg(
+        [
+          { value: "fade", label: "Fade", tip: "Keys ease in and out around the keyed range — a local correction" },
+          { value: "hold", label: "Hold", tip: "The first/last key extends across the whole clip" },
+        ],
+        layer.extent,
+        (v) => {
+          pushHistory();
+          layer.extent = v;
+          rebakeRig();
+          renderRigLayers();
+        },
+      );
+      const rowA = document.createElement("div");
+      rowA.className = "rail-frow";
+      rowA.append(field("Mode", mode), field("Extent", extent));
+      detail.appendChild(rowA);
+      if (layer.extent === "fade") {
+        const rowB = document.createElement("div");
+        rowB.className = "rail-frow";
+        const wrap = document.createElement("span");
+        wrap.className = "rail-fade";
+        const fade = document.createElement("input");
+        fade.type = "range";
+        fade.min = "0.1"; fade.max = "2"; fade.step = "0.1";
+        fade.value = String(layer.fadeS);
+        fade.title = "How long a correction eases in/out around its keys";
+        const fOut = document.createElement("output");
+        fOut.className = "rail-out";
+        fOut.value = `${layer.fadeS.toFixed(1)}s`;
+        fade.addEventListener("input", () => {
+          layer.fadeS = Number(fade.value);
+          fOut.value = `${layer.fadeS.toFixed(1)}s`;
+          rebakeRig();
+        });
+        fade.addEventListener("change", () => saveRigCache());
+        wrap.append(fade, fOut);
+        rowB.append(field("Fade", wrap));
+        detail.appendChild(rowB);
+      }
+      const act = (label: string, tip: string, enabled: boolean, run: () => void) => {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.className = "rail-act";
+        b.textContent = label;
+        b.title = tip;
+        b.disabled = !enabled;
+        b.addEventListener("click", (e) => { e.stopPropagation(); run(); });
+        return b;
+      };
+      const move = (to: number) => {
+        pushHistory();
+        [rigLayers[i], rigLayers[to]] = [rigLayers[to], rigLayers[i]];
+        activeLayerIdx = to;
+        rebakeRig();
+        renderRigLayers();
+        updateRigEditor();
+      };
+      const rowC = document.createElement("div");
+      rowC.className = "rail-frow rail-actions";
+      const del = act("Delete", "Delete this layer and its keys", true, () => {
+        pushHistory();
+        rigLayers.splice(i, 1);
+        if (activeLayerIdx >= rigLayers.length) activeLayerIdx = rigLayers.length - 1;
+        renderRigLayers();
+        rebakeRig();
+        updateRigEditor();
+      });
+      del.classList.add("danger");
+      rowC.append(
+        act("↑", "Move up (applies later, on top)", i < rigLayers.length - 1, () => move(i + 1)),
+        act("↓", "Move down (applies earlier, underneath)", i > 0, () => move(i - 1)),
+        act("Rename", "Rename this layer (or double-click its name)", true, () => { renamingLayer = i; renderRigLayers(); }),
+        act("Duplicate", "Copy this layer and its keys", true, () => {
+          pushHistory();
+          const copy = structuredClone(layer);
+          copy.name = `${layer.name} copy`;
+          rigLayers.splice(i + 1, 0, copy);
+          layerCounter++;
+          activeLayerIdx = i + 1;
+          rebakeRig();
+          renderRigLayers();
+          updateRigEditor();
+        }),
+        del,
+      );
+      detail.appendChild(rowC);
+      rail.appendChild(detail);
     }
     transport?.syncRail();
   }
@@ -2370,14 +2482,17 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     if (rigLayersEl) rigLayersEl.innerHTML = "";
   }
 
-  function addRigLayer() {
+  function addRigLayer(mode: RigLayer["mode"] = "additive") {
     pushHistory();
-    rigLayers.push(makeLayer(`Layer ${++layerCounter}`));
+    const layer = makeLayer(`Layer ${++layerCounter}`);
+    layer.mode = mode;
+    rigLayers.push(layer);
     activeLayerIdx = rigLayers.length - 1;
     renderRigLayers();
+    updateRigEditor();
     saveRigCache();
   }
-  rigAddBtn?.addEventListener("click", addRigLayer);
+  rigAddBtn?.addEventListener("click", () => addRigLayer());
 
   // Auto-build: every import gets a working rig with zero clicks — an empty
   // Layer 1 ready to receive keys. Effectors for absent bones are dropped by
@@ -3391,6 +3506,17 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     renderFilters();
     renderRigLayers();
   }
+
+  // Local agent link: edits pushed from a `wry` session on this machine land
+  // through the same path as File > Load rig (one undo step, then a rebuild).
+  agentPanel = {
+    applyRig: async (doc) => {
+      pushHistory();
+      adoptRigState(doc as Parameters<typeof adoptRigState>[0]);
+      rigCacheNote.textContent = "Showing the local agent's edits (live).";
+      await reclean();
+    },
+  };
 
   try {
     const saved = localStorage.getItem(rigCacheKey);
@@ -4786,4 +4912,35 @@ function offerSessionRestore(last: { name: string; bytes: ArrayBuffer }) {
   x.addEventListener("click", () => bar.remove());
   bar.append(label, restore, x);
   document.body.appendChild(bar);
+}
+
+// ---- local agent link ---------------------------------------------------------
+// An AI agent / the `wry` CLI editing a recording on THIS computer can show its
+// session here live (see src/agentLink.ts). Nothing is uploaded: the page
+// reads from that local process on 127.0.0.1. Auto-connects when the URL
+// carries #agent=<code>.
+const agentLink = initAgentLink({
+  loadRecording: async (name, bytes) => {
+    document.querySelector(".restore-bar")?.remove();
+    sampleActive = false;
+    userOpenedFile = true; // cancels the boot auto-restore
+    agentPanel = null;
+    // fromRestore: don't replace the user's own remembered last session.
+    await loadWanim(name, bytes, true);
+  },
+  applyRig: async (doc) => { await agentPanel?.applyRig(doc); },
+  seek: (time) => {
+    preview?.pause();
+    preview?.seek(Math.max(0, Math.min(loaded?.display.duration ?? time, time)));
+  },
+});
+
+function openAgentConnect() {
+  if (agentLink.connected() && !window.confirm("Already connected to a local agent. Connect to a different one?")) return;
+  const text = window.prompt(
+    "Paste the link or code from your local agent (the wry_view tool, or `wry view <file>`).\n\n" +
+    "The recording is read from that program on this computer — nothing is uploaded.",
+  );
+  if (text === null) return;
+  if (!agentLink.connect(text)) showError("That doesn't look like an agent link — it should contain a code like 47823-0123abcd….");
 }

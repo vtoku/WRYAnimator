@@ -1796,6 +1796,40 @@ kbd {
 }
 .restore-bar .restore-x:hover { color: var(--text); }
 
+/* Local agent link status (src/agentLink.ts): a small pill, top-right of the
+   viewport chrome. Green = live, amber = waiting, red = can't reach it. */
+.agent-pill {
+  position: fixed;
+  top: 2.6rem;
+  right: 0.9rem;
+  z-index: 45;
+  max-width: min(26rem, 60vw);
+  padding: 0.3rem 0.7rem 0.3rem 1.45rem;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg-raise);
+  color: var(--text);
+  font-size: 0.75rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+}
+.agent-pill::before {
+  content: "";
+  position: absolute;
+  left: 0.6rem;
+  top: 50%;
+  width: 0.5rem;
+  height: 0.5rem;
+  margin-top: -0.25rem;
+  border-radius: 50%;
+  background: #f5b301;
+}
+.agent-pill[data-state="ok"]::before { background: #3ecf8e; }
+.agent-pill[data-state="err"]::before { background: #ff6b6b; }
+
 /* Animation-layers rail: a real column under the right-side transport
    controls, beside the dope/curves panel (DCC-style stack: newest on top,
    active highlighted, mute + weight per layer). It's an in-flow flex item so
@@ -1818,7 +1852,7 @@ kbd {
 
 .t-rail {
   flex: none;
-  width: 224px;
+  width: 276px;
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -1843,7 +1877,7 @@ kbd {
   display: flex;
   align-items: center;
   gap: 6px;
-  height: 22px;
+  height: 24px;
   padding: 0 6px;
   border-radius: 5px;
   cursor: pointer;
@@ -1885,6 +1919,112 @@ kbd {
 
 .rail-btn:hover { color: var(--text); }
 .rail-btn.muted { color: #ff8a5a; border-color: rgba(255, 138, 90, 0.6); }
+
+/* One-click add buttons in the rail header (no menu to open). */
+.rail-adds { display: flex; gap: 4px; }
+.rail-btn.rail-add {
+  width: auto;
+  height: 20px;
+  padding: 0 7px;
+  font-size: 0.66rem;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--text);
+  background: rgba(40, 46, 56, 0.9);
+  border-radius: 5px;
+  white-space: nowrap;
+}
+.rail-btn.rail-add:hover { border-color: var(--accent); color: var(--accent); }
+
+.rail-empty {
+  margin: 4px 2px;
+  font-size: 0.7rem;
+  line-height: 1.35;
+  color: var(--text-dim);
+}
+
+/* Mode chip on each row: additive vs override at a glance. */
+.rail-chip {
+  flex: none;
+  font-size: 0.52rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  padding: 2px 4px;
+  border-radius: 3px;
+  color: #9ad1ff;
+  background: rgba(63, 193, 255, 0.14);
+}
+.rail-chip.override { color: #ffc46b; background: rgba(245, 179, 1, 0.16); }
+
+.rail-layer.off .rail-name,
+.rail-layer.off .rail-chip { opacity: 0.45; }
+
+.rail-keys {
+  flex: none;
+  min-width: 0.9rem;
+  font-size: 0.62rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim);
+  text-align: right;
+}
+
+.rail-rename {
+  flex: 1;
+  min-width: 0;
+  height: 18px;
+  padding: 0 4px;
+  font-size: 0.75rem;
+  color: var(--text);
+  background: #0e1116;
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  outline: none;
+}
+
+/* Segmented two-way toggle (Mode, Extent): one click instead of a dropdown. */
+.rail-seg {
+  display: flex;
+  height: 22px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  overflow: hidden;
+}
+.rail-seg button {
+  flex: 1;
+  min-width: 0;
+  padding: 0 4px;
+  font-size: 0.68rem;
+  color: var(--text-dim);
+  background: rgba(40, 46, 56, 0.6);
+  border: none;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.rail-seg button + button { border-left: 1px solid var(--border); }
+.rail-seg button:hover { color: var(--text); }
+.rail-seg button.on {
+  color: #14161a;
+  background: var(--accent);
+  font-weight: 600;
+  cursor: default;
+}
+
+/* Active layer's action row. */
+.rail-act {
+  height: 20px;
+  padding: 0 7px;
+  font-size: 0.66rem;
+  color: var(--text);
+  background: rgba(40, 46, 56, 0.9);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.rail-act:hover:not(:disabled) { border-color: rgba(255, 255, 255, 0.35); }
+.rail-act:disabled { opacity: 0.35; cursor: default; }
+.rail-act.danger { margin-left: auto; }
+.rail-act.danger:hover { border-color: #ff6b6b; color: #ff8f8f; }
 
 /* Strip-object lanes: selectable pills under the track (filters, ranges,
    loop, warp keys, plants). */
@@ -1969,7 +2109,7 @@ kbd {
   gap: 10px;
 }
 
-.rail-actions { justify-content: flex-end; }
+.rail-actions { align-items: center; gap: 4px; flex-wrap: wrap; }
 
 .rail-field {
   display: flex;
