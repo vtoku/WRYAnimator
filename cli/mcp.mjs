@@ -196,9 +196,10 @@ export async function serve() {
       obj({ file: FILE_PROP, ...schemaProps("info") }, ["file"]),
       ({ file, ...bag }) => c.info(file, bag));
 
-    add("wry_convert", "Convert to FBX / VRMA",
+    add("wry_convert", "Convert to FBX / VRMA / Unity .anim",
       "One-shot conversion of a .wanim / .scene.json / .fbx to FBX (binary 7.7, 55-bone Unity humanoid; MotionBuilder, Blender, " +
-      "Maya, Unity) or VRMA (Warudo, VSeeFace, Unity). RESAMPLES to a fixed frame rate, so it is for delivery formats, not for " +
+      "Maya, Unity), VRMA (Warudo, VSeeFace, Unity) or a Unity humanoid .anim (BETA: muscle curves + blendshapes, retargets onto any " +
+      "humanoid avatar). RESAMPLES to a fixed frame rate, so it is for delivery formats, not for " +
       "fixing a synced take — use a session and wry_export_wanim for that. Whole-clip cleaning (despike, smooth, fixFeet, …) runs " +
       "only when asked for.",
       false,

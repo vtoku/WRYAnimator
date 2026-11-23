@@ -1,4 +1,4 @@
-import type { ConvertedClip } from "../convert/clip.ts";
+import type { ConvertedClip, FaceTracks } from "../convert/clip.ts";
 import type { Quat, Vec3 } from "../wanim/parse.ts";
 import { quatMul, quatNormalize, quatSlerp, quatRotate, quatToEulerZYX, eulerZYXToQuat } from "../convert/quat.ts";
 import { solveTwoBone, qconj, vadd, vsub, vscale, vlerp, vnorm, vlen } from "../convert/ik.ts";
@@ -201,7 +201,14 @@ export interface RigLayer {
   weight: number; // 0..1
   enabled: boolean;
   tracks: RigTrack[];
+  /** Face blendshape corrections (optional; absent on layers without any). */
+  face?: FaceKeyTrack[];
 }
+
+/** One key on a face blendshape channel. Values are in recorded units (0..1). */
+export interface FaceKey { time: number; v: number; ease?: KeyEase; }
+/** Keys for one blendshape channel: additive = offset, override = value. */
+export interface FaceKeyTrack { name: string; keys: FaceKey[]; }
 
 export function makeLayer(name: string): RigLayer {
   // New layers default to fade — one key makes a LOCAL correction.
@@ -497,6 +504,131 @@ export function clampRetimeDelta(sel: number[], others: number[], dt: number, ga
   return Math.max(lo, Math.min(hi, dt));
 }
 
+// ---- face blendshape keys ------------------------------------------------------
+// Same layer semantics as bones, on scalar channels: additive = base + delta,
+// override = lerp(base, value), both scaled by weight × envelope. Results are
+// clamped to 0..1 on the channels a layer touches; untouched channels and
+// frames outside every key's reach stay the recording's own values.
+
+export function getFaceTrack(layer: RigLayer, name: string, create = false): FaceKeyTrack | null {
+  let t = layer.face?.find((tr) => tr.name === name) ?? null;
+  if (!t && create) {
+    t = { name, keys: [] };
+    (layer.face ??= []).push(t);
+  }
+  return t;
+}
+
+export function setFaceKey(track: FaceKeyTrack, time: number, v: number): void {
+  const i = track.keys.findIndex((k) => Math.abs(k.time - time) < KEY_EPS);
+  if (i >= 0) track.keys[i] = { time, v, ease: track.keys[i].ease };
+  else {
+    track.keys.push({ time, v });
+    track.keys.sort((a, b) => a.time - b.time);
+  }
+}
+
+/** Remove a channel's keys within `eps` of `time`; drops the track when empty. */
+export function deleteFaceKeysAt(layer: RigLayer, name: string, time: number, eps: number): number {
+  const track = getFaceTrack(layer, name);
+  if (!track) return 0;
+  const n = track.keys.length;
+  track.keys = track.keys.filter((k) => Math.abs(k.time - time) > eps);
+  if (!track.keys.length) layer.face = layer.face!.filter((t) => t !== track);
+  return n - track.keys.length;
+}
+
+export const faceKeyCount = (layer: RigLayer): number =>
+  (layer.face ?? []).reduce((n, t) => n + t.keys.length, 0);
+
+export function hasFaceContent(layers: RigLayer[]): boolean {
+  return layers.some((l) => l.enabled && l.weight > 0 && faceKeyCount(l) > 0);
+}
+
+function sampleFace(keys: FaceKey[], t: number): number {
+  if (t <= keys[0].time) return keys[0].v;
+  if (t >= keys[keys.length - 1].time) return keys[keys.length - 1].v;
+  let i = 0;
+  while (keys[i + 1].time < t) i++;
+  const a = keys[i], b = keys[i + 1];
+  const frac = applyEase((t - a.time) / Math.max(1e-9, b.time - a.time), a.ease);
+  return a.v + (b.v - a.v) * frac;
+}
+
+const clamp01 = (x: number): number => (x < 0 ? 0 : x > 1 ? 1 : x);
+
+function faceLayerApply(value: number, layer: RigLayer, track: FaceKeyTrack, t: number): number {
+  const w = layer.weight * envelope(track.keys, t, layer.extent, layer.fadeS);
+  if (w <= 0) return value;
+  const v = sampleFace(track.keys, t);
+  return clamp01(layer.mode === "additive" ? value + v * w : value + (v - value) * w);
+}
+
+/**
+ * One channel's value at frame f with layers [0, count) applied (count =
+ * layers.length for the full stack, the layer's own index for "below it").
+ */
+export function faceValueThrough(
+  face: FaceTracks, times: number[], layers: RigLayer[], count: number, name: string, f: number,
+): number {
+  const n = face.names.indexOf(name);
+  if (n < 0) return 0;
+  let value = face.tracks[n][f];
+  const t = times[f] - times[0];
+  for (let i = 0; i < Math.min(count, layers.length); i++) {
+    const layer = layers[i];
+    if (!layer.enabled || layer.weight <= 0) continue;
+    const track = getFaceTrack(layer, name);
+    if (track && track.keys.length) value = faceLayerApply(value, layer, track, t);
+  }
+  return value;
+}
+
+/**
+ * Key a channel so that it reads `target` at frame f with the stack applied
+ * THROUGH this layer (layers above are not absorbed, as with bone keys).
+ */
+export function keyFaceValue(
+  face: FaceTracks, times: number[], layers: RigLayer[], layerIndex: number, name: string, f: number, target: number,
+): void {
+  const layer = layers[layerIndex];
+  if (!layer || face.names.indexOf(name) < 0) return;
+  const below = faceValueThrough(face, times, layers, layerIndex, name, f);
+  const track = getFaceTrack(layer, name, true)!;
+  setFaceKey(track, times[f] - times[0], layer.mode === "additive" ? clamp01(target) - below : clamp01(target));
+}
+
+/** Bake the face keys of every layer over `base` into `out` (one array per channel). */
+export function bakeFace(base: FaceTracks, times: number[], layers: RigLayer[], out: Float32Array[]): void {
+  for (let n = 0; n < base.tracks.length; n++) if (out[n] !== base.tracks[n]) out[n].set(base.tracks[n]);
+  const t0 = times[0];
+  for (const layer of layers) {
+    if (!layer.enabled || layer.weight <= 0) continue;
+    for (const track of layer.face ?? []) {
+      const n = base.names.indexOf(track.name);
+      if (n < 0 || !track.keys.length) continue;
+      const hold = layer.extent === "hold";
+      const lo = hold ? -Infinity : track.keys[0].time - layer.fadeS;
+      const hi = hold ? Infinity : track.keys[track.keys.length - 1].time + layer.fadeS;
+      const o = out[n];
+      for (let f = 0; f < times.length; f++) {
+        const t = times[f] - t0;
+        if (t < lo) continue;
+        if (t > hi) break;
+        o[f] = faceLayerApply(o[f], layer, track, t);
+      }
+    }
+  }
+}
+
+/** The clip's face tracks with the layers' face keys applied (same object when there are none). */
+export function applyFaceLayers(face: FaceTracks | null, times: number[], layers: RigLayer[]): FaceTracks | null {
+  if (!face || !hasFaceContent(layers)) return face;
+  const tracks = face.tracks.map((t) => new Float32Array(t));
+  bakeFace(face, times, layers, tracks);
+  return { names: face.names, tracks };
+}
+
 // ---- sampling ----------------------------------------------------------------
 
 function samplePos(keys: PosKey[], t: number): Vec3 | null {
@@ -731,11 +863,12 @@ export const unionRange = (a: TimeRange, b: TimeRange): TimeRange => ({
 
 /** Bake the layer stack into a new clip (originals untouched). */
 export function applyRigLayers(clip: ConvertedClip, layers: RigLayer[]): ConvertedClip {
-  if (!hasRigContent(layers)) return clip;
+  const face = applyFaceLayers(clip.face, clip.times, layers);
+  if (!hasRigContent(layers)) return face === clip.face ? clip : { ...clip, face };
   const localPos = clip.localPos.map((t) => t.map((p) => [...p] as Vec3));
   const localQuat = clip.localQuat.map((t) => t.map((q) => [...q] as Quat));
   bakeRange(clip, layers, localPos, localQuat);
-  return { ...clip, localPos, localQuat, bindPos: localPos.map((t) => t[0]) };
+  return { ...clip, localPos, localQuat, bindPos: localPos.map((t) => t[0]), face };
 }
 
 // ---- capture: the rig as an input device --------------------------------------
@@ -1182,6 +1315,15 @@ export function convertLayerMode(
 ): void {
   const layer = layers[layerIndex];
   if (!layer || layer.mode === newMode) return;
+  if (clip.face) {
+    // Face keys: value = below + offset, and back.
+    for (const track of layer.face ?? []) {
+      for (const k of track.keys) {
+        const below = faceValueThrough(clip.face, clip.times, layers, layerIndex, track.name, nearestFrame(clip, k.time));
+        k.v = newMode === "override" ? clamp01(below + k.v) : k.v - below;
+      }
+    }
+  }
   for (const track of layer.tracks) {
     const b = clip.names.indexOf(track.bone);
     if (b < 0) continue;

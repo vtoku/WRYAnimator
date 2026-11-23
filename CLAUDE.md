@@ -59,6 +59,7 @@ npm run cleanCheck -- [file.wanim]           # verify the cleaning filters (desp
 npm run vrmaCheck  -- [file.wanim] [out]     # VRMA exporter structural check (VRMC_vrm_animation layout)
 npm run wanimCheck -- [file.wanim]           # WANIM re-export round-trip: set name + channels + values + bones preserved
 npm run rigCheck   -- [file.wanim]           # control-rig layers + modifiers: additive/override/weight/stacking/IK invariants
+npm run animCheck  -- [file.wanim] [--unity <dir>]  # Unity humanoid .anim (beta): structure + round trip; with --unity, Unity's playback vs the source
 ```
 
 No unit-test framework yet — the three `npm run` scripts above are the regression checks (they import the real `src/` modules). `node --experimental-strip-types` runs the TS directly: see the gotcha below.
@@ -93,7 +94,41 @@ Invariants (all covered by `apiCheck`):
 
 **Layers rail** (`renderLayerRail` in `main.ts`): header always shows `+ Additive` / `+ Override` (first button keeps class `rail-btn` — `railProbe.mjs` clicks it); rows carry a mode chip, key count, weight, mute; the active layer expands with segmented Mode / Extent toggles (`railSeg`, no `<select>`s), fade, and ↑ ↓ Rename Duplicate Delete. Inline rename stops key events from reaching the editor hotkeys. `npm run build && npm run layersCheck` covers it.
 
+**Face blendshape keys** (`RigLayer.face`, optional `FaceKeyTrack[]` = `{name, keys:[{time, v, ease?}]}`): scalar corrections on recorded blendshapes with the same layer semantics as bones (additive = base + offset, override = lerp to value, × weight × envelope, clamped 0..1 on touched channels only). `applyRigLayers` bakes them into `clip.face`, so every RESAMPLED export (FBX, VRMA, WANIM, .anim, and the CLI's `convert --rig`) carries them. The editor's display keeps a PRIVATE copy of the face tracks (`ownFace` in `buildDisplay`) that `rebakeRig` rebakes whole with `bakeFace`, then `preview.refreshFace()` rebuilds the VRM-derived tracks. UI = the Face section of the Rig tab (`#facePanel`: channel select, Value slider that keys on drag and pauses playback, Key / Delete key / prev / next). Keys ride in undo snapshots, the rig cache and `.rig.json` as part of the layer, and are remapped by `remapForWarpChange` and `convertLayerMode`. NOT done: face keys do not show on the timeline strip, dope sheet or curve editor; no API operation creates them (the agent rule "never touch face blendshapes" stands) and the timing-exact WANIM export (`exactWanim.ts`) ignores them — face stays the source's bytes there. `npm run faceKeyCheck -- <file.wanim>` + `npm run build && node scripts/faceWebProbe.mjs <file.wanim>` cover it.
+
 Not built yet (from the agent handoff): headless `render` (before/after images), and the rest of the web-app side — a full `window.wry` API, typed numeric fields in the inspector, a Scan panel. The local link is one-way (agent → page); edits made in the page do not flow back to the agent's session. `matchKeys` / `blendKeysToward` are not exposed as operations.
+
+## Unity humanoid .anim (beta) — `src/anim/`
+
+A fourth export format: a text (YAML) `AnimationClip` with Unity's ~95 humanoid **muscle** curves, `RootT` / `RootQ`, and `blendShape.<name>` curves. Format value `anim`; labelled **beta** everywhere it surfaces (site format menu, File menu, CLI/MCP notes). Like FBX and VRMA it is a RESAMPLED export, and like WANIM it always uses the RECORDED proportions (a humanoid clip is measured against the avatar's own skeleton).
+
+- `src/anim/humanoid.ts` — the muscle math. `buildHumanoidRig()` (per-skeleton axes), `poseToHuman()` (pose → muscles + body transform), `musclesToLocal()` (the forward model). All in UNITY space (left-handed): convert with pos `(−x, y, z)`, quat `(x, −y, −z, w)`.
+- `src/anim/unityAvatarData.ts` — GENERATED constants (per-bone `preQ` / `postQ` / sign, muscle ranges) from a Unity probe of a reference avatar. Regenerate with `scripts/animGenData.mjs`; never edit by hand.
+- `src/anim/writeAnim.ts` — `writeUnityAnim(resampledClip, opts)` → `{bytes, report}`. Key reduction is per muscle (legs and spine tightest, fingers loosest).
+
+Unity does not publish this math. Everything below was MEASURED against Unity 2022.3 in batch mode (`scripts/unity/AnimProbe.cs`), and is the knowledge that is easy to lose:
+
+- **Bone local = `preQ ⊗ ZYRoll(dof · sign) ⊗ conj(postQ)`**, with `ZYRoll(x, y, z) = swing(0, ty, tz, 1) ⊗ roll(tx, 0, 0, 1)`, `t = tan(angle / 2)`. Muscle = angle ÷ max (positive side) or ÷ −min (negative side), degrees. Muscles are NOT clamped to ±1 on playback (verified with values past 3).
+- **Limb twist is distributed** (Unity's default 0.5): half of the upper bone's roll is applied at the lower bone about the upper bone's axis, and half of the lower bone's roll at the hand/foot about the lower bone's axis. The forward model matches Unity to < 0.05° on random muscles. The lower arm/leg has no side-swing muscle, so its direction decides the upper bone's roll.
+- **The inverse is ours, not Unity's.** Bones are fitted in hierarchy order against WORLD targets through the forward model, so hands and feet land exactly and a missing degree of freedom is picked up by the next bone. Unity's own inverse makes different (equally lossy) choices.
+- **Limb twist must be tracked through time.** Two elbow/knee solutions exist (flexed, or hyperextended with the limb turned over) and recordings do hyperextend; choosing per frame flips the twist by 180° between frames. `poseToHuman` carries the twist in `limbState` — pass each frame's result back in as `out`. A roll well past half a turn is let go (`ROLL_LIMIT`) so one tracking glitch does not leave a limb wrung.
+- **Body position = Σ weight · joint position ÷ humanScale**, with fixed per-joint weights (table `MASS`, total 82.5 — recovered to 7 decimals; the left/right ARM asymmetry is Unity's own, not a typo). A joint the avatar lacks hands its weight to its children equally (measured for UpperChest; assumed for other optional bones). `humanScale` = the body centre's height in the T-pose.
+- **Body rotation** = the frame built from the upper-leg and upper-arm joints (up = arms − legs, right = leg vector + arm vector), relative to the same frame in the T-pose. Within 0.04° on real poses; up to a few degrees off on extreme random poses (not chased).
+- **Finger curves are named `LeftHand.Index.1 Stretched`** in a clip, NOT `HumanTrait.MuscleName` ("Left Index 1 Stretched") — Unity silently ignores the latter (they import as generic curves, 40 fewer muscle bindings).
+- **`postQ` follows the bone's direction** (toward its child; the hand continues the forearm; a Chest without an UpperChest aims at the Neck; finger tips reuse the middle segment's axes). Re-aiming the reference by the shortest rotation reproduces Unity to ~0.1° except thumbs (a few degrees of roll).
+- **`preQ` is NOT fully understood** for limbs and fingers: it depends on the T-pose bend plane and does not follow any single rule tried (constant; `post ⊗ K`; relative to the parent's frame). The code uses `post ⊗ K` with `K` from the reference avatar. This is the source of the remaining error on other avatars. The four probe skeletons used (reference, axis-snapped, perturbed, a second real avatar) are the way to test a better rule.
+- **The file**: flow-style keys without weight fields, `m_EditorCurves: []` and an empty `m_ClipBindingConstant` all import fine (Unity rebuilds them). Blendshape curves use `classID: 137` and a mesh path (default `Face`). Clip settings bake the motion into the pose (root transform untouched).
+- **T-pose hips height is not in a `.wanim`**; it sets `humanScale`. The writer estimates it from where the ankles rest in the take (5th percentile) plus the leg length; `tposeHipsHeight` overrides. A wrong value scales the hips' travel, so feet float or sink by that percentage.
+
+Measured accuracy (Unity playback of the exported clip vs the source, world space): reference avatar — hands/feet/head/hips within 0.5°, wrists/ankles within 1.5 mm; a second real avatar — within 2.4° and 11 mm (on a 2 m character). Fingers and especially thumbs lose roll in muscle space whichever tool writes the clip (Unity's own conversion: thumb tips ~15 mm mean).
+
+```bash
+npm run animCheck -- [file.wanim]                                   # writer structure + own round trip (no Unity needed)
+npm run animCheck -- <file.wanim> --unity <scratchUnityProjectDir>  # + Unity imports the clip and its playback is compared with the source
+npm run build && node scripts/animWebProbe.mjs                      # the site's format menu + download
+```
+
+`scripts/animUnity.mjs` runs the probe (`run` = Unity's own muscles and avatar axes for a skeleton + poses; `forward` = muscles → bones; `verify` = import our clip and sample it). It needs a local Unity editor (`UNITY_EXE`, or the newest 2022.3 under Unity Hub) and creates the scratch project on first use. Do NOT wait on Unity with PowerShell `Start-Process -Wait` (it hangs on Unity's helper processes); the script uses `spawnSync`.
 
 ## Build / runtime gotchas
 

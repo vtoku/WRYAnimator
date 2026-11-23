@@ -31,7 +31,7 @@ export { OPS, getOp, runOp, opSchema, ApiError };
 
 export const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 export const VERSION = JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8")).version;
-export const FORMATS = ["fbx", "vrma", "wanim"];
+export const FORMATS = ["fbx", "vrma", "wanim", "anim"];
 
 /** An error whose message is meant for the caller (bad input, not a bug). */
 export class UsageError extends Error {}
@@ -451,11 +451,11 @@ function resolveOutput(input, o) {
   let format = o.format;
   let out = o.out ? resolve(o.out) : null;
   if (out && existsSync(out) && statSync(out).isDirectory()) {
-    if (!format) throw new UsageError("output is a directory — pass a format (fbx | vrma | wanim)");
+    if (!format) throw new UsageError("output is a directory — pass a format (fbx | vrma | anim | wanim)");
     out = join(out, `${input.name}_converted.${format}`);
   }
   if (!format && out) format = extname(out).slice(1).toLowerCase();
-  if (!format) throw new UsageError("no output format — pass an output path ending in .fbx / .vrma / .wanim, or a format");
+  if (!format) throw new UsageError("no output format — pass an output path ending in .fbx / .vrma / .anim / .wanim, or a format");
   oneOf(format, "format", FORMATS);
   if (!out) out = join(dirname(input.path), `${input.name}_converted.${format}`);
   if (resolve(out) === input.path) throw new UsageError("output path is the input file — refusing to overwrite the source");
@@ -464,7 +464,7 @@ function resolveOutput(input, o) {
 
 /**
  * One-shot conversion: run the pipeline, RESAMPLE to a fixed frame rate and
- * write FBX / VRMA / WANIM. Whole-clip cleaning only when asked for.
+ * write FBX / VRMA / Unity .anim (beta) / WANIM. Whole-clip cleaning only when asked for.
  *
  * A .wanim written here has new timestamps and a new frame count — it will
  * not stay in sync with audio. For that, edit in a session and export
@@ -485,14 +485,17 @@ export async function convert(path, o = {}) {
   const mesh = o.mesh !== undefined ? oneOf(o.mesh, "mesh", ["none", "face", "body", "all"]) : "face";
   const wantBodyMesh = format === "fbx" && (mesh === "body" || mesh === "all");
   const wantFaceMesh = format === "fbx" && (mesh === "face" || mesh === "all");
-  const needBody = (format !== "wanim" && edits.proportions === "body") || wantBodyMesh;
+  // .wanim and .anim always describe the RECORDED skeleton: a humanoid .anim is measured against
+  // the avatar's own proportions, and Unity retargets it from there.
+  const recordedOnly = format === "wanim" || format === "anim";
+  const needBody = (!recordedOnly && edits.proportions === "body") || wantBodyMesh;
   const body = needBody ? await loadBody(input, o.body) : null;
   let extractBodyMeshes, bodyToSkinnedMeshExports;
   if (body) ({ extractBodyMeshes, bodyToSkinnedMeshExports } = await import("../src/convert/body.ts"));
 
   const stats = emptyCleanStats();
   const clip = runPipeline(input.converted, edits, {
-    target: format === "wanim" ? "wanim" : "display",
+    target: recordedOnly ? "wanim" : "display",
     stats,
     bodyJoints: body
       ? (parents, bindPos, names) => extractBodyMeshes(body.scene, parents, bindPos, names, body.boneUnity).joints
@@ -501,6 +504,10 @@ export async function convert(path, o = {}) {
   if (format === "wanim") {
     notes.push("RESAMPLED .wanim: frame count and timestamps differ from the source");
     if (edits.proportions === "body") notes.push("wanim output always uses the recorded proportions (a body-mesh fit has no meaning in a .wanim)");
+  }
+  if (format === "anim") {
+    notes.push("Unity humanoid .anim is BETA: verified against Unity on the avatars it was measured on; expect a few degrees of error in arm twist, fingers and thumbs on others");
+    if (edits.proportions === "body") notes.push("anim output always uses the recorded proportions (Unity retargets from the avatar's own skeleton)");
   }
 
   const trimStart = Math.min(exp.trim?.start ?? 0, clip.duration);
@@ -511,9 +518,22 @@ export async function convert(path, o = {}) {
   let bytes;
   const embedded = [];
   let faceChannels = 0;
-  if (format === "wanim") {
+  let animReport;
+  if (format === "anim") {
+    const { writeUnityAnim } = await import("../src/anim/writeAnim.ts");
+    const res = writeUnityAnim(rs, {
+      name: takeName,
+      face: exp.face ? rs.face : null,
+      facePath: o.facePath,
+      hipsHeight: o.tposeHipsHeight,
+      tolerance: o.keyTolerance,
+    });
+    bytes = res.bytes;
+    animReport = res.report;
+    faceChannels = res.report.blendshapeCurves;
+  } else if (format === "wanim") {
     const { writeWanim } = await import("../src/wanim/writeWanim.ts");
-    bytes = writeWanim(rs, input.wanimClip ?? undefined);
+    bytes = writeWanim(exp.face ? rs : { ...rs, face: null }, input.wanimClip ?? undefined); // face off = body-only take
     faceChannels = rs.face?.names.length ?? 0;
   } else {
     const { augmentFaceForVrm } = await import("../src/convert/vrmFaceMap.ts");
@@ -570,7 +590,8 @@ export async function convert(path, o = {}) {
     speed: exp.speed,
     trimS: { start: round(trimStart), end: round(trimEnd) },
     ...(format === "fbx" ? { boneNames: exp.names, restPose: exp.rest, takeName, embeddedMeshes: embedded } : {}),
-    proportions: format === "wanim" ? "recorded" : edits.proportions + (edits.proportions === "body" ? ` (${body.label})` : ""),
+    ...(animReport ? { beta: true, anim: animReport } : {}),
+    proportions: recordedOnly ? "recorded" : edits.proportions + (edits.proportions === "body" ? ` (${body.label})` : ""),
     faceChannels,
     filters: activeFilters(edits.clean),
     changed: statsSummary(edits, stats),

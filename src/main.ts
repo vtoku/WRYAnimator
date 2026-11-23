@@ -10,6 +10,7 @@ import type { PlantSpan } from "./convert/feet.ts";
 import {
   makeLayer, getTrack, getBoneTrack, setPosKey, setRotKey, deleteKeysAt, keyTimes,
   applyRigLayers, nearestFrame,
+  getFaceTrack, deleteFaceKeysAt, faceKeyCount, hasFaceContent, faceValueThrough, keyFaceValue, bakeFace,
   effectorDef, effectorForBone, effectorColor, retimeKeys, keyFullPose,
   bakeRange, bakeRangeAsync, dirtyRange, unionRange, fkDragRef, setKeyEase, reduceKeys, smoothKeys,
   sampleTrackPos, sampleTrackRot, unwrapEulerKeys, matchKeys, flattenKeysToFirst, blendKeysToward, setChannelValues,
@@ -65,6 +66,7 @@ const dock = document.getElementById("dock") as HTMLElement;
 const timelineDock = document.getElementById("timeline-dock") as HTMLElement;
 
 let preview: PreviewScene | null = null;
+let faceUiTimer: ReturnType<typeof setInterval> | undefined; // one playhead poll for the Face panel
 /** Current panel's rig actions, driven by the module-level hotkey listener. */
 let rigHotkeys: {
   undo(): void;
@@ -163,7 +165,7 @@ let previewRecording = false;
 interface MenuActions {
   saveScene(): void;
   saveSceneAs(): void;
-  export(fmt: "fbx" | "vrma" | "wanim" | "shogun"): void;
+  export(fmt: "fbx" | "vrma" | "wanim" | "anim" | "shogun"): void;
   /** File > Export… — the target-preset export dialog. */
   openExport(): void;
   openBody(): void;
@@ -304,6 +306,7 @@ const menuDefs: MenuDef[] = [
       { label: "Export FBX", enabled: hasClip, action: () => menuActions?.export("fbx") },
       { label: "Export VRMA", enabled: hasClip, action: () => menuActions?.export("vrma") },
       { label: "Export WANIM", enabled: hasClip, action: () => menuActions?.export("wanim") },
+      { label: "Export Unity .anim (beta)", enabled: hasClip, action: () => menuActions?.export("anim") },
       { label: "Export Shogun target rig", enabled: shogunAvailable, action: dispatchExportShogun },
       { separator: true },
       { label: "Export preview video...", enabled: () => hasClip() && !previewRecording, action: () => menuActions?.exportPreviewVideo() },
@@ -790,6 +793,25 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
       <div id="handPoseSides"></div>
     </div>
 
+    <div id="facePanel" hidden>
+      <h4 class="group">Face <span class="hint-i" title="Correct a recorded face blendshape. Pick a blendshape, park the playhead, and drag Value: a key lands on the active layer at that frame, like a body key. On an additive layer it is an offset on top of the recording; on an override layer it replaces the recorded value. The layer's fade and weight apply. A dot marks blendshapes that have keys on this layer.">ⓘ</span></h4>
+      <label class="field sub">
+        <span>Blendshape</span>
+        <select id="faceChan" title="The recorded blendshape to correct."></select>
+      </label>
+      <label class="field sub">
+        <span>Value <output id="faceValOut">0%</output></span>
+        <input id="faceVal" type="range" min="0" max="100" step="1" value="0" title="The blendshape's value at the playhead. Dragging keys it on the active layer." />
+      </label>
+      <div class="rig-row">
+        <button id="faceKeyPrev" class="button ghost" title="Jump to this blendshape's previous key on the active layer.">◀</button>
+        <button id="faceKeyBtn" class="button ghost" title="Key the blendshape at its current value, to hold it here while you change it elsewhere.">Key</button>
+        <button id="faceKeyDel" class="button ghost" title="Remove this blendshape's key at the playhead.">Delete key</button>
+        <button id="faceKeyNext" class="button ghost" title="Jump to this blendshape's next key on the active layer.">▶</button>
+      </div>
+      <div id="faceKeyInfo" class="clean-stats"></div>
+    </div>
+
     <h3 class="section">Modifiers <span class="hint-i" title="Whole-clip corrections, no keys needed. Hips keeps the feet planted; knees and elbows swing without moving hips, feet, or hands. Layers apply on top of these.">ⓘ</span></h3>
     <label class="field sub">
       <span>Hips height <output id="modHipsVal">0 cm</output></span>
@@ -852,10 +874,11 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     <div id="exportContent" hidden>
     <div class="rig-row export-actions">
       <input id="outName" class="eb-name" type="text" spellcheck="false" title="Base name for exported files (e.g. myclip-clean → myclip-clean.fbx)" />
-      <select id="format" aria-label="Export format" title="FBX for DCC pipelines; VRMA for Warudo/VSeeFace/Unity; WANIM back into Warudo.">
+      <select id="format" aria-label="Export format" title="FBX for DCC pipelines; VRMA for Warudo/VSeeFace/Unity; WANIM back into Warudo; Unity .anim (beta) is a humanoid clip for Unity.">
         <option value="fbx" selected>FBX</option>
         <option value="vrma">VRMA</option>
         <option value="wanim">WANIM</option>
+        <option value="anim">Unity .anim (beta)</option>
       </select>
       <button id="download" class="button primary">Download</button>
     </div>
@@ -934,7 +957,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
       <button id="reduceAnalyze" class="button ghost" title="Estimate key counts before/after reduction per body part.">Analyze keys</button>
     </div>
     <div id="reduceStats" class="clean-stats"></div>
-    <h4 class="group">Formats <span class="hint-i" title="Format and Download live in the toolbar. Drag the in/out handles on the timeline to trim. FBX comes out as binary 7.5, which animation DCCs can read, with the face and body meshes baked in if you turned them on. VRMA carries the humanoid motion and expressions for Warudo, VSeeFace, and Unity; it plays on any VRM and doesn't need a mesh. WANIM writes the cleaned recording back out so you can take it into Warudo again.">ⓘ</span></h4>
+    <h4 class="group">Formats <span class="hint-i" title="Format and Download live in the toolbar. Drag the in/out handles on the timeline to trim. FBX comes out as binary 7.5, which animation DCCs can read, with the face and body meshes baked in if you turned them on. VRMA carries the humanoid motion and expressions for Warudo, VSeeFace, and Unity; it plays on any VRM and doesn't need a mesh. WANIM writes the cleaned recording back out so you can take it into Warudo again. Unity .anim (beta) is a humanoid clip — muscle curves plus face blendshapes — that Unity retargets onto any humanoid avatar. It is new: hands, feet and head match Unity closely, while arm twist, fingers and thumbs can be a few degrees off on some avatars. Blendshapes are written for a mesh named Face. Long takes make large files, so trim first.">ⓘ</span></h4>
 
     <h4 class="group">Shogun target rig <span class="hint-i" title="A static, world-aligned skeleton plus skinned mesh built straight from your loaded VRM body, for use as a Vicon Shogun retarget target. No animation is baked in. Bone names and hierarchy are kept exactly so name-keyed streaming back into Unity or Warudo still lines up.">ⓘ</span></h4>
     <label class="field">
@@ -1199,13 +1222,19 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
       // in place (fast path — no scene rebuild), which would corrupt the
       // base if they shared storage. applyRigLayers copies only when layers
       // have content, so copy explicitly when it passed the base through.
-      if (baked !== display) return baked;
-      return {
+      // Same for the face tracks: face keys rebake into them in place.
+      const baseFace = display.face;
+      const ownFace = (c: ConvertedClip): ConvertedClip =>
+        c.face && c.face === baseFace
+          ? { ...c, face: { names: c.face.names, tracks: c.face.tracks.map((t) => new Float32Array(t)) } }
+          : c;
+      if (baked !== display) return ownFace(baked);
+      return ownFace({
         ...display,
         localPos: display.localPos.map((t) => t.map((p) => [...p] as Vec3)),
         localQuat: display.localQuat.map((t) => t.map((q) => [...q] as Quat)),
         bindPos: display.bindPos.map((p) => [...p] as Vec3),
-      };
+      });
     }
     return display;
   }
@@ -1592,6 +1621,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
    * editing is never interrupted. Bakes queue, so results stay ordered.
    */
   let bakeQueue: Promise<void> = Promise.resolve();
+  let faceWasBaked = true; // a fresh display may already carry baked face keys
   function rebakeRig(dirty?: TimeRange) {
     if (!loaded || !preview || !rigBaseClip) return;
     bakeQueue = bakeQueue.then(async () => {
@@ -1612,6 +1642,16 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
       }
       if (loaded?.display !== d) return; // reclean replaced the clip mid-bake
       d.bindPos = d.localPos.map((t) => t[0]);
+      // Face keys: always rebaked whole (a few ms), into the display's own arrays.
+      const baseFace = rigBaseClip.face;
+      if (baseFace && d.face && d.face !== baseFace && d.face.tracks.length === baseFace.tracks.length) {
+        const has = hasFaceContent(rigLayers);
+        if (has || faceWasBaked) {
+          bakeFace(baseFace, rigBaseClip.times, rigLayers, d.face.tracks);
+          preview.refreshFace();
+        }
+        faceWasBaked = has;
+      }
       preview.refreshAids(); // motion path/onion sample the arrays just rebaked
       preview.seek(preview.getTime()); // repose from the updated arrays
       saveRigCache();
@@ -1705,6 +1745,112 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     });
   }
 
+  // ---- face blendshape keys --------------------------------------------------
+  const facePanel = document.getElementById("facePanel") as HTMLDivElement;
+  const faceChan = document.getElementById("faceChan") as HTMLSelectElement;
+  const faceVal = document.getElementById("faceVal") as HTMLInputElement;
+  const faceValOut = document.getElementById("faceValOut") as HTMLOutputElement;
+  const faceKeyInfo = document.getElementById("faceKeyInfo") as HTMLDivElement;
+  let faceDragging = false;
+  let faceHistoryPushed = false;
+
+  function faceCtx() {
+    const face = rigBaseClip?.face;
+    if (!rigBaseClip || !face || !preview || !faceChan.value) return null;
+    const f = nearestFrame(rigBaseClip, preview.getTime());
+    const frameS = rigBaseClip.duration / Math.max(1, rigBaseClip.times.length - 1);
+    return { clip: rigBaseClip, face, f, t: rigBaseClip.times[f] - rigBaseClip.times[0], name: faceChan.value, eps: 1.5 * frameS };
+  }
+  const faceKeysHere = (name: string) => {
+    const layer = rigLayers[activeLayerIdx];
+    return layer ? getFaceTrack(layer, name)?.keys ?? [] : [];
+  };
+  /** Light refresh: the slider follows the playhead (skipped mid-drag). */
+  function syncFaceValue() {
+    const c = faceCtx();
+    if (!c) return;
+    if (!faceDragging) {
+      faceVal.value = String(Math.round(faceValueThrough(c.face, c.clip.times, rigLayers, rigLayers.length, c.name, c.f) * 100));
+    }
+    faceValOut.value = `${faceVal.value}%`;
+    const keys = faceKeysHere(c.name);
+    const here = keys.some((k) => Math.abs(k.time - c.t) <= c.eps);
+    const text = keys.length
+      ? `${keys.length} key${keys.length === 1 ? "" : "s"} on this layer${here ? " · key at playhead" : ""}`
+      : "No keys on this layer.";
+    if (faceKeyInfo.textContent !== text) faceKeyInfo.textContent = text;
+  }
+  /** Full refresh: channel list + key dots, then the value. */
+  function syncFaceUi() {
+    const face = rigBaseClip?.face;
+    facePanel.hidden = !face || !face.names.length;
+    if (!face || facePanel.hidden) return;
+    const names = face.names.filter((n) => n !== "trackingStatus").sort((a, b) => a.localeCompare(b));
+    if (faceChan.options.length !== names.length) {
+      const keep = faceChan.value;
+      faceChan.innerHTML = "";
+      for (const n of names) faceChan.add(new Option(n, n));
+      faceChan.value = names.includes(keep) ? keep : names.includes("jawOpen") ? "jawOpen" : names[0];
+    }
+    for (const o of faceChan.options) {
+      const text = (faceKeysHere(o.value).length ? "● " : "") + o.value;
+      if (o.text !== text) o.text = text;
+    }
+    syncFaceValue();
+  }
+  function faceEdit(run: (c: NonNullable<ReturnType<typeof faceCtx>>) => void, history = true) {
+    const c = faceCtx();
+    if (!c || !rigLayers[activeLayerIdx]) return;
+    if (history) pushHistory();
+    run(c);
+    rebakeRig({ t0: c.t, t1: c.t }); // bones untouched; the face bake is always whole
+  }
+  faceChan.addEventListener("change", syncFaceValue);
+  faceVal.addEventListener("pointerdown", () => { faceDragging = true; });
+  faceVal.addEventListener("input", () => {
+    faceDragging = true;
+    const push = !faceHistoryPushed;
+    if (push) preview?.pause(); // a key lands at the playhead: hold it still
+    faceHistoryPushed = true;
+    faceEdit((c) => keyFaceValue(c.face, c.clip.times, rigLayers, activeLayerIdx, c.name, c.f, Number(faceVal.value) / 100), push);
+    faceValOut.value = `${faceVal.value}%`;
+  });
+  faceVal.addEventListener("change", () => {
+    faceDragging = false;
+    faceHistoryPushed = false;
+    renderRigLayers();
+    updateRigEditor();
+  });
+  (document.getElementById("faceKeyBtn") as HTMLButtonElement).addEventListener("click", () => {
+    faceEdit((c) => keyFaceValue(
+      c.face, c.clip.times, rigLayers, activeLayerIdx, c.name, c.f,
+      faceValueThrough(c.face, c.clip.times, rigLayers, activeLayerIdx + 1, c.name, c.f),
+    ));
+    renderRigLayers();
+    updateRigEditor();
+  });
+  (document.getElementById("faceKeyDel") as HTMLButtonElement).addEventListener("click", () => {
+    const c = faceCtx();
+    const layer = rigLayers[activeLayerIdx];
+    if (!c || !layer || !faceKeysHere(c.name).some((k) => Math.abs(k.time - c.t) <= c.eps)) return;
+    faceEdit((x) => { deleteFaceKeysAt(layer, x.name, x.t, x.eps); });
+    renderRigLayers();
+    updateRigEditor();
+  });
+  const faceJump = (dir: -1 | 1) => {
+    const c = faceCtx();
+    if (!c || !preview) return;
+    const keys = faceKeysHere(c.name);
+    const next = dir > 0
+      ? keys.find((k) => k.time > c.t + c.eps / 3)
+      : [...keys].reverse().find((k) => k.time < c.t - c.eps / 3);
+    if (next) { preview.seek(next.time); syncFaceValue(); }
+  };
+  (document.getElementById("faceKeyPrev") as HTMLButtonElement).addEventListener("click", () => faceJump(-1));
+  (document.getElementById("faceKeyNext") as HTMLButtonElement).addEventListener("click", () => faceJump(1));
+  clearInterval(faceUiTimer);
+  faceUiTimer = setInterval(() => { if (activeTab === "rig" && facePanel.isConnected && !facePanel.hidden) syncFaceValue(); }, 150);
+
   // ---- hand pose stamps ----------------------------------------------------
   const handPoseWrap = document.getElementById("handPose") as HTMLDivElement;
   const handPoseSides = document.getElementById("handPoseSides") as HTMLDivElement;
@@ -1790,6 +1936,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
   function updateRigEditor() {
     const layer = rigLayers[activeLayerIdx];
     updatePicker();
+    syncFaceUi();
     // Drop picks that no longer exist (deleted keys, switched layer).
     pickedKeys = layer
       ? pickedKeys.filter((p) => {
@@ -2275,7 +2422,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
     }
     for (let i = rigLayers.length - 1; i >= 0; i--) {
       const layer = rigLayers[i];
-      const keyCount = layer.tracks.reduce((n, tr) => n + keyTimes(tr).length, 0);
+      const keyCount = layer.tracks.reduce((n, tr) => n + keyTimes(tr).length, 0) + faceKeyCount(layer);
       const row = document.createElement("div");
       row.className = "rail-layer" + (i === activeLayerIdx ? " active" : "") + (layer.enabled ? "" : " off");
       row.addEventListener("click", () => {
@@ -2806,6 +2953,7 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
   renderRigLayers();
   buildHandPose();
   buildIkfk();
+  syncFaceUi();
   preview?.setPinned(pinnedEffectors);
   preview?.setFkOnlyLimbs(fkOnlyEffectors());
 
@@ -2875,6 +3023,10 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
         for (const k of tr.rotKeys) k.time = re(k.time);
         tr.posKeys.sort((a, b) => a.time - b.time);
         tr.rotKeys.sort((a, b) => a.time - b.time);
+      }
+      for (const ft of layer.face ?? []) {
+        for (const k of ft.keys) k.time = re(k.time);
+        ft.keys.sort((a, b) => a.time - b.time);
       }
     }
     for (const r of rangeSmooths) {
@@ -3930,8 +4082,10 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
       const fps = exportFpsVal();
       const speed = exportSpeedVal();
       const trim = transport?.getTrim() ?? { start: 0, end: loaded.display.duration };
-      if (format === "wanim") {
+      if (format === "wanim" || format === "anim") {
         // Re-export the cleaned recording as .wanim for re-import into Warudo.
+        // The Unity .anim (beta) shares this clip: a humanoid clip is measured
+        // against the avatar's own skeleton, so it wants the recorded proportions too.
         // Uses the RECORDED proportions (the body-mesh retarget is a mesh-fit
         // concern with no meaning in a .wanim) plus the cleaning + spine
         // changes; hips keep full motion and the character root stays identity.
@@ -3952,8 +4106,15 @@ function buildPanel(name: string, clip: WanimClip, converted: ConvertedClip) {
         }
         clip = applyRigLayers(clip, rigLayers);
         const rs = resample(clip, fps, trim.start, trim.end, speed);
-        const { writeWanim } = await import("./wanim/writeWanim.ts");
-        downloadBytes(`${outBase()}.wanim`, writeWanim(rs, loaded.clip));
+        if (format === "anim") {
+          const { writeUnityAnim } = await import("./anim/writeAnim.ts");
+          const { bytes } = writeUnityAnim(rs, { name: outBase(), face: faceChk.checked ? rs.face : null });
+          downloadBytes(`${outBase()}.anim`, bytes);
+        } else {
+          const { writeWanim } = await import("./wanim/writeWanim.ts");
+          // Face off = a body-only take, so live face tracking can drive the face on playback.
+          downloadBytes(`${outBase()}.wanim`, writeWanim(faceChk.checked ? rs : { ...rs, face: null }, loaded.clip));
+        }
       } else {
       const resampled = resample(loaded.display, fps, trim.start, trim.end, speed);
       if (format === "vrma") {
@@ -4694,10 +4855,11 @@ function buildBodyPanel(name: string, bytes: ArrayBuffer, mappedBones: number, s
       <div id="exportContent" hidden>
     <div class="rig-row export-actions">
       <input id="outName" class="eb-name" type="text" spellcheck="false" title="Base name for exported files (e.g. myclip-clean → myclip-clean.fbx)" />
-      <select id="format" aria-label="Export format" title="FBX for DCC pipelines; VRMA for Warudo/VSeeFace/Unity; WANIM back into Warudo.">
+      <select id="format" aria-label="Export format" title="FBX for DCC pipelines; VRMA for Warudo/VSeeFace/Unity; WANIM back into Warudo; Unity .anim (beta) is a humanoid clip for Unity.">
         <option value="fbx" selected>FBX</option>
         <option value="vrma">VRMA</option>
         <option value="wanim">WANIM</option>
+        <option value="anim">Unity .anim (beta)</option>
       </select>
       <button id="download" class="button primary">Download</button>
     </div>

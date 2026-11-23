@@ -38,7 +38,10 @@ export const OPTIONS = [
 
   // -- output --
   { key: "out", type: "string", short: "o", for: ["convert"], desc: "Output path. The extension picks the format; a directory needs --format. Default: <name>_cleaned.<format> next to the input." },
-  { key: "format", type: "string", short: "f", enum: ["fbx", "vrma", "wanim"], for: ["convert"], desc: "Output format, when not implied by the output path." },
+  { key: "format", type: "string", short: "f", enum: ["fbx", "vrma", "anim", "wanim"], for: ["convert"], desc: "Output format, when not implied by the output path. anim = Unity humanoid .anim (BETA)." },
+  { key: "facePath", type: "string", for: ["convert"], desc: "anim only: hierarchy path of the mesh that owns the face blendshapes (default \"Face\", the usual name in a VRM import)." },
+  { key: "tposeHipsHeight", type: "number", for: ["convert"], desc: "anim only: the avatar's hips height above the ground in its T-pose, meters. Default: estimated from where the feet rest in the take." },
+  { key: "keyTolerance", type: "number", for: ["convert"], desc: "anim only: key reduction tolerance in muscle units (default 0.002; 0 keeps every frame, larger = smaller file)." },
   { key: "overwrite", type: "boolean", for: ["convert", "unpack"], desc: "Replace an existing output file." },
   { key: "resample", type: "boolean", for: ["convert"], desc: "Required to write a .wanim here: convert RESAMPLES (new frame count + timestamps, breaks audio sync). For a timing-exact .wanim use `wry export` / `wry edit`." },
   { key: "fps", type: "number", for: ["convert"], desc: "Output frame rate, 1-240 (default 60, or the scene's)." },

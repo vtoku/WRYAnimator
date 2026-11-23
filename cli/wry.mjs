@@ -30,7 +30,7 @@ const COMMANDS = {
   diff: { args: "<file.wanim> --rig edits.rig.json", op: "diff", about: "What a rig changes versus the recording: bones, frame ranges, max change, edge steps." },
   export: { args: "<file.wanim> [--rig edits.rig.json] -o out.wanim", about: "Write a timing-exact .wanim: original timestamps and frame count, only edited cells changed." },
   ops: { args: "[name]", about: "List the editing operations (for edit scripts), or show one operation's arguments." },
-  convert: { args: "<file> -o out.fbx|.vrma", about: "One-shot conversion to FBX / VRMA (resamples to a fixed frame rate), with optional whole-clip cleaning." },
+  convert: { args: "<file> -o out.fbx|.vrma|.anim", about: "One-shot conversion to FBX / VRMA / Unity humanoid .anim (beta); resamples to a fixed frame rate, with optional whole-clip cleaning." },
   unpack: { args: "<file.scene.json>", about: "Extract the recording, custom body and rig state embedded in a scene file." },
   mcp: { args: "", about: "Run as an MCP server on stdio (for Claude Code / Claude Desktop / other agents)." },
 };

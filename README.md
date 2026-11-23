@@ -12,7 +12,7 @@ Reads a `.wanim` file recorded in [Warudo](https://warudo.app/) and lets you wor
 
 1. Drag a `.wanim` file onto the page (or click to select one).
 2. Watch the animated skeleton in the 3D preview, including a stand-in head that plays back the recorded ARKit face blendshapes, and scrub or pause with the transport bar.
-3. Pick a frame rate and a format (FBX, VRMA, or WANIM), then hit **Download**.
+3. Pick a frame rate and a format (FBX, VRMA, WANIM, or Unity .anim in beta), then hit **Download**.
 4. Import the FBX into Blender, Maya, MotionBuilder, etc., load the VRMA in Warudo/VSeeFace/Unity, or take the cleaned WANIM back into Warudo.
 
 The preview face is for reference only; face data is not written to the FBX (see below).
@@ -22,6 +22,10 @@ The FBX is **binary FBX 7.5** (imports into MotionBuilder, Blender, Maya, Unity)
 - **Bone names**: Unity HumanBodyBones (default), or MotionBuilder/HumanIK names that auto-characterize in MotionBuilder.
 - **Rest pose**: T-pose (default) or the first recorded frame.
 - **Face blendshapes**: embeds a stand-in head mesh carrying the recorded ARKit blendshape animation (52 ARKit channels) as morph targets.
+
+**Face corrections.** The recorded face blendshapes are kept in every export, including a re-saved WANIM. To fix one, open the **Rig** tab, pick it under **Face**, park the playhead and drag **Value**: a key lands on the active layer, like a body key, and the layer's mode, fade and weight apply. Untick **Face blendshapes** before exporting WANIM to get a body-only take, so live face tracking can drive the face when Warudo plays it.
+
+**Unity .anim (beta).** The format menu also offers a Unity humanoid `.anim`: muscle curves, root motion and the recorded face blendshapes, which Unity retargets onto any humanoid avatar. It was built by measuring Unity's own conversion, and Unity's playback of the exported clip is checked against the source motion. Hands, feet, head and hips match closely; arm twist, fingers and thumbs can be a few degrees off on some avatars. Blendshapes are written for a mesh named `Face`. Long takes make large files (about 20 MB per minute at 30 fps), so trim first. From the command line: `node cli/wry.mjs convert take.wanim -o take.anim --fps 30`.
 
 ## Command line and MCP (for scripts and AI agents)
 

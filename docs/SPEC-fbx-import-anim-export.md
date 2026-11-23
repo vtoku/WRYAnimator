@@ -37,6 +37,12 @@ re-export) just works.
 
 ## Phase 2 — Unity humanoid .anim export (with blendshapes)
 
+> **Status: built as a beta (`src/anim/`).** The plan below is kept for
+> history; two things in it turned out differently. Unity IS available as a
+> verification harness (batch mode, `scripts/animUnity.mjs`), and the muscle
+> math was measured from Unity directly instead of mined from prior art. See
+> `CLAUDE.md`, "Unity humanoid .anim (beta)", for what was found.
+
 A `.anim` is a YAML `AnimationClip`. Two viable forms:
 
 1. **Generic clip** (cheap): `m_EulerCurves`/`m_PositionCurves` keyed by

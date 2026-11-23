@@ -820,6 +820,11 @@ export class PreviewScene {
     this.applyAidVisibility();
   }
 
+  /** The clip's face tracks were re-baked in place: rebuild the tracks derived from them. */
+  refreshFace() {
+    if (this.clip?.face && this.bodyFace) this.bodyFace = augmentFaceForVrm(this.clip.face);
+  }
+
   /** The display clip's motion data changed in place (rig rebake) — resample. */
   refreshAids() {
     this.pathCacheOk?.fill(0);

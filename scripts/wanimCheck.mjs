@@ -43,9 +43,14 @@ if (sets0.length === 0) {
   for (let i = 1; i < 8; i++) {
     const f0 = Math.floor((clip.times.length * i) / 8);
     const t = clip.times[f0] - clip.times[0];
-    const f1 = Math.round(t * 60);
+    // Interpolate the 60 fps output at the exact source time: snapping to the
+    // nearest frame reads a fast blink as up to ~0.08 of pure quantization.
+    const fa = Math.min(s1.length - 1, Math.floor(t * 60));
+    const fb = Math.min(s1.length - 1, fa + 1);
+    const frac = Math.max(0, Math.min(1, t * 60 - fa));
     for (const n of n0) {
-      worst = Math.max(worst, Math.abs((s0[f0]?.[n] ?? 0) - (s1[f1]?.[n] ?? 0)));
+      const v1 = (s1[fa]?.[n] ?? 0) + ((s1[fb]?.[n] ?? 0) - (s1[fa]?.[n] ?? 0)) * frac;
+      worst = Math.max(worst, Math.abs((s0[f0]?.[n] ?? 0) - v1));
     }
   }
   check("blendshape values survive (resample tolerance)", worst < 0.05, `worst diff ${worst.toFixed(4)}`);

@@ -24,7 +24,9 @@
     "mcp": "node cli/wry.mjs mcp",
     "apiCheck": "node scripts/apiCheck.mjs",
     "linkCheck": "node scripts/linkCheck.mjs",
-    "layersCheck": "node scripts/layersCheck.mjs"
+    "layersCheck": "node scripts/layersCheck.mjs",
+    "animCheck": "node scripts/animCheck.mjs",
+    "faceKeyCheck": "node scripts/faceKeyCheck.mjs"
   },
   "bin": {
     "wry": "cli/wry.mjs"
